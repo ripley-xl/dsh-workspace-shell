@@ -1,0 +1,14 @@
+packages/shell/LICENSE
+  h_cefcb13ff10a2e 1-21
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2fe4888b43d75b1649f19e0d4d63b06b75e5a68a",
+  "prompts": {},
+  "humans": {
+    "h_cefcb13ff10a2e": {
+      "author": "ripley-xl <ripley-xl@users.noreply.github.com>"
+    }
+  }
+}

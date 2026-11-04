@@ -1,0 +1,487 @@
+test/p1/service/runtime-catalog.test.js
+  h_cefcb13ff10a2e 1-42
+packages/shell/src/browser-guest.js
+  h_cefcb13ff10a2e 1-339
+packages/shell/ssh-remote/src/host/remote-controller.js
+  h_cefcb13ff10a2e 1-221
+test/p2/service/interactions.test.js
+  h_cefcb13ff10a2e 1-66
+test/p2/ui/shell-launcher-browser.test.mjs
+  h_cefcb13ff10a2e 1-102
+scripts/verify-window-drag-browser.mjs
+  h_cefcb13ff10a2e 1-100
+packages/shell/ssh-remote/locale/en.json
+  h_cefcb13ff10a2e 1-6
+test/p2/shell-routes.test.mjs
+  h_cefcb13ff10a2e 1-375
+packages/shell/ssh-remote/src/host/target-probe.js
+  h_cefcb13ff10a2e 1-38
+packages/shell/session-host/controller.js
+  h_cefcb13ff10a2e 1-226
+test/p2/ports/diagnostics.test.js
+  h_cefcb13ff10a2e 1-192
+packages/shell/ssh-remote/controller/README.md
+  h_cefcb13ff10a2e 1-54
+packages/shell/ssh-remote/controller/src/errors.js
+  h_cefcb13ff10a2e 1-25
+test/p2/ui/shell-workspace-selection.test.mjs
+  h_cefcb13ff10a2e 1-105
+packages/shell/ssh-remote/src/host/runtime-catalog.js
+  h_cefcb13ff10a2e 1-44
+packages/shell/ssh-remote/controller/src/index.js
+  h_cefcb13ff10a2e 1-6
+test/p2/ui/shell-adapter.test.mjs
+  h_cefcb13ff10a2e 1-598
+packages/tianshu-profile/locale/zh.json
+  h_cefcb13ff10a2e 1-6
+packages/shell/guest-cwd/index.js
+  h_cefcb13ff10a2e 1-2
+test/p2/transport/config.test.mjs
+  h_cefcb13ff10a2e 1-70
+packages/shell/ssh-remote/src/host/ssh/sftp.js
+  h_cefcb13ff10a2e 1-107
+test/p2/plugin-sharing/remote-client.integration.test.js
+  h_cefcb13ff10a2e 1-126
+test/p1/service/lifecycle.test.js
+  h_cefcb13ff10a2e 1-59
+test/p2/service/version-status.test.js
+  h_cefcb13ff10a2e 1-62
+packages/shell/src/entry.js
+  h_cefcb13ff10a2e 1-154
+packages/shell/ssh-remote/plugins/status/src/host/plugin-sharing.js
+  h_cefcb13ff10a2e 1-219
+test/p1/service/npm-bootstrap.test.js
+  h_cefcb13ff10a2e 1-64
+packages/shell/src/terminal-document.js
+  h_cefcb13ff10a2e 1-180
+packages/shell/ssh-remote/src/host/ssh/index.js
+  h_cefcb13ff10a2e 1-33
+packages/shell/ssh-remote/src/host/ssh/hosts.js
+  h_cefcb13ff10a2e 1-333
+test/p2/service/auto-connect.test.js
+  h_cefcb13ff10a2e 1-98
+scripts/build-shell-client.mjs
+  h_cefcb13ff10a2e 1-99
+test/p0/transport/known-hosts.test.mjs
+  h_cefcb13ff10a2e 1-134
+packages/shell/ssh-remote/src/host/ssh/exec.js
+  h_cefcb13ff10a2e 1-220
+packages/shell/ssh-remote/src/host/remote-sync.js
+  h_cefcb13ff10a2e 1-83
+test/p2/service/controller-profiles.test.js
+  h_cefcb13ff10a2e 1-148
+packages/shell/ssh-remote/plugins/status/client.js
+  h_cefcb13ff10a2e 1-637
+packages/shell/src/adapter.js
+  h_cefcb13ff10a2e 1-116
+LICENSE
+  h_cefcb13ff10a2e 1-21
+test/p2/ui/test-discovery.test.mjs
+  h_cefcb13ff10a2e 1-49
+test/p2/plugin-sharing/status-routes.test.js
+  h_cefcb13ff10a2e 1-224
+packages/shell/ssh-remote/index.js
+  h_cefcb13ff10a2e 1
+test/p0/runtime/helpers.mjs
+  h_cefcb13ff10a2e 1-94
+packages/shell/ssh-remote/controller/src/install.js
+  h_cefcb13ff10a2e 1-286
+packages/shell/ssh-remote/src/host/interactions.js
+  h_cefcb13ff10a2e 1-126
+packages/shell/src/desktop-guest.js
+  h_cefcb13ff10a2e 1-481
+test/p2/ui/session-host-client.test.mjs
+  h_cefcb13ff10a2e 1-197
+packages/shell/ssh-remote/src/host/diagnostics.js
+  h_cefcb13ff10a2e 1-211
+pnpm-workspace.yaml
+  h_cefcb13ff10a2e 1-2
+test/p2/ui/shell-workspace-client.test.mjs
+  h_cefcb13ff10a2e 1-1654
+test/p2/service/platform-catalog.test.js
+  h_cefcb13ff10a2e 1-40
+packages/shell/assets/LICENSE-addon-fit.txt
+  h_cefcb13ff10a2e 1-19
+test/p0/status-routes.test.js
+  h_cefcb13ff10a2e 1-78
+test/p0/runtime/verify-http.mjs
+  h_cefcb13ff10a2e 1-32
+packages/shell/assets/LICENSE-xterm.txt
+  h_cefcb13ff10a2e 1-21
+test/p2/service/vm-preview.integration.test.mjs
+  h_cefcb13ff10a2e 1-241
+packages/shell/src/frame.js
+  h_cefcb13ff10a2e 1-434
+packages/shell/ssh-remote/src/host/open-remote-host.js
+  h_cefcb13ff10a2e 1-101
+packages/shell/ssh-remote/src/client/workspace-extension.js
+  h_cefcb13ff10a2e 1-213
+test/p1/service/service.test.js
+  h_cefcb13ff10a2e 1-112
+test/p2/tianshu-profile.test.mjs
+  h_cefcb13ff10a2e 1-33
+test/p2/service/preview.test.js
+  h_cefcb13ff10a2e 1-102
+scripts/verify-session-host-browser.mjs
+  h_cefcb13ff10a2e 1-162
+packages/shell/ssh-remote/controller/src/cli.js
+  h_cefcb13ff10a2e 1-254
+packages/shell/src/host/routes.js
+  h_cefcb13ff10a2e 1-82
+test/p2/service/resolved-settings.test.js
+  h_cefcb13ff10a2e 1-71
+packages/shell/assets/xterm.js
+  h_cefcb13ff10a2e 1-2
+test/p0/transport/sftp.test.mjs
+  h_cefcb13ff10a2e 1-109
+packages/shell/ssh-remote/plugins/status/src/host/index.js
+  h_cefcb13ff10a2e 1-151
+test/p2/ui/shell-chrome-tabs.test.mjs
+  h_cefcb13ff10a2e 1-869
+packages/shell/ssh-remote/plugins/status/locale/en.json
+  h_cefcb13ff10a2e 1-6
+packages/shell/ssh-remote/src/host/service.js
+  h_cefcb13ff10a2e 1-1437
+test/p2/ui/react-harness.mjs
+  h_cefcb13ff10a2e 1-198
+packages/shell/src/web-timing.js
+  h_cefcb13ff10a2e 1-140
+packages/shell/ssh-remote/src/host/remote-client.js
+  h_cefcb13ff10a2e 1-142
+test/p1/service/sync-input.test.js
+  h_cefcb13ff10a2e 1-54
+test/p0/transport/helpers.mjs
+  h_cefcb13ff10a2e 1-52
+packages/shell/ssh-remote/src/host/ssh/proxy.js
+  h_cefcb13ff10a2e 1-180
+test/p2/service/plugin-sharing.test.js
+  h_cefcb13ff10a2e 1-67
+test/p0/transport/exec.test.mjs
+  h_cefcb13ff10a2e 1-160
+packages/shell/assets/addon-fit.js
+  h_cefcb13ff10a2e 1-2
+packages/shell/ssh-remote/src/host/ssh/known-hosts.js
+  h_cefcb13ff10a2e 1-212
+test/p2/tui-command.test.mjs
+  h_cefcb13ff10a2e 1-39
+test/p2/ui/shell-tui-provider.test.mjs
+  h_cefcb13ff10a2e 1-767
+packages/shell/session-host/ui.js
+  h_cefcb13ff10a2e 1-64
+packages/shell/src/geometry.js
+  h_cefcb13ff10a2e 1-52
+README.md
+  h_cefcb13ff10a2e 1-79
+test/p2/service/ssh-hosts.test.js
+  h_cefcb13ff10a2e 1-32
+packages/shell/ssh-remote/controller/.gitignore
+  h_cefcb13ff10a2e 1-3
+test/p2/service/all-supported-store.test.js
+  h_cefcb13ff10a2e 1-16
+packages/shell/guest-cwd/package.json
+  h_cefcb13ff10a2e 1-31
+packages/shell/session-host/index.js
+  h_cefcb13ff10a2e 1-65
+packages/shell/ssh-remote/controller/src/profiles.js
+  h_cefcb13ff10a2e 1-91
+.gitignore
+  h_cefcb13ff10a2e 1-11
+packages/tianshu-profile/package.json
+  h_cefcb13ff10a2e 1-29
+test/p2/ui/shell-input-gate.test.mjs
+  h_cefcb13ff10a2e 1-763
+packages/shell/ssh-remote/src/host/remote-host.js
+  h_cefcb13ff10a2e 1-144
+packages/shell/assets/terminal-document.js
+  h_cefcb13ff10a2e 1-182
+test/p2/ui/ssh-workspace-extension.test.mjs
+  h_cefcb13ff10a2e 1-152
+packages/shell/index.js
+  h_cefcb13ff10a2e 1-25
+packages/shell/ssh-remote/src/client/ssh-launcher.js
+  h_cefcb13ff10a2e 1-1447
+test/p2/service/official-sync-input.test.js
+  h_cefcb13ff10a2e 1-43
+packages/shell/ssh-remote/controller/src/activity.js
+  h_cefcb13ff10a2e 1-15
+packages/shell/src/host/session-hosts.js
+  h_cefcb13ff10a2e 1-199
+test/p2/ui/shell-guest-cwd.test.mjs
+  h_cefcb13ff10a2e 1-477
+packages/shell/locale/en.json
+  h_cefcb13ff10a2e 1-6
+test/p2/service/multi-profile.test.js
+  h_cefcb13ff10a2e 1-349
+test/p2/ui/experience-redesign.test.mjs
+  h_cefcb13ff10a2e 1-106
+test/p2/ui/status-redesign.test.mjs
+  h_cefcb13ff10a2e 1-480
+packages/shell/ssh-remote/src/host/service-extensions.js
+  h_cefcb13ff10a2e 1-77
+docs/workspace-instances-design.md
+  h_cefcb13ff10a2e 1-14,16,18-27
+  h_cefcb13ff10a2e 15,17
+packages/shell/ssh-remote/controller/src/util.js
+  h_cefcb13ff10a2e 1-224
+test/p2/transport/authentication.test.mjs
+  h_cefcb13ff10a2e 1-235
+test/p0/remote-host.test.js
+  h_cefcb13ff10a2e 1-81
+test/p2/plugin-sharing/install-existing.test.js
+  h_cefcb13ff10a2e 1-60
+test/p2/ui/shell-ssh-launcher.test.mjs
+  h_cefcb13ff10a2e 1-769
+packages/shell/ssh-remote/icon.svg
+  h_cefcb13ff10a2e 1-5
+docs/local-workspace-tabs.md
+  h_cefcb13ff10a2e 1-2,4-82,84-99
+  h_cefcb13ff10a2e 3,83
+packages/shell/ssh-remote/locale/zh.json
+  h_cefcb13ff10a2e 1-6
+packages/shell/locale/zh.json
+  h_cefcb13ff10a2e 1-6
+packages/shell/src/chrome-tabs.js
+  h_cefcb13ff10a2e 1-691
+packages/shell/ssh-remote/plugins/status/package.json
+  h_cefcb13ff10a2e 1-36
+packages/shell/README.md
+  h_cefcb13ff10a2e 1-22
+test/p2/shell-runtime-tool.test.mjs
+  h_cefcb13ff10a2e 1-335
+test/p1/ui/status-client.test.mjs
+  h_cefcb13ff10a2e 1-73
+packages/shell/ssh-remote/controller/src/locks.js
+  h_cefcb13ff10a2e 1-61
+test/p1/ui/helpers.mjs
+  h_cefcb13ff10a2e 1-51
+packages/shell/src/workspace-client.js
+  h_cefcb13ff10a2e 1-784
+packages/shell/src/host/tui-adapters.js
+  h_cefcb13ff10a2e 1-79
+test/p2/service/initial-sync-backup.test.js
+  h_cefcb13ff10a2e 1-111
+packages/tianshu-profile/locale/en.json
+  h_cefcb13ff10a2e 1-6
+test/p0/remote-sync.test.js
+  h_cefcb13ff10a2e 1-52
+test/p2/session-host-boot.test.mjs
+  h_cefcb13ff10a2e 1-90
+test/p2/ui/shell-entry.test.mjs
+  h_cefcb13ff10a2e 1-112
+test/p2/plugin-sharing/sync-backup.test.js
+  h_cefcb13ff10a2e 1-151
+test/p2/ports/ports.test.js
+  h_cefcb13ff10a2e 1-291
+packages/shell/ssh-remote/controller/src/instances.js
+  h_cefcb13ff10a2e 1-464
+test/p2/local-runtimes.test.mjs
+  h_cefcb13ff10a2e 1-843
+test/p2/ui/shell-tab-state.test.mjs
+  h_cefcb13ff10a2e 1-718
+packages/shell/ssh-remote/controller/src/process.js
+  h_cefcb13ff10a2e 1-48
+test/p2/plugin-sharing/plugin-share.test.js
+  h_cefcb13ff10a2e 1-157
+packages/shell/ssh-remote/plugins/status/icon.svg
+  h_cefcb13ff10a2e 1-4
+docs/ssh-workspace-component-design.md
+  h_cefcb13ff10a2e 1-4,6,11-21,25,27-29
+  h_cefcb13ff10a2e 5,7-10,22-24,26
+test/p2/session-hosts.test.mjs
+  h_cefcb13ff10a2e 1-136
+packages/shell/package.json
+  h_cefcb13ff10a2e 1-72
+packages/shell/src/host/local-version.js
+  h_cefcb13ff10a2e 1-27
+packages/shell/ssh-remote/src/host/plugin-share.js
+  h_cefcb13ff10a2e 1-117
+test/p0/runtime/supervisor.test.js
+  h_cefcb13ff10a2e 1-212
+packages/shell/ssh-remote/src/host/profiles.js
+  h_cefcb13ff10a2e 1-91
+test/p0/remote-client.test.js
+  h_cefcb13ff10a2e 1-60
+packages/tianshu-profile/icon.svg
+  h_cefcb13ff10a2e 1
+packages/shell/cordis.patch.yml
+  h_cefcb13ff10a2e 1-3
+packages/shell/ssh-remote/src/host/ssh/errors.js
+  h_cefcb13ff10a2e 1-33
+packages/shell/src/host/runtime-tool.js
+  h_cefcb13ff10a2e 1-291
+packages/shell/guest-cwd/cordis.patch.yml
+  h_cefcb13ff10a2e 1-4
+packages/shell/guest-cwd/client.js
+  h_cefcb13ff10a2e 1-136
+test/p2/ui/shell-frame.test.mjs
+  h_cefcb13ff10a2e 1-768
+test/p2/service/connection-record.test.js
+  h_cefcb13ff10a2e 1-25
+test/p1/service/helpers.mjs
+  h_cefcb13ff10a2e 1-314
+test/p1/service/routes.test.js
+  h_cefcb13ff10a2e 1-99
+test/p0/runtime/README.md
+  h_cefcb13ff10a2e 1-7
+test/p0/transport/config.test.mjs
+  h_cefcb13ff10a2e 1-135
+packages/shell/ssh-remote/src/host/shared-start.js
+  h_cefcb13ff10a2e 1-69
+packages/shell/ssh-remote/controller/src/constants.js
+  h_cefcb13ff10a2e 1-17
+packages/shell/src/tab-state.js
+  h_cefcb13ff10a2e 1-172
+test/p2/service/remote-host-profile.test.js
+  h_cefcb13ff10a2e 1-139
+test/p0/transport/gateway.test.mjs
+  h_cefcb13ff10a2e 1-194
+packages/shell/src/tui-provider.js
+  h_cefcb13ff10a2e 1-253
+test/p1/service/vm.integration.test.mjs
+  h_cefcb13ff10a2e 1-219
+test/p2/ui/helpers.mjs
+  h_cefcb13ff10a2e 1-33
+test/p2/service/status-preview-routes.test.js
+  h_cefcb13ff10a2e 1-49
+packages/shell/ssh-remote/src/host/ports.js
+  h_cefcb13ff10a2e 1-291
+test/p2/service/web-routes.test.js
+  h_cefcb13ff10a2e 1-95
+packages/shell/src/host/local-runtimes.js
+  h_cefcb13ff10a2e 1-816
+test/p2/service/workspace-model.test.js
+  h_cefcb13ff10a2e 1-22
+packages/shell/ssh-remote/src/host/index.js
+  h_cefcb13ff10a2e 1-303
+test/p0/runtime/controller.test.js
+  h_cefcb13ff10a2e 1-133
+test/p2/ui/shell-desktop-guest.test.mjs
+  h_cefcb13ff10a2e 1-879
+test/p0/transport/default-client.test.mjs
+  h_cefcb13ff10a2e 1-44
+test/p2/ui/shell-browser-guest.test.mjs
+  h_cefcb13ff10a2e 1-541
+test/p0/transport/vm.integration.test.mjs
+  h_cefcb13ff10a2e 1-135
+packages/shell/ssh-remote/plugins/status/index.js
+  h_cefcb13ff10a2e 1
+packages/shell/src/input-gate.js
+  h_cefcb13ff10a2e 1-196
+test/p2/service/all-supported-input.test.js
+  h_cefcb13ff10a2e 1-116
+packages/shell/ssh-remote/src/host/ssh/config.js
+  h_cefcb13ff10a2e 1-319
+packages/shell/ssh-remote/plugins/status/locale/zh.json
+  h_cefcb13ff10a2e 1-6
+packages/shell/src/launcher.js
+  h_cefcb13ff10a2e 1-605
+test/p2/ui/status-lifecycle.test.mjs
+  h_cefcb13ff10a2e 1-121
+test/p0/transport/connection.test.mjs
+  h_cefcb13ff10a2e 1-134
+test/fixtures/session-host-seed.js
+  h_cefcb13ff10a2e 1-27
+docs/workspace-launcher-design.md
+  h_cefcb13ff10a2e 1-237
+scripts/verify-workspace-bundle.mjs
+  h_cefcb13ff10a2e 1-36
+packages/shell/ssh-remote/src/host/ssh/gateway.js
+  h_cefcb13ff10a2e 1-183
+test/p2/transport/gateway-resilience.test.mjs
+  h_cefcb13ff10a2e 1-75
+packages/shell/ssh-remote/controller/package.json
+  h_cefcb13ff10a2e 1-23
+packages/shell/assets/xterm.css
+  h_cefcb13ff10a2e 1-285
+test/p0/open-remote-host.test.js
+  h_cefcb13ff10a2e 1-23
+packages/shell/ssh-remote/src/host/sync-input.js
+  h_cefcb13ff10a2e 1-500
+packages/shell/ssh-remote/src/host/ssh/connection.js
+  h_cefcb13ff10a2e 1-286
+packages/shell/ssh-remote/plugins/status/cordis.patch.yml
+  h_cefcb13ff10a2e 1-7
+packages/shell/ssh-remote/controller/src/supervisor.js
+  h_cefcb13ff10a2e 1-290
+packages/shell/ssh-remote/plugins/status/src/host/sync-backup.js
+  h_cefcb13ff10a2e 1-111
+test/p2/transport/vm.integration.test.mjs
+  h_cefcb13ff10a2e 1-165
+test/p2/service/manager-preview-route.test.js
+  h_cefcb13ff10a2e 1-32
+docs/session-host-navigation-design.md
+  h_cefcb13ff10a2e 1-54
+test/p0/remote-controller-adapter.test.js
+  h_cefcb13ff10a2e 1-67
+packages/tianshu-profile/cordis.patch.yml
+  h_cefcb13ff10a2e 1-7
+packages/shell/ssh-remote/controller/src/platform.js
+  h_cefcb13ff10a2e 1-67
+test/p2/runtime/README.md
+  h_cefcb13ff10a2e 1-5
+test/p2/transport/hosts.test.mjs
+  h_cefcb13ff10a2e 1-213
+test/p2/ui/shell-geometry.test.mjs
+  h_cefcb13ff10a2e 1-263
+packages/shell/ssh-remote/src/host/store.js
+  h_cefcb13ff10a2e 1-224
+test/p0/runtime/npm-install.test.js
+  h_cefcb13ff10a2e 1-110
+packages/shell/src/host/command-line.js
+  h_cefcb13ff10a2e 1-46
+test/p2/transport/vm-fixture.mjs
+  h_cefcb13ff10a2e 1-171
+packages/shell/ssh-remote/src/host/controller-session.js
+  h_cefcb13ff10a2e 1-47
+packages/shell/LICENSE
+  h_cefcb13ff10a2e 1-21
+packages/shell/session-host/submissions.js
+  h_cefcb13ff10a2e 1-58
+test/p0/run.mjs
+  h_cefcb13ff10a2e 1-168
+packages/shell/src/tab-controller.js
+  h_cefcb13ff10a2e 1-367
+test/p2/ports/service-extensions.test.js
+  h_cefcb13ff10a2e 1-100
+packages/shell/ssh-remote/src/host/ssh/authentication.js
+  h_cefcb13ff10a2e 1-202
+test/p2/service/service-preview.test.js
+  h_cefcb13ff10a2e 1-85
+test/p0/runtime/profiles.test.js
+  h_cefcb13ff10a2e 1-149
+packages/shell/src/styles.js
+  h_cefcb13ff10a2e 1-41
+scripts/package-workspace-bundle.mjs
+  h_cefcb13ff10a2e 1-17
+packages/shell/icon.svg
+  h_cefcb13ff10a2e 1
+packages/shell/ssh-remote/src/host/ssh/control-channel.js
+  h_cefcb13ff10a2e 1-73
+test/p2/ui/shell-tab-controller.test.mjs
+  h_cefcb13ff10a2e 1-1297
+test/p2/transport/proxy.test.mjs
+  h_cefcb13ff10a2e 1-241
+test/p1/service/store.test.js
+  h_cefcb13ff10a2e 1-58
+pnpm-lock.yaml
+  h_cefcb13ff10a2e 1-2374
+package.json
+  h_cefcb13ff10a2e 1-24
+scripts/test.mjs
+  h_cefcb13ff10a2e 1-27
+packages/shell/src/host/session-views.js
+  h_cefcb13ff10a2e 1-77
+packages/shell/client.js
+  h_cefcb13ff10a2e 1-6968
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "219279577d865a649583035107de92bc5280e5a1",
+  "prompts": {},
+  "humans": {
+    "h_cefcb13ff10a2e": {
+      "author": "ripley-xl <ripley-xl@users.noreply.github.com>"
+    }
+  }
+}

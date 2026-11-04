@@ -1,0 +1,4 @@
+- insert:
+    - id: workspace-shell-guest-cwd
+      name: ./index.js
+      config: {}

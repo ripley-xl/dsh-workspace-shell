@@ -1,0 +1,29 @@
+{
+  "name": "dsh-workspace-tianshu-profile",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Profile-local preferences and history for the workspace Tianshu TUI integration.",
+  "license": "MIT",
+  "engines": {
+    "dsh": "0.2.1-rc.5"
+  },
+  "peerDependencies": {
+    "@huiliyi37/dsh-tianshu-tui": "1.0.0-rc.4"
+  },
+  "exports": {
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

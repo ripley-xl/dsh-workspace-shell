@@ -1,0 +1,75 @@
+{
+  "name": "dsh-workspace-shell",
+  "version": "0.1.1",
+  "type": "module",
+  "description": "Workspace tabs and SSH remote workspaces for DeepSeek Harness",
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "workspace",
+    "ssh",
+    "remote"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ripley-xl/dsh-workspace-shell.git",
+    "directory": "packages/shell"
+  },
+  "homepage": "https://github.com/ripley-xl/dsh-workspace-shell#readme",
+  "bugs": {
+    "url": "https://github.com/ripley-xl/dsh-workspace-shell/issues"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "src/**/*.js",
+    "ssh-remote/src/**/*.js",
+    "ssh-remote/index.js",
+    "ssh-remote/locale/*.json",
+    "ssh-remote/icon.svg",
+    "cordis.patch.yml",
+    "guest-cwd/index.js",
+    "guest-cwd/client.js",
+    "guest-cwd/cordis.patch.yml",
+    "guest-cwd/package.json",
+    "session-host/*.js",
+    "locale/*.json",
+    "icon.svg",
+    "assets/*",
+    "ssh-remote/controller/src/**/*.js",
+    "ssh-remote/controller/package.json",
+    "ssh-remote/plugins/**/*"
+  ],
+  "dependencies": {
+    "ssh2": "^1.17.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-workspace",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-shortcuts"
+      ]
+    }
+  },
+  "engines": {
+    "dsh": "0.2.1-rc.5"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.5",
+    "@deepseek-ai/cordis-plugin-loader": "~1.0.6",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.5"
+  }
+}

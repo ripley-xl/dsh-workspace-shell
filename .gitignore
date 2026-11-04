@@ -1,0 +1,11 @@
+*.log
+*.tgz
+.DS_Store
+.brainstorm/
+.build/
+.cache/
+.env
+.env.*
+artifacts/
+coverage/
+node_modules/

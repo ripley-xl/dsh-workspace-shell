@@ -1,0 +1,496 @@
+test/p0/open-remote-host.test.js
+  h_a228dabb101da7 1-23
+packages/shell/locale/en.json
+  h_a228dabb101da7 1-6
+test/p2/service/resolved-settings.test.js
+  h_a228dabb101da7 1-71
+packages/shell/src/host/session-hosts.js
+  h_a228dabb101da7 1-199
+packages/manager/src/host/open-remote-host.js
+  h_a228dabb101da7 1-104
+packages/status/package.json
+  h_a228dabb101da7 1-29
+packages/manager/src/host/ssh/authentication.js
+  h_a228dabb101da7 1-202
+test/p2/ports/service-extensions.test.js
+  h_a228dabb101da7 1-100
+test/p2/plugin-sharing/plugin-share.test.js
+  h_a228dabb101da7 1-157
+package.json
+  h_a228dabb101da7 1-24
+test/p2/ui/shell-frame.test.mjs
+  h_a228dabb101da7 1-768
+packages/manager/src/host/controller-session.js
+  h_a228dabb101da7 1-50
+packages/manager/src/host/ssh/errors.js
+  h_a228dabb101da7 1-33
+packages/tianshu-profile/locale/zh.json
+  h_a228dabb101da7 1-6
+test/p2/service/official-sync-input.test.js
+  h_a228dabb101da7 1-43
+test/p0/run.mjs
+  h_a228dabb101da7 1-171
+packages/shell/src/browser-guest.js
+  h_a228dabb101da7 1-339
+test/p2/transport/authentication.test.mjs
+  h_a228dabb101da7 1-235
+docs/workspace-launcher-design.md
+  h_a228dabb101da7 1-278
+test/p2/service/all-supported-store.test.js
+  h_a228dabb101da7 1-16
+packages/shell/src/tab-state.js
+  h_a228dabb101da7 1-172
+docs/workspace-instances-design.md
+  h_a228dabb101da7 1-29
+controller/runtime/package-lock.json
+  h_a228dabb101da7 1-9946
+packages/manager/src/host/runtime-catalog.js
+  h_a228dabb101da7 1-177
+test/p2/session-host-boot.test.mjs
+  h_a228dabb101da7 1-111
+test/p0/runtime/controller.test.js
+  h_a228dabb101da7 1-133
+controller/src/index.js
+  h_a228dabb101da7 1-6
+packages/tianshu-profile/package.json
+  h_a228dabb101da7 1-29
+test/p2/ui/ssh-workspace-extension.test.mjs
+  h_a228dabb101da7 1-165
+test/p2/runtime/macos-smoke.mjs
+  h_a228dabb101da7 1-112
+test/p2/ui/shell-desktop-guest.test.mjs
+  h_a228dabb101da7 1-879
+packages/status/src/host/sync-backup.js
+  h_a228dabb101da7 1-111
+test/p2/ui/status-redesign.test.mjs
+  h_a228dabb101da7 1-480
+scripts/verify-workspace-bundle.mjs
+  h_a228dabb101da7 1-40
+packages/shell/src/host/command-line.js
+  h_a228dabb101da7 1-46
+packages/shell/src/tui-provider.js
+  h_a228dabb101da7 1-253
+controller/src/profiles.js
+  h_a228dabb101da7 1-91
+test/p2/ui/helpers.mjs
+  h_a228dabb101da7 1-37
+packages/shell/src/entry.js
+  h_a228dabb101da7 1-154
+test/p2/ui/shell-guest-cwd.test.mjs
+  h_a228dabb101da7 1-477
+test/p2/transport/vm-fixture.mjs
+  h_a228dabb101da7 1-171
+packages/manager/src/host/remote-host.js
+  h_a228dabb101da7 1-144
+test/p2/ui/shell-tab-state.test.mjs
+  h_a228dabb101da7 1-718
+packages/shell/src/tab-controller.js
+  h_a228dabb101da7 1-367
+test/p0/remote-client.test.js
+  h_a228dabb101da7 1-60
+test/p0/runtime/helpers.mjs
+  h_a228dabb101da7 1-94
+packages/shell/session-host/index.js
+  h_a228dabb101da7 1-65
+controller/src/supervisor.js
+  h_a228dabb101da7 1-290
+test/p2/ui/shell-workspace-selection.test.mjs
+  h_a228dabb101da7 1-105
+test/p2/ui/shell-browser-guest.test.mjs
+  h_a228dabb101da7 1-541
+test/p1/service/runtime-catalog.test.js
+  h_a228dabb101da7 1-61
+scripts/test.mjs
+  h_a228dabb101da7 1-27
+packages/manager/src/host/sync-input.js
+  h_a228dabb101da7 1-500
+packages/shell/assets/terminal-document.js
+  h_a228dabb101da7 1-182
+packages/shell/guest-cwd/package.json
+  h_a228dabb101da7 1-31
+packages/manager/src/host/service.js
+  h_a228dabb101da7 1-1439
+test/p0/transport/known-hosts.test.mjs
+  h_a228dabb101da7 1-134
+packages/shell/session-host/ui.js
+  h_a228dabb101da7 1-64
+test/p2/ui/shell-launcher-browser.test.mjs
+  h_a228dabb101da7 1-102
+controller/src/instances.js
+  h_a228dabb101da7 1-464
+packages/shell/index.js
+  h_a228dabb101da7 1-30
+test/p2/ui/experience-redesign.test.mjs
+  h_a228dabb101da7 1-106
+test/p2/ui/shell-chrome-tabs.test.mjs
+  h_a228dabb101da7 1-869
+test/p2/ui/shell-geometry.test.mjs
+  h_a228dabb101da7 1-263
+packages/manager/src/host/diagnostics.js
+  h_a228dabb101da7 1-211
+packages/manager/src/host/ssh/index.js
+  h_a228dabb101da7 1-33
+packages/shell/assets/LICENSE-addon-fit.txt
+  h_a228dabb101da7 1-19
+controller/src/constants.js
+  h_a228dabb101da7 1-17
+controller/src/errors.js
+  h_a228dabb101da7 1-25
+test/p0/transport/default-client.test.mjs
+  h_a228dabb101da7 1-44
+scripts/build-manager-client.mjs
+  h_a228dabb101da7 1-26
+docs/workspace-improvements-design.md
+  h_a228dabb101da7 1-83
+test/p2/plugin-sharing/install-existing.test.js
+  h_a228dabb101da7 1-60
+test/p1/service/service.test.js
+  h_a228dabb101da7 1-112
+.gitignore
+  h_a228dabb101da7 1-11
+packages/shell/src/desktop-guest.js
+  h_a228dabb101da7 1-481
+docs/ssh-workspace-component-design.md
+  h_a228dabb101da7 1-37
+packages/manager/locale/zh.json
+  h_a228dabb101da7 1-6
+packages/manager/src/host/ssh/known-hosts.js
+  h_a228dabb101da7 1-212
+packages/status/cordis.patch.yml
+  h_a228dabb101da7 1-7
+controller/src/platform.js
+  h_a228dabb101da7 1-67
+test/p1/service/lifecycle.test.js
+  h_a228dabb101da7 1-59
+packages/shell/icon.svg
+  h_a228dabb101da7 1
+test/p2/ui/shell-tab-controller.test.mjs
+  h_a228dabb101da7 1-1297
+test/p0/transport/vm.integration.test.mjs
+  h_a228dabb101da7 1-135
+packages/shell/cordis.patch.yml
+  h_a228dabb101da7 1-8
+packages/shell/src/host/tui-adapters.js
+  h_a228dabb101da7 1-79
+packages/status/locale/en.json
+  h_a228dabb101da7 1-6
+packages/shell/assets/xterm.css
+  h_a228dabb101da7 1-285
+test/p2/transport/proxy.test.mjs
+  h_a228dabb101da7 1-241
+test/p2/service/service-preview.test.js
+  h_a228dabb101da7 1-85
+packages/manager/src/client/ssh-launcher.js
+  h_a228dabb101da7 1-1447
+packages/shell/src/host/routes.js
+  h_a228dabb101da7 1-82
+controller/src/locks.js
+  h_a228dabb101da7 1-61
+packages/shell/src/host/runtime-tool.js
+  h_a228dabb101da7 1-291
+scripts/package-workspace-bundle.mjs
+  h_a228dabb101da7 1-24
+docs/session-host-api-findings.md
+  h_a228dabb101da7 1-66
+test/p2/service/version-status.test.js
+  h_a228dabb101da7 1-62
+test/p2/service/status-preview-routes.test.js
+  h_a228dabb101da7 1-49
+test/p2/ui/status-lifecycle.test.mjs
+  h_a228dabb101da7 1-121
+pnpm-workspace.yaml
+  h_a228dabb101da7 1-3
+scripts/verify-window-drag-browser.mjs
+  h_a228dabb101da7 1-100
+test/p2/plugin-sharing/sync-backup.test.js
+  h_a228dabb101da7 1-151
+test/p2/service/remote-host-profile.test.js
+  h_a228dabb101da7 1-139
+test/p0/transport/connection.test.mjs
+  h_a228dabb101da7 1-134
+test/p2/service/connection-record.test.js
+  h_a228dabb101da7 1-25
+test/p1/service/vm.integration.test.mjs
+  h_a228dabb101da7 1-219
+test/p2/transport/hosts.test.mjs
+  h_a228dabb101da7 1-213
+test/p2/service/plugin-sharing.test.js
+  h_a228dabb101da7 1-67
+packages/shell/session-host/controller.js
+  h_a228dabb101da7 1-226
+packages/shell/assets/addon-fit.js
+  h_a228dabb101da7 1-2
+test/p2/ui/react-harness.mjs
+  h_a228dabb101da7 1-197
+test/p2/shell-routes.test.mjs
+  h_a228dabb101da7 1-375
+test/p2/plugin-sharing/remote-client.integration.test.js
+  h_a228dabb101da7 1-126
+packages/status/src/host/plugin-sharing.js
+  h_a228dabb101da7 1-219
+test/p0/transport/sftp.test.mjs
+  h_a228dabb101da7 1-109
+packages/shell/src/terminal-document.js
+  h_a228dabb101da7 1-180
+packages/manager/client.js
+  h_a228dabb101da7 1-1673
+controller/runtime/package.json
+  h_a228dabb101da7 1-10
+test/p2/shell-runtime-tool.test.mjs
+  h_a228dabb101da7 1-335
+test/p0/transport/helpers.mjs
+  h_a228dabb101da7 1-52
+packages/status/locale/zh.json
+  h_a228dabb101da7 1-6
+packages/manager/src/host/ports.js
+  h_a228dabb101da7 1-291
+controller/src/process.js
+  h_a228dabb101da7 1-48
+controller/src/install.js
+  h_a228dabb101da7 1-170
+packages/manager/src/host/remote-client.js
+  h_a228dabb101da7 1-142
+packages/shell/src/input-gate.js
+  h_a228dabb101da7 1-196
+test/p2/service/vm-preview.integration.test.mjs
+  h_a228dabb101da7 1-241
+packages/status/client.js
+  h_a228dabb101da7 1-637
+packages/manager/src/host/ssh/connection.js
+  h_a228dabb101da7 1-286
+test/p2/ui/shell-workspace-client.test.mjs
+  h_a228dabb101da7 1-1654
+test/p2/service/platform-catalog.test.js
+  h_a228dabb101da7 1-74
+packages/manager/src/host/target-probe.js
+  h_a228dabb101da7 1-38
+packages/shell/src/geometry.js
+  h_a228dabb101da7 1-52
+packages/tianshu-profile/locale/en.json
+  h_a228dabb101da7 1-6
+test/p2/service/initial-sync-backup.test.js
+  h_a228dabb101da7 1-111
+packages/manager/src/host/ssh/proxy.js
+  h_a228dabb101da7 1-180
+packages/shell/package.json
+  h_a228dabb101da7 1-52
+test/p2/transport/vm.integration.test.mjs
+  h_a228dabb101da7 1-165
+test/p0/remote-host.test.js
+  h_a228dabb101da7 1-81
+test/p1/service/routes.test.js
+  h_a228dabb101da7 1-99
+test/p0/remote-controller-adapter.test.js
+  h_a228dabb101da7 1-61
+docs/local-workspace-tabs.md
+  h_a228dabb101da7 1-128
+test/p2/runtime/verify-http.mjs
+  h_a228dabb101da7 1-26
+controller/src/util.js
+  h_a228dabb101da7 1-224
+packages/status/icon.svg
+  h_a228dabb101da7 1-4
+test/p1/ui/status-client.test.mjs
+  h_a228dabb101da7 1-73
+packages/manager/src/host/ssh/exec.js
+  h_a228dabb101da7 1-220
+packages/tianshu-profile/cordis.patch.yml
+  h_a228dabb101da7 1-7
+test/p2/runtime/README.md
+  h_a228dabb101da7 1-10
+test/p2/service/ssh-hosts.test.js
+  h_a228dabb101da7 1-32
+test/p2/service/web-routes.test.js
+  h_a228dabb101da7 1-95
+packages/manager/src/host/profiles.js
+  h_a228dabb101da7 1-91
+test/p0/transport/gateway.test.mjs
+  h_a228dabb101da7 1-194
+test/p1/service/store.test.js
+  h_a228dabb101da7 1-58
+packages/manager/src/host/remote-controller.js
+  h_a228dabb101da7 1-198
+test/p0/runtime/lima-smoke.mjs
+  h_a228dabb101da7 1-146
+controller/package.json
+  h_a228dabb101da7 1-16
+README.md
+  h_a228dabb101da7 1-95
+packages/shell/src/launcher.js
+  h_a228dabb101da7 1-605
+packages/manager/src/host/ssh/gateway.js
+  h_a228dabb101da7 1-183
+test/p2/service/multi-profile.test.js
+  h_a228dabb101da7 1-349
+test/p2/ui/shell-adapter.test.mjs
+  h_a228dabb101da7 1-598
+test/p2/session-hosts.test.mjs
+  h_a228dabb101da7 1-136
+test/p2/service/preview.test.js
+  h_a228dabb101da7 1-102
+packages/manager/src/host/interactions.js
+  h_a228dabb101da7 1-126
+test/p2/transport/gateway-resilience.test.mjs
+  h_a228dabb101da7 1-75
+packages/manager/index.js
+  h_a228dabb101da7 1
+packages/manager/src/host/ssh/control-channel.js
+  h_a228dabb101da7 1-73
+packages/shell/guest-cwd/client.js
+  h_a228dabb101da7 1-136
+packages/shell/client.js
+  h_a228dabb101da7 1-5284
+packages/shell/src/host/local-runtimes.js
+  h_a228dabb101da7 1-816
+packages/shell/locale/zh.json
+  h_a228dabb101da7 1-6
+packages/shell/src/workspace-client.js
+  h_a228dabb101da7 1-784
+packages/manager/src/host/remote-sync.js
+  h_a228dabb101da7 1-83
+packages/shell/assets/xterm.js
+  h_a228dabb101da7 1-2
+packages/manager/src/host/store.js
+  h_a228dabb101da7 1-224
+test/p0/runtime/verify-http.mjs
+  h_a228dabb101da7 1-32
+test/p2/service/controller-profiles.test.js
+  h_a228dabb101da7 1-148
+packages/shell/src/frame.js
+  h_a228dabb101da7 1-434
+test/p2/service/auto-connect.test.js
+  h_a228dabb101da7 1-98
+scripts/verify-session-host-browser.mjs
+  h_a228dabb101da7 1-164
+test/p0/runtime/supervisor.test.js
+  h_a228dabb101da7 1-212
+packages/manager/src/host/ssh/config.js
+  h_a228dabb101da7 1-319
+controller/scripts/build-runtime.mjs
+  h_a228dabb101da7 1-312
+test/p2/service/interactions.test.js
+  h_a228dabb101da7 1-66
+packages/shell/session-host/submissions.js
+  h_a228dabb101da7 1-58
+controller/src/activity.js
+  h_a228dabb101da7 1-15
+test/p2/ui/test-discovery.test.mjs
+  h_a228dabb101da7 1-49
+controller/README.md
+  h_a228dabb101da7 1-71
+test/p0/runtime/README.md
+  h_a228dabb101da7 1-15
+test/p2/ui/shell-tui-provider.test.mjs
+  h_a228dabb101da7 1-767
+packages/shell/src/host/session-views.js
+  h_a228dabb101da7 1-77
+test/p2/ports/diagnostics.test.js
+  h_a228dabb101da7 1-192
+packages/shell/guest-cwd/cordis.patch.yml
+  h_a228dabb101da7 1-4
+docs/session-host-navigation-design.md
+  h_a228dabb101da7 1-63
+test/p2/plugin-sharing/status-routes.test.js
+  h_a228dabb101da7 1-224
+packages/shell/assets/LICENSE-xterm.txt
+  h_a228dabb101da7 1-21
+packages/manager/package.json
+  h_a228dabb101da7 1-29
+controller/src/cli.js
+  h_a228dabb101da7 1-239
+packages/shell/guest-cwd/index.js
+  h_a228dabb101da7 1-2
+test/p1/service/sync-input.test.js
+  h_a228dabb101da7 1-54
+test/p2/ports/ports.test.js
+  h_a228dabb101da7 1-291
+test/p0/runtime/profiles.test.js
+  h_a228dabb101da7 1-149
+controller/.gitignore
+  h_a228dabb101da7 1-3
+packages/status/index.js
+  h_a228dabb101da7 1
+test/fixtures/session-host-seed.js
+  h_a228dabb101da7 1-27
+packages/tianshu-profile/icon.svg
+  h_a228dabb101da7 1
+packages/shell/src/web-timing.js
+  h_a228dabb101da7 1-140
+test/p2/ui/shell-input-gate.test.mjs
+  h_a228dabb101da7 1-763
+packages/shell/src/styles.js
+  h_a228dabb101da7 1-41
+packages/manager/src/client/workspace-extension.js
+  h_a228dabb101da7 1-213
+packages/manager/src/host/plugin-share.js
+  h_a228dabb101da7 1-117
+test/p1/service/helpers.mjs
+  h_a228dabb101da7 1-314
+test/p2/ui/session-host-client.test.mjs
+  h_a228dabb101da7 1-197
+test/p2/tianshu-profile.test.mjs
+  h_a228dabb101da7 1-33
+test/p2/service/workspace-model.test.js
+  h_a228dabb101da7 1-22
+docs/frame-redraw.md
+  h_a228dabb101da7 1-40
+pnpm-lock.yaml
+  h_a228dabb101da7 1-2518
+test/p0/transport/exec.test.mjs
+  h_a228dabb101da7 1-160
+test/p2/ui/shell-ssh-launcher.test.mjs
+  h_a228dabb101da7 1-769
+test/p2/service/all-supported-input.test.js
+  h_a228dabb101da7 1-116
+packages/shell/src/chrome-tabs.js
+  h_a228dabb101da7 1-691
+test/p2/transport/config.test.mjs
+  h_a228dabb101da7 1-70
+test/p2/tui-command.test.mjs
+  h_a228dabb101da7 1-39
+packages/shell/src/adapter.js
+  h_a228dabb101da7 1-116
+test/p2/local-runtimes.test.mjs
+  h_a228dabb101da7 1-843
+packages/manager/src/host/index.js
+  h_a228dabb101da7 1-301
+test/p1/ui/helpers.mjs
+  h_a228dabb101da7 1-51
+scripts/build-shell-client.mjs
+  h_a228dabb101da7 1-82
+test/p0/transport/config.test.mjs
+  h_a228dabb101da7 1-135
+packages/manager/src/host/ssh/sftp.js
+  h_a228dabb101da7 1-107
+test/p2/ui/shell-entry.test.mjs
+  h_a228dabb101da7 1-112
+test/p2/service/manager-preview-route.test.js
+  h_a228dabb101da7 1-32
+packages/manager/locale/en.json
+  h_a228dabb101da7 1-6
+packages/status/src/host/index.js
+  h_a228dabb101da7 1-151
+packages/manager/src/host/ssh/hosts.js
+  h_a228dabb101da7 1-333
+packages/manager/src/host/service-extensions.js
+  h_a228dabb101da7 1-77
+packages/manager/icon.svg
+  h_a228dabb101da7 1-5
+test/p0/status-routes.test.js
+  h_a228dabb101da7 1-78
+packages/manager/src/host/shared-start.js
+  h_a228dabb101da7 1-69
+test/p0/remote-sync.test.js
+  h_a228dabb101da7 1-52
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4988bfb8fd223c6cc00da95ccacdb21189d93d1a",
+  "prompts": {},
+  "humans": {
+    "h_a228dabb101da7": {
+      "author": "okarinhuang <okarinhuang@tencent.com>"
+    }
+  }
+}

@@ -1,0 +1,46 @@
+README.md
+  h_cefcb13ff10a2e 15-18,37
+docs/frame-redraw.md
+  h_cefcb13ff10a2e 3-4
+docs/local-workspace-tabs.md
+  h_cefcb13ff10a2e 3-4,7-8,11
+docs/session-host-api-findings.md
+  h_cefcb13ff10a2e 3-4
+docs/session-host-navigation-design.md
+  h_cefcb13ff10a2e 3-4
+docs/ssh-workspace-component-design.md
+  h_cefcb13ff10a2e 3-4
+docs/workspace-improvements-design.md
+  h_cefcb13ff10a2e 3-4
+docs/workspace-instances-design.md
+  h_cefcb13ff10a2e 3-4
+docs/workspace-launcher-design.md
+  h_cefcb13ff10a2e 3-4
+packages/shell/ssh-remote/controller/package.json
+  h_cefcb13ff10a2e 2
+packages/shell/ssh-remote/plugins/status/client.js
+  h_cefcb13ff10a2e 2,186
+packages/shell/ssh-remote/plugins/status/cordis.patch.yml
+  h_cefcb13ff10a2e 3
+packages/shell/ssh-remote/plugins/status/package.json
+  h_cefcb13ff10a2e 2
+packages/shell/ssh-remote/src/host/sync-input.js
+  h_cefcb13ff10a2e 203
+test/p1/service/sync-input.test.js
+  h_cefcb13ff10a2e 26
+test/p1/service/vm.integration.test.mjs
+  h_cefcb13ff10a2e 125
+test/p2/ui/experience-redesign.test.mjs
+  h_cefcb13ff10a2e 16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c96ec6cf2727bc74ff4e66a770f82fd1b17f2d0c",
+  "prompts": {},
+  "humans": {
+    "h_cefcb13ff10a2e": {
+      "author": "ripley-xl <ripley-xl@users.noreply.github.com>"
+    }
+  }
+}

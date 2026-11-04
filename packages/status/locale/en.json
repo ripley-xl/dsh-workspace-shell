@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "SSH Remote Status",
+    "description": "Show SSH status, return to local, and install or manage remote plugins."
+  }
+}

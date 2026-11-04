@@ -1,0 +1,10 @@
+node_modules/
+artifacts/
+*.log
+.DS_Store
+coverage/
+.brainstorm/
+.cache/
+.build/
+dbg*.tmp.mjs
+tianshu-*.json

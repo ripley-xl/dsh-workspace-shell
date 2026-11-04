@@ -1,0 +1,8 @@
+- insert:
+    - id: workspace-shell
+      name: "@local/dsh-workspace-shell"
+      group: true
+      config:
+        - id: ssh-remote
+          name: "@local/dsh-ssh-remote"
+          config: {}

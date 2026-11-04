@@ -1,0 +1,29 @@
+{
+  "name": "@local/dsh-ssh-remote",
+  "version": "0.3.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "src/**/*.js",
+    "artifacts/*",
+    "locale/*.json",
+    "icon.svg"
+  ],
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": ["@local/dsh-workspace-shell"]
+    }
+  },
+  "engines": { "dsh": "0.2.1-rc.5" },
+  "dependencies": { "ssh2": "^1.17.0" }
+}

@@ -1,0 +1,24 @@
+{
+  "name": "dsh-ssh-remote-development",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node scripts/test.mjs",
+    "build:client": "node scripts/build-manager-client.mjs && node scripts/build-shell-client.mjs",
+    "check:client": "node scripts/build-manager-client.mjs --check && node scripts/build-shell-client.mjs --check",
+    "build:runtime": "node controller/scripts/build-runtime.mjs",
+    "test:p0": "node test/p0/run.mjs"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.5",
+    "@deepseek-ai/cordis-plugin-loader": "1.0.6",
+    "@deepseek-ai/dsh-client-ui-slots": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.5",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
+    "react": "19.2.0",
+    "react-test-renderer": "19.2.0",
+    "ssh2": "^1.17.0"
+  }
+}

@@ -28,7 +28,10 @@ export function persistenceRoot(ctx) {
   for (const entry of ctx.loader.entries()) {
     if (entry.disabled || !entry.fiber || entry.options?.name !== '@deepseek-ai/dsh-session-persistence-jsonl') continue;
     if (entry.context.get('sessionPersistence')?.identity !== ctx.sessionPersistence.identity) continue;
-    const root = entry.fiber.config?.root;
+    // cordis 4.1 keeps the raw config on `fiber.config` and the validated one on
+    // `fiber.effectiveConfig`; 4.0 exposed only the validated config as `fiber.config`.
+    const config = entry.fiber.effectiveConfig ?? entry.fiber.config;
+    const root = config?.root;
     if (typeof root === 'string' && path.isAbsolute(root)) roots.add(root);
   }
   if (roots.size !== 1) throw sessionHostError('SESSION_STORAGE_SCOPE_UNAVAILABLE');

@@ -65,6 +65,14 @@ test('persistence scope uses the evaluated active provider matching service iden
   assert.throws(() => persistenceRoot(ctx), /SCOPE_UNAVAILABLE/);
 });
 
+test('persistence scope reads the validated config when the fiber also keeps the raw one', () => {
+  // cordis 4.1 moved the validated config to `effectiveConfig` and left `fiber.config`
+  // holding the raw value, where `!!js` expressions are not evaluated yet.
+  const entry = { options: { name: '@deepseek-ai/dsh-session-persistence-jsonl' }, context: { get: () => ({ identity: 'a' }) }, fiber: { config: { root: { __jsExpr: 'dshHomePath("sessions")' } }, effectiveConfig: { root: '/actual' } } };
+  const ctx = { sessionPersistence: { identity: 'a' }, loader: { entries: () => [entry] } };
+  assert.equal(persistenceRoot(ctx), '/actual');
+});
+
 const viewId = 'a'.repeat(32), windowId = 'b'.repeat(32), tabId = 'c'.repeat(32);
 test('view command requires the exact live view and selected session acknowledgment', async () => {
   let clock = 1;

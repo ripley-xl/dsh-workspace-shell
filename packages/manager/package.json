@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-ssh-remote",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
   "type": "module",
   "exports": {
@@ -24,6 +24,6 @@
       "inject": ["@local/dsh-workspace-shell"]
     }
   },
-  "engines": { "dsh": "0.2.1-rc.5" },
+  "engines": { "dsh": "^0.2.1-rc.5" },
   "dependencies": { "ssh2": "^1.17.0" }
 }

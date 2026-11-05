@@ -4306,7 +4306,12 @@ const shellCss = [
 '.wsh-field{display:grid;gap:6px;font-size:12px}.wsh-field input{font:inherit;color:inherit;background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);border-radius:6px;padding:8px}',
 '.wsh-warning{color:var(--dsw-alias-state-error-primary);margin:0}.wsh-danger{color:var(--dsw-alias-state-error-primary)}.wsh-muted{color:var(--dsw-alias-label-secondary);font-size:12px;margin:0}',
 '.wsh-frame[data-dragging]{transition:none!important;user-select:none}',
+// The frame is the window: no plugin's stray body-level inline node may scroll the document.
+'html[data-workspace-shell-active],html[data-workspace-shell-active] body{overflow:hidden}',
 'html[data-platform=darwin]:not([data-fullscreen]) .wsh-header{padding-left:100px}',
+// The theme's top fade is a body child: DSH's no-drag rule overrides pointer-events:none.
+// Exclude only this decorative overlay from native regions while our frame is mounted.
+'html[data-platform=darwin] body:has([data-workspace-shell=active])>[data-dsh-glass-fade=top][aria-hidden=true]{-webkit-app-region:initial!important}',
 '@media(max-width:640px){.wsh-header{gap:4px;padding-right:6px}.wsh-button{padding:5px 7px}.wsh-error-slot{display:none}}',
 '@media(prefers-reduced-motion:reduce){.wsh-frame{transition:none!important}}',
 ].join("\n");
@@ -4621,6 +4626,16 @@ function createFrameViews(React, deps) {
       try { Promise.resolve(workspace.setOverlay(false)).catch(() => {}); } catch { /* Unmount cleanup cannot report through React state. */ }
     }, [workspace]);
     React.useLayoutEffect(() => localActive && !overlayOpen ? undefined : installPortalFence(root.current), [activeId, overlayOpen]);
+    // The frame owns the whole window, so document scrolling is never wanted. A body-level
+    // inline remnant from another plugin (an icon <svg> appended to body, for example) adds
+    // a line box past #root and lets the page scroll away from the frame edges. Lock the
+    // document while the frame is mounted and drop any offset that predates it.
+    React.useLayoutEffect(() => {
+      const html = document.documentElement;
+      try { html?.setAttribute?.('data-workspace-shell-active', ''); } catch { /* Attribute is best effort. */ }
+      try { window.scrollTo?.(0, 0); } catch { /* Document offset is best effort. */ }
+      return () => { try { html?.removeAttribute?.('data-workspace-shell-active'); } catch { /* Cleanup is best effort. */ } };
+    }, []);
     React.useLayoutEffect(() => {
       const old = prior.current;
       prior.current = { width: g.width, toggle };

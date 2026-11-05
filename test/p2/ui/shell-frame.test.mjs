@@ -148,7 +148,14 @@ function fixture(options = {}) {
   const workspace = options.workspace ? makeWorkspace(calls, options.workspaceOptions) : undefined;
   const viewportContainers = {};
   const rootNode = { getBoundingClientRect: () => ({ width: 1200, height: 800 }), querySelector: (key) => ({ getBoundingClientRect: () => key === '.wsh-header' ? { bottom: 48 } : { top: 48 } }) };
-  const document = { title: 'DeepSeek Harness', documentElement: { dataset: {}, lang: options.language ?? '', hasAttribute: () => false }, activeElement: null };
+  const htmlAttributes = new Map();
+  const documentElement = {
+    dataset: {}, lang: options.language ?? '', attributes: htmlAttributes,
+    hasAttribute: (name) => htmlAttributes.has(name),
+    setAttribute: (name) => { htmlAttributes.set(name, ''); },
+    removeAttribute: (name) => { htmlAttributes.delete(name); },
+  };
+  const document = { title: 'DeepSeek Harness', documentElement, activeElement: null };
   const window = { setTimeout, clearTimeout, requestAnimationFrame: (fn) => setTimeout(fn, 0), cancelAnimationFrame: clearTimeout,
     ResizeObserver: class { constructor(fn) { this.fn = fn; observers.push(this); } observe() {} disconnect() { this.disconnected = true; } },
     MutationObserver: class { constructor(fn) { this.fn = fn; mutationObservers.push(this); } observe() {} disconnect() { this.disconnected = true; } } };
@@ -223,6 +230,14 @@ test('root observer and frame reporting stop on unmount', async (t) => {
   const f = fixture(); const app = await mount(t, f.views.Frame, f.props, f.desktop);
   await app.unmount(); assert.ok(f.observers.every((observer) => observer.disconnected));
   assert.equal(f.reports.at(-1), null); assert.equal(f.document.title, 'DeepSeek Harness');
+});
+test('the frame locks document scrolling while mounted and releases it on unmount', async (t) => {
+  const f = fixture();
+  assert.ok(shellCss.includes('html[data-workspace-shell-active],html[data-workspace-shell-active] body{overflow:hidden}'));
+  const app = await mount(t, f.views.Frame, f.props, f.desktop);
+  assert.equal(f.document.documentElement.hasAttribute('data-workspace-shell-active'), true);
+  await app.unmount();
+  assert.equal(f.document.documentElement.hasAttribute('data-workspace-shell-active'), false);
 });
 test('Local-only fallback has no launcher entry and never navigates the original layout', () => {
   const f = fixture();

@@ -303,6 +303,16 @@ export function createFrameViews(React, deps) {
       try { Promise.resolve(workspace.setOverlay(false)).catch(() => {}); } catch { /* Unmount cleanup cannot report through React state. */ }
     }, [workspace]);
     React.useLayoutEffect(() => localActive && !overlayOpen ? undefined : installPortalFence(root.current), [activeId, overlayOpen]);
+    // The frame owns the whole window, so document scrolling is never wanted. A body-level
+    // inline remnant from another plugin (an icon <svg> appended to body, for example) adds
+    // a line box past #root and lets the page scroll away from the frame edges. Lock the
+    // document while the frame is mounted and drop any offset that predates it.
+    React.useLayoutEffect(() => {
+      const html = document.documentElement;
+      try { html?.setAttribute?.('data-workspace-shell-active', ''); } catch { /* Attribute is best effort. */ }
+      try { window.scrollTo?.(0, 0); } catch { /* Document offset is best effort. */ }
+      return () => { try { html?.removeAttribute?.('data-workspace-shell-active'); } catch { /* Cleanup is best effort. */ } };
+    }, []);
     React.useLayoutEffect(() => {
       const old = prior.current;
       prior.current = { width: g.width, toggle };

@@ -32,6 +32,8 @@ export const shellCss = [
 '.wsh-field{display:grid;gap:6px;font-size:12px}.wsh-field input{font:inherit;color:inherit;background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);border-radius:6px;padding:8px}',
 '.wsh-warning{color:var(--dsw-alias-state-error-primary);margin:0}.wsh-danger{color:var(--dsw-alias-state-error-primary)}.wsh-muted{color:var(--dsw-alias-label-secondary);font-size:12px;margin:0}',
 '.wsh-frame[data-dragging]{transition:none!important;user-select:none}',
+// The frame is the window: no plugin's stray body-level inline node may scroll the document.
+'html[data-workspace-shell-active],html[data-workspace-shell-active] body{overflow:hidden}',
 'html[data-platform=darwin]:not([data-fullscreen]) .wsh-header{padding-left:100px}',
 // The theme's top fade is a body child: DSH's no-drag rule overrides pointer-events:none.
 // Exclude only this decorative overlay from native regions while our frame is mounted.

@@ -1,10 +1,10 @@
 {
   "name": "dsh-ssh-remote-runtime",
   "private": true,
-  "version": "0.2.1-rc.5",
+  "version": "0.2.2-rc.1",
   "description": "Pinned production dependency set for the SSH Remote runtime.",
   "dependencies": {
-    "@deepseek-ai/dsh": "0.2.1-rc.5",
-    "pnpm": "10.32.1"
+    "@deepseek-ai/dsh": "0.2.2-rc.1",
+    "pnpm": "11.28.5"
   }
 }

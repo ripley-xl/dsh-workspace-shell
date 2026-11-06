@@ -21,12 +21,7 @@ export function createSshRequest(fetcher, lifetime) {
     if (combined?.aborted) throw error('OPERATION_CANCELLED');
     if (!response.ok || value?.ok === false) {
       const code = /^[A-Z][A-Z0-9_]{0,63}$/.test(value?.error?.code) ? value.error.code : 'SSH_REMOTE_UNREACHABLE';
-      const cause = error(code);
-      if (code === 'UPGRADE_CONFIRMATION_REQUIRED') {
-        const details = value.error.details ?? {};
-        cause.versions = [details.remoteVersion, details.localVersion].map((version) => typeof version === 'string' ? version.slice(0, 64) : '');
-      }
-      throw cause;
+      throw error(code);
     }
     return value;
   };
@@ -79,13 +74,9 @@ export function createSshWorkspaceExtension(React, { window, document, createSsh
   };
   const request = async (path, options = {}) => {
     const signal = options.signal ? AbortSignal.any([options.signal, lifetime.signal]) : lifetime.signal;
-    let result;
-    try { result = await rawRequest(path, { ...options, signal }); }
-    catch (cause) {
-      if (path !== '/connect' || cause.code !== 'UPGRADE_CONFIRMATION_REQUIRED' || options.body?.allowUpgrade) throw cause;
-      if (!await ask({ kind: 'upgrade', versions: cause.versions }, signal)) throw Object.assign(new Error('OPERATION_CANCELLED'), { code: 'OPERATION_CANCELLED' });
-      result = await rawRequest(path, { ...options, body: { ...options.body, allowUpgrade: true }, signal });
-    }
+    // Remote Host upgrades are automatic; failures such as LOCAL_DSH_OUTDATED
+    // surface unchanged instead of opening a confirmation prompt.
+    const result = await rawRequest(path, { ...options, signal });
     if (path === '/connect' && result.sync && (result.sync.ok === false || result.sync.requiresMerge)) {
       const path = result.sync.requiresMerge && typeof result.sync.backup?.path === 'string' ? result.sync.backup.path.slice(0, 4096) : '';
       await ask({ kind: 'review', partial: result.sync.ok === false, path }, signal);
@@ -97,8 +88,8 @@ export function createSshWorkspaceExtension(React, { window, document, createSsh
   };
   const ui = createSshLauncher(React, { document, window, api: (path, body, signal) => request(path, { body, signal }) });
   const words = {
-    en: { close: 'Close', cancel: 'Cancel', busy: 'Working', continue: 'Continue', upgrade: 'Upgrade remote Host', upgradeBody: 'This stops the existing remote Host and replaces it with the matching version. Active remote work may be interrupted.', trust: 'Verify SSH host key', auth: 'SSH authentication', submit: 'Submit', accept: 'Trust and connect', review: 'Connection synchronization', partial: 'Some configuration could not be synchronized. The remote Host is available.', backup: 'Remote configuration backup requires review:', password: 'Password or key passphrase' },
-    zh: { close: '关闭', cancel: '取消', busy: '处理中', continue: '继续', upgrade: '升级远端 Host', upgradeBody: '这会停止现有远端 Host，并启动匹配版本。正在执行的远端工作可能中断。', trust: '校验 SSH 主机密钥', auth: 'SSH 认证', submit: '提交', accept: '信任并连接', review: '连接同步结果', partial: '部分配置未同步成功，远端 Host 仍可使用。', backup: '远端配置备份需要检查：', password: '密码或密钥口令' },
+    en: { close: 'Close', cancel: 'Cancel', busy: 'Working', continue: 'Continue', trust: 'Verify SSH host key', auth: 'SSH authentication', submit: 'Submit', accept: 'Trust and connect', review: 'Connection synchronization', partial: 'Some configuration could not be synchronized. The remote Host is available.', backup: 'Remote configuration backup requires review:', password: 'Password or key passphrase' },
+    zh: { close: '关闭', cancel: '取消', busy: '处理中', continue: '继续', trust: '校验 SSH 主机密钥', auth: 'SSH 认证', submit: '提交', accept: '信任并连接', review: '连接同步结果', partial: '部分配置未同步成功，远端 Host 仍可使用。', backup: '远端配置备份需要检查：', password: '密码或密钥口令' },
   };
   function Prompt({ prompt, t }) {
     const form = React.useRef(null);
@@ -132,8 +123,6 @@ export function createSshWorkspaceExtension(React, { window, document, createSsh
     };
     const title = t(interaction ? hostKey ? 'trust' : 'auth' : prompt.kind);
     return h(ui.Dialog, { title, busy, onClose: () => void answer(true), t },
-      prompt.kind === 'upgrade' ? h('p', null, t('upgradeBody')) : null,
-      prompt.kind === 'upgrade' && prompt.versions?.some(Boolean) ? h('p', null, prompt.versions.filter(Boolean).join(' → ')) : null,
       prompt.kind === 'review' ? h('div', null,
         prompt.partial ? h('p', { role: 'alert' }, t('partial')) : null,
         prompt.path ? h('p', null, t('backup'), h('code', null, prompt.path)) : null) : null,
@@ -145,7 +134,7 @@ export function createSshWorkspaceExtension(React, { window, document, createSsh
         error ? h('p', { role: 'alert' }, error) : null,
         h('footer', { className: 'wsh-ssh-dialog-footer' },
           h(ui.Button, { disabled: busy, 'data-autofocus': true, onClick: () => void answer(true) }, t(prompt.kind === 'review' ? 'close' : 'cancel')),
-          prompt.kind !== 'review' ? h(ui.Button, { type: 'submit', disabled: busy || hostKey && !prompt.request.fingerprint, kind: prompt.kind === 'upgrade' ? 'danger' : 'primary' }, t(hostKey ? 'accept' : interaction ? 'submit' : 'continue')) : null)));
+          prompt.kind !== 'review' ? h(ui.Button, { type: 'submit', disabled: busy || hostKey && !prompt.request.fingerprint, kind: 'primary' }, t(hostKey ? 'accept' : interaction ? 'submit' : 'continue')) : null)));
   }
   function Overlay({ onModalChange, locale: activeLocale }) {
     const current = React.useSyncExternalStore(subscribe, getSnapshot);

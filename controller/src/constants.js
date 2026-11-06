@@ -1,11 +1,11 @@
-export const CONTROLLER_VERSION = "0.2.1";
+export const CONTROLLER_VERSION = "0.2.2";
 export const PROTOCOL_VERSION = 1;
 export const REGISTRY_SCHEMA_VERSION = 1;
 export const RUNTIME_SCHEMA_VERSION = 1;
-export const DSH_VERSION = "0.2.1-rc.5";
-export const DSH_BUILD_ID = "npm:sha512-WkyJZv4zl9sCAxSzRctGm58m0rilGqwR6pniBiLOz5CPDfHfDuAUicg0AAazXI7oj/Cph6/cjNTncA/rpLTXpw==";
+export const DSH_VERSION = "0.2.2-rc.1";
+export const DSH_BUILD_ID = "npm:sha512-ijR9UEVYkG15Q/Q79JzvzLBzQOQfc63VLr9n6flpwHPhr5IKn2UxthnSoto/P9l7qGd7pPvI1Ra6TW7LH3oKpg==";
 export const NODE_VERSION = "v24.22.1";
-export const PNPM_VERSION = "10.32.1";
+export const PNPM_VERSION = "11.28.5";
 export const DEFAULT_LEASE_TTL_MS = 30_000;
 export const DEFAULT_IDLE_TIMEOUT_MS = 15 * 60_000;
 export const DEFAULT_STOP_TIMEOUT_MS = 15_000;

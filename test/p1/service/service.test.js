@@ -38,7 +38,7 @@ test('connect returns a browser URL once and keeps it out of status and storage'
   assert.equal(fixture.store.get(record.id).lastInstanceId, null);
 });
 
-test('an active old instance requires explicit upgrade confirmation', async (t) => {
+test('an active old instance upgrades automatically without confirmation', async (t) => {
   const fixture = await serviceFixture({ version: '2.0.0' });
   t.after(fixture.close);
   const record = await fixture.store.upsert({ hostAlias: 'p0-test', syncPolicy: { appearance: false } });
@@ -47,16 +47,31 @@ test('an active old instance requires explicit upgrade confirmation', async (t) 
     health: { healthy: true }, active: true,
   });
   await fixture.store.markConnected(record.id, { instanceId: 'old-instance', version: '1.0.0', buildId: 'build-1' });
+  const upgraded = await fixture.service.connect(record.id);
+  assert.deepEqual(fixture.state.stops, ['old-instance']);
+  assert.equal(upgraded.host.lastServerVersion, '2.0.0');
+  assert.notEqual(upgraded.host.instanceId, 'old-instance');
+  assert.equal(upgraded.host.phase, 'connected');
+});
+
+test('a remote Host newer than the local DSH is refused and left running', async (t) => {
+  const fixture = await serviceFixture({ version: '2.0.0' });
+  t.after(fixture.close);
+  const record = await fixture.store.upsert({ hostAlias: 'p0-test', syncPolicy: { appearance: false } });
+  fixture.state.instances.push({
+    instance: { instanceId: 'newer-instance', dshVersion: '2.1.0', buildId: 'build-1', endpoint: { host: '127.0.0.1', port: 41000 } },
+    health: { healthy: true }, active: true,
+  });
+  await fixture.store.markConnected(record.id, { instanceId: 'newer-instance', version: '2.1.0', buildId: 'build-1' });
   await assert.rejects(fixture.service.connect(record.id), (error) => {
-    assert.equal(error.code, 'UPGRADE_CONFIRMATION_REQUIRED');
-    assert.equal(error.details.instanceId, 'old-instance');
+    assert.equal(error.code, 'LOCAL_DSH_OUTDATED');
+    assert.equal(error.details.localVersion, '2.0.0');
+    assert.equal(error.details.remoteVersion, '2.1.0');
     return true;
   });
   assert.deepEqual(fixture.state.stops, []);
-  const upgraded = await fixture.service.connect(record.id, { allowUpgrade: true });
-  assert.deepEqual(fixture.state.stops, ['old-instance']);
-  assert.equal(upgraded.host.lastServerVersion, '2.0.0');
-  assert.notEqual(upgraded.host.lastInstanceId, 'old-instance');
+  const instance = fixture.state.instances.find((entry) => entry.instance.instanceId === 'newer-instance');
+  assert.equal(instance.health.healthy, true);
 });
 
 test('transport recovery attaches to the original instance without replaying sync', async (t) => {

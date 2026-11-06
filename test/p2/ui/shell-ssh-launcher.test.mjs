@@ -342,7 +342,7 @@ test('outside pointerdown closes the menu; restart rebuilds and disconnect clear
   await clickImmediate(restart);
   assert.deepEqual(h.of('/disconnect').map((call) => call.input.hostId), ['a']);
   assert.deepEqual(h.of('/connect').map((call) => call.input.hostId), ['a']);
-  assert.equal(h.of('/connect')[0].input.allowUpgrade, false);
+  assert.deepEqual(h.of('/connect')[0].input, { hostId: 'a', background: false });
   // Once restarted, the menu closes.
   assert.equal(h.view.root.findAll((node) => node.props.role === 'menu').length, 0);
 });
@@ -759,6 +759,63 @@ test('narrow layout and keyboard affordances exist in the stylesheet', () => {
   assert.match(css, /prefers-reduced-motion/u);
   assert.match(css, /\.wsh-ssh-switch\[|\.wsh-ssh-switch:checked/u);
 });
+
+const alignedHost = (items = [{ name: '@deepseek-ai/dsh-subagent-codex', fromVersion: '1.0.0', toVersion: '2.0.0', ok: true, application: 'applied' }]) => ({
+  id: 'a', name: 'Alpha', hostAlias: 'alpha', phase: 'connected', instanceId: 'inst-a',
+  pluginAlignment: { ok: true, items, restarted: false },
+});
+
+test('a successful connect reports the aligned remote plugin count', async (t) => {
+  const h = await mountLauncher(t, { handlers: { '/connect': () => ({ ok: true, host: alignedHost() }) } });
+  const connectButton = h.view.root.findAll((node) => node.type === 'button' && text(node) === 'Connect and refresh')[0];
+  await flushEffects(() => connectButton.props.onClick({ currentTarget: null }));
+  assert.match(text(h.view.toJSON()), /Remote plugins aligned to local versions: 1/u);
+  assert.doesNotMatch(text(h.view.toJSON()), /SSH connected and refreshed/u);
+});
+
+test('the aligned remote plugin notice is localized', async (t) => {
+  const h = await mountLauncher(t, { props: { locale: 'zh' }, handlers: { '/connect': () => ({ ok: true, host: alignedHost() }) } });
+  const connectButton = h.view.root.findAll((node) => node.type === 'button' && text(node) === '连接并刷新')[0];
+  await flushEffects(() => connectButton.props.onClick({ currentTarget: null }));
+  assert.match(text(h.view.toJSON()), /已把远端插件对齐到本机版本：1 个/u);
+});
+
+for (const [name, pluginAlignment] of [
+  ['a failed alignment', { ok: false, items: [], restarted: false, error: { code: 'REMOTE_OPERATION_FAILED' } }],
+  ['an empty alignment', { ok: true, items: [], restarted: false }],
+  ['no alignment', null],
+]) {
+  test(`${name} shows no alignment notice`, async (t) => {
+    const h = await mountLauncher(t, {
+      handlers: { '/connect': () => ({ ok: true, host: { id: 'a', name: 'Alpha', hostAlias: 'alpha', phase: 'connected', instanceId: 'inst-a', pluginAlignment } }) },
+    });
+    const connectButton = h.view.root.findAll((node) => node.type === 'button' && text(node) === 'Connect and refresh')[0];
+    await flushEffects(() => connectButton.props.onClick({ currentTarget: null }));
+    const body = text(h.view.toJSON());
+    assert.doesNotMatch(body, /aligned|对齐到本机版本/u);
+    assert.match(body, /Connect and refresh|已连接/u);
+  });
+}
+
+for (const [locale, message, connectLabel] of [
+  ['en', /Update the local DSH/u, 'Connect and refresh'],
+  ['zh', /请先更新本机 DSH 后重试/u, '连接并刷新'],
+]) {
+  test(`LOCAL_DSH_OUTDATED renders a safe localized failure (${locale})`, async (t) => {
+    const h = await mountLauncher(t, {
+      props: { locale },
+      handlers: {
+        '/connect': () => { throw Object.assign(new Error('raw secret detail'), { code: 'LOCAL_DSH_OUTDATED' }); },
+      },
+    });
+    const connectButton = h.view.root.findAll((node) => node.type === 'button' && text(node) === connectLabel)[0];
+    await act(async () => { connectButton.props.onClick({ currentTarget: null }); });
+    const body = text(h.view.toJSON());
+    assert.match(body, message);
+    assert.doesNotMatch(body, /raw secret detail/);
+    assert.equal(h.of('/connect').length, 1);
+  });
+}
 
 test('Chinese dictionary renders without missing keys', async (t) => {
   const h = await mountLauncher(t, { props: { locale: 'zh' } });

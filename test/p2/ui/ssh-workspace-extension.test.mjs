@@ -104,27 +104,30 @@ test('request surface rejects arbitrary paths, sanitizes errors and propagates c
   await assert.rejects(request('/status'), { code: 'OPERATION_CANCELLED' });
   assert.equal(calls, 1);
 });
-test('upgrade requires explicit confirmation before retrying with allowUpgrade', async (t) => {
-  const f = fixture(t, (path, body) => path === '/connect' && !body.allowUpgrade
-    ? { ok: false, error: { code: 'UPGRADE_CONFIRMATION_REQUIRED', details: { remoteVersion: '1', localVersion: '2' } } }
-    : { ok: true, connections: [] });
+test('a remote Host upgrade connects without an upgrade prompt', async (t) => {
+  const f = fixture(t, () => ({ ok: true, connections: [] }));
   const modal = [];
   const view = await mount(t, f.extension.Overlay, { onModalChange: (value) => modal.push(value) }, f.desktop);
-  let task;
-  await flushEffects(() => { task = f.extension.request('/connect', { body: { hostId: 'c1' } }); });
-  assert.equal(f.calls.filter((call) => call.url.endsWith('/connect')).length, 1);
-  assert.equal(f.extension.getSnapshot().prompts[0].kind, 'upgrade');
-  await flushEffects(() => view.root.findByType('form').props.onSubmit({ preventDefault() {} }));
-  await task;
-  assert.equal(f.calls.filter((call) => call.url.endsWith('/connect'))[1].body.allowUpgrade, true);
+  const result = await f.extension.request('/connect', { body: { hostId: 'c1' } });
+  assert.equal(result.ok, true);
+  assert.deepEqual(f.calls.filter((call) => call.url.endsWith('/connect')).map((call) => call.body), [{ hostId: 'c1' }]);
+  assert.equal(f.extension.getSnapshot().prompts.length, 0);
   await view.unmount(); assert.equal(modal.at(-1), false);
 });
-test('cancelling or unloading an upgrade never grants upgrade permission', async (t) => {
-  const f = fixture(t, () => ({ ok: false, error: { code: 'UPGRADE_CONFIRMATION_REQUIRED' } }));
-  const task = f.extension.request('/connect', { body: { hostId: 'c1' } });
-  const result = assert.rejects(task, { code: 'OPERATION_CANCELLED' });
-  await flush(); f.extension.dispose(); await result;
-  assert.equal(f.calls.length, 1);
+test('LOCAL_DSH_OUTDATED is reported without a confirmation prompt', async (t) => {
+  const f = fixture(t, () => ({
+    ok: false,
+    error: { code: 'LOCAL_DSH_OUTDATED', details: { remoteVersion: '3.0.0', localVersion: '2.0.0' } },
+  }));
+  const view = await mount(t, f.extension.Overlay, {}, f.desktop);
+  await assert.rejects(f.extension.request('/connect', { body: { hostId: 'c1' } }), (cause) => {
+    assert.equal(cause.code, 'LOCAL_DSH_OUTDATED');
+    assert.equal(cause.message.includes('SECRET'), false);
+    return true;
+  });
+  assert.equal(f.calls.filter((call) => call.url.endsWith('/connect')).length, 1);
+  assert.equal(f.extension.getSnapshot().prompts.length, 0);
+  await view.unmount();
 });
 test('partial synchronization and backup review remain available until dismissed', async (t) => {
   const f = fixture(t, () => ({ ok: true, sync: { ok: false, requiresMerge: true, backup: { path: '/remote/backup' } } }));

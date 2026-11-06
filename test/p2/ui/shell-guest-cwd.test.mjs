@@ -99,7 +99,7 @@ function harness(options = {}) {
 
 test('package, Host no-op, and patch declare only the narrow companion composition', async () => {
   const manifest = JSON.parse(await readFile(new URL('package.json', packageRoot), 'utf8'));
-  assert.equal(manifest.engines.dsh, '0.2.1-rc.5');
+  assert.equal(manifest.engines.dsh, '>=0.2.1-rc.5 <0.3.0-0');
   assert.equal(manifest.dsh.bundle.patch, './cordis.patch.yml');
   assert.equal(manifest.dsh.client.platform, 'web');
   assert.equal(manifest.dsh.client.immediately, true);

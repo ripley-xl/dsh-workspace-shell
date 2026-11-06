@@ -33,18 +33,32 @@ export async function createStore() {
   return new ConnectionStore(memoryStorage()).open();
 }
 
-function artifact(version) {
+function artifact(version, controllerVersion = null) {
+  const runtimeId = `${version}${controllerVersion ? `-controller-${controllerVersion}` : ''}-linux-x64-glibc`;
   return {
-    artifactPath: `/artifacts/dsh-${version}.tar.gz`,
-    filename: `dsh-${version}.tar.gz`,
-    runtimeId: `${version}-linux-x64-glibc`,
+    artifactPath: `/artifacts/dsh-${runtimeId}.tar.gz`,
+    filename: `dsh-${runtimeId}.tar.gz`,
+    runtimeId,
     dshVersion: version,
     version,
     buildId: 'build-1',
     sha256: 'a'.repeat(64),
     size: 1,
     target: { platform: 'linux', arch: 'x64', libc: 'glibc' },
+    ...controllerVersion ? { controllerVersion } : {},
   };
+}
+
+/** The registry package name a spec installs; used to key per-plugin fixtures. */
+function packageName(spec) {
+  if (typeof spec !== 'string') return '';
+  if (spec.startsWith('@')) {
+    const slash = spec.indexOf('/');
+    const at = slash < 0 ? -1 : spec.indexOf('@', slash);
+    return at > 0 ? spec.slice(0, at) : spec;
+  }
+  const at = spec.indexOf('@');
+  return at > 0 ? spec.slice(0, at) : spec;
 }
 
 export function remoteState() {
@@ -60,6 +74,13 @@ export function remoteState() {
     profiles: undefined,
     profileCalls: 0,
     profilesError: null,
+    remotePlugins: [],
+    pluginRemovals: [],
+    pluginInstalls: [],
+    pluginInstallResults: null,
+    failPluginInstall: null,
+    failPluginRemove: null,
+    backupCalls: 0,
   };
 }
 
@@ -86,7 +107,7 @@ function channelFor(state) {
   return channel;
 }
 
-function controllerFor(state, channel) {
+function controllerFor(state, channel, runtimeId = null) {
   return {
     async profiles() {
       state.profileCalls += 1;
@@ -106,6 +127,7 @@ function controllerFor(state, channel) {
         instanceId: `instance-${state.sequence}`,
         dshVersion: version,
         buildId,
+        createdBy: runtimeId,
         workspace,
         profileId,
         endpoint: { host: '127.0.0.1', port: 41000 + state.sequence },
@@ -186,7 +208,36 @@ export class FakeRemoteHost extends EventEmitter {
         if (path === '/api/ssh-remote/settings/update' && state.failSettingsUpdate) {
           throw Object.assign(new Error('simulated settings write failure'), { code: 'CONFIG_SYNC_PARTIAL' });
         }
+        if (path === '/api/ssh-remote/plugins/list') {
+          return { ok: true, bundles: state.remotePlugins ?? [] };
+        }
+        if (path === '/api/ssh-remote/sync/backup') {
+          state.backupCalls += 1;
+          return {
+            ok: true,
+            backup: {
+              id: `backup-${state.backupCalls}`,
+              path: `/remote/backups/${state.backupCalls}`,
+              createdAt: '2026-01-01T00:00:00Z',
+              profile: body?.profile ?? 'web',
+            },
+          };
+        }
+        if (path === '/api/ssh-remote/plugins/remove') {
+          state.pluginRemovals.push(body?.name);
+          if (state.failPluginRemove === body?.name) {
+            throw Object.assign(new Error('simulated remove failure'), { code: 'REMOTE_OPERATION_FAILED' });
+          }
+          return { ok: true, result: { application: 'applied', changed: true } };
+        }
         if (path === '/api/ssh-remote/plugins/install') {
+          const name = packageName(body?.spec ?? '');
+          state.pluginInstalls.push({ spec: body?.spec, requestId: body?.requestId, name });
+          const custom = state.pluginInstallResults?.[name];
+          if (custom) return { ok: custom.ok !== false, result: custom };
+          if (state.failPluginInstall === true || state.failPluginInstall === name) {
+            throw Object.assign(new Error('simulated install failure'), { code: 'REMOTE_OPERATION_FAILED' });
+          }
           if (state.restartNext) {
             state.restartNext = false;
             return { ok: true, result: { application: 'restart-required', pendingBuilds: [] } };
@@ -209,30 +260,38 @@ export class FakeRemoteHost extends EventEmitter {
   }
 }
 
-export async function serviceFixture({ version = '1.0.0', shareLocalPlugins, uploadLocalPluginSnapshot, localBundles, autoConnectOnStart = false } = {}) {
+export async function serviceFixture({
+  version = '1.0.0', controllerVersion = null, remotePlugins = [], shareLocalPlugins,
+  uploadLocalPluginSnapshot, localBundles, autoConnectOnStart = false,
+} = {}) {
   const store = await createStore();
   const state = remoteState();
+  state.remotePlugins = remotePlugins;
   let localVersion = version;
+  let currentControllerVersion = controllerVersion;
+  const currentArtifact = (requestedVersion) => artifact(requestedVersion ?? localVersion, currentControllerVersion);
   const credentialCalls = [];
   const descriptors = [
     { ns: 'ui-theme', value: { preference: 'dark', fontSize: 14 } },
     { ns: 'model', value: { enabled: true, apiKey: 'do-not-copy' }, schema: { properties: { apiKey: { credentialRef: 'TEST_KEY' } } }, secrets: [{ path: ['apiKey'], set: true }] },
   ];
-  const openControllerSession = async ({ alias, version: requestedVersion }) => {
-    const channel = channelFor(state);
+  const openControllerSession = async ({ alias, version: requestedVersion, channel: sharedChannel }) => {
+    // Mirrors the real helper: a supplied channel is reused, not replaced.
+    const channel = sharedChannel ?? channelFor(state);
     channel.config.alias = alias;
+    const selected = currentArtifact(requestedVersion);
     return {
       channel,
-      controller: controllerFor(state, channel),
-      installed: { home: '/home/test', root: '/home/test/.dsh/ssh-remote', runtime: { ...artifact(requestedVersion), ...artifact(requestedVersion).target } },
-      artifact: artifact(requestedVersion),
-      target: artifact(requestedVersion).target,
+      controller: controllerFor(state, channel, selected.runtimeId),
+      installed: { home: '/home/test', root: '/home/test/.dsh/ssh-remote', runtime: { ...selected, ...selected.target } },
+      artifact: selected,
+      target: selected.target,
     };
   };
   const service = new SshRemoteService({
     store,
     autoConnectOnStart,
-    catalog: { select: async ({ version: requestedVersion }) => artifact(requestedVersion) },
+    catalog: { select: async ({ version: requestedVersion }) => currentArtifact(requestedVersion) },
     localVersion: () => localVersion,
     localReturnUrl: 'http://127.0.0.1:54542/?tkn=local-secret',
     settings: { describe: () => descriptors },
@@ -250,7 +309,7 @@ export async function serviceFixture({ version = '1.0.0', shareLocalPlugins, upl
       // Mirrors the real helper: a supplied channel is shared, not replaced.
       const channel = options.channel ?? channelFor(state);
       channel.config.alias = options.alias;
-      const controller = controllerFor(state, channel);
+      const controller = controllerFor(state, channel, options.runtimeId ?? null);
       const host = new FakeRemoteHost({
         channel,
         controller,
@@ -267,7 +326,7 @@ export async function serviceFixture({ version = '1.0.0', shareLocalPlugins, upl
         channel,
         controller,
         owned: options.channel === undefined,
-        installed: { home: '/home/test', runtime: { ...artifact(options.version), ...artifact(options.version).target } },
+        installed: { home: '/home/test', runtime: { ...currentArtifact(options.version), ...currentArtifact(options.version).target } },
       };
     },
     RemoteHostConnection: class extends FakeRemoteHost {
@@ -283,6 +342,8 @@ export async function serviceFixture({ version = '1.0.0', shareLocalPlugins, upl
     credentialCalls,
     descriptors,
     setVersion(value) { localVersion = value; },
+    setControllerVersion(value) { currentControllerVersion = value; },
+    runtimeIdFor(value = localVersion, controller = currentControllerVersion) { return artifact(value, controller).runtimeId; },
     async close() { await service.close(); await store.close(); },
   };
 }

@@ -12,7 +12,8 @@ SSH Remote 在本地和远程 DSH Web 之间切换。Desktop 使用当前窗口�
 
 - Desktop 多主机 Guest 基础与切页保活；当前容器仍属中央面板，SSH 尚未接入新的同级页签框架；
 - 左侧底部提供 SSH 切换入口，使用公开 `layout.selectPanel()`；
-- 本地版本驱动的远端运行包安装、复用、升级和停止；
+- 本地版本驱动的远端运行包安装、复用、升级和停止；远端 Host 落后时自动升级到本机版本，本机 DSH 落后于远端时拒绝连接并提示先更新本机；
+- 远端 DSH 升级后，与本机版本不兼容且本机有对应新版本的官方远端插件会自动备份、remove 后 install 到本机版本（restart-required 时重启该 Host），其余插件版本不在自动范围；
 - Linux x64/arm64 与 macOS arm64/x64 运行包构建；
 - SSH agent、无口令/加密私钥、密码和 keyboard-interactive 认证；
 - 严格主机密钥检查、用户确认未知指纹、known_hosts 写入；

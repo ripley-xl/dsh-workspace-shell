@@ -84,9 +84,10 @@ export function createSshLauncher(React, deps = {}) {
       errorAuthRequired: 'SSH authentication needs manual input.', errorHostKey: 'The SSH host key is not trusted yet.',
       errorSshConfig: 'The OpenSSH configuration could not be resolved.', errorConnectionFailed: 'The SSH connection failed.',
       errorInstanceUnavailable: 'The remote Host instance is no longer available.', errorTunnel: 'The port forward failed.',
-      errorUpgradeRequired: 'Confirm the remote upgrade before connecting.', errorVersionMismatch: 'The remote DSH version differs from the local version.',
+      errorLocalDshOutdated: 'The remote Host runs a newer DSH version. Update the local DSH before connecting.', errorVersionMismatch: 'The remote DSH version differs from the local version.',
       errorAliasExists: 'This OpenSSH alias is already saved.', errorServiceDisposed: 'The SSH Remote service is unavailable.',
       errorInvalidProfile: 'The Web profile is invalid.', errorCancelled: 'The operation was cancelled.',
+      pluginsAligned: (count) => `Remote plugins aligned to local versions: ${count}`,
       webOpened: 'Web view opened.', disconnectedNotice: 'SSH disconnected; remote Hosts keep running.', restarted: 'SSH connection rebuilt.',
       connectNotice: 'SSH connected and refreshed.', hostSaved: 'Connection saved.', stoppedNotice: 'Web Host stopped.',
     },
@@ -148,9 +149,10 @@ export function createSshLauncher(React, deps = {}) {
       errorAuthRequired: 'SSH 认证需要手动输入。', errorHostKey: 'SSH 主机密钥尚未信任。',
       errorSshConfig: '无法解析 OpenSSH 配置。', errorConnectionFailed: 'SSH 连接失败。',
       errorInstanceUnavailable: '远端 Host 实例已不可用。', errorTunnel: '端口转发失败。',
-      errorUpgradeRequired: '连接前需要确认远端升级。', errorVersionMismatch: '远端 DSH 版本与本机不同。',
+      errorLocalDshOutdated: '本机 DSH 版本低于远端 Host，请先更新本机 DSH 后重试。', errorVersionMismatch: '远端 DSH 版本与本机不同。',
       errorAliasExists: '这个 OpenSSH 别名已经保存。', errorServiceDisposed: 'SSH Remote 服务不可用。',
       errorInvalidProfile: 'Web profile 无效。', errorCancelled: '操作已取消。',
+      pluginsAligned: (count) => `已把远端插件对齐到本机版本：${count} 个`,
       webOpened: '已打开 Web 视图。', disconnectedNotice: 'SSH 已断开，远端 Host 继续运行。', restarted: 'SSH 连接已重建。',
       connectNotice: 'SSH 已连接并刷新。', hostSaved: '连接已保存。', stoppedNotice: 'Web Host 已停止。',
     },
@@ -161,13 +163,13 @@ export function createSshLauncher(React, deps = {}) {
     SSH_AUTH_FAILED: 'errorAuthFailed', SSH_AUTH_INTERACTION_REQUIRED: 'errorAuthRequired', SSH_HOST_KEY_UNKNOWN: 'errorHostKey',
     SSH_CONFIG_INVALID: 'errorSshConfig', SSH_UNSUPPORTED_CONFIG: 'errorSshConfig', SSH_CONNECTION_FAILED: 'errorConnectionFailed',
     REMOTE_INSTANCE_UNAVAILABLE: 'errorInstanceUnavailable', TUNNEL_FAILED: 'errorTunnel',
-    UPGRADE_CONFIRMATION_REQUIRED: 'errorUpgradeRequired', REMOTE_VERSION_MISMATCH: 'errorVersionMismatch',
+    LOCAL_DSH_OUTDATED: 'errorLocalDshOutdated', REMOTE_VERSION_MISMATCH: 'errorVersionMismatch',
     HOST_ALIAS_EXISTS: 'errorAliasExists', SERVICE_DISPOSED: 'errorServiceDisposed',
     INVALID_PROFILE_ID: 'errorInvalidProfile', INVALID_WEB_URL: 'invalidWebUrl', INVALID_RESPONSE: 'invalidResponse',
     OPERATION_CANCELLED: 'errorCancelled', ALIAS_REQUIRED: 'aliasRequired', PROFILE_NOT_WEB: 'disabledNotWeb',
   };
   const NOTICE_KEYS = {
-    CONNECTED: 'connectNotice', DISCONNECTED: 'disconnectedNotice', RESTARTED: 'restarted',
+    CONNECTED: 'connectNotice', DISCONNECTED: 'disconnectedNotice', RESTARTED: 'restarted', PLUGINS_ALIGNED: 'pluginsAligned',
     AUTO_CONNECT_ON: 'autoConnectSaved', AUTO_CONNECT_OFF: 'autoConnectOffSaved',
     HOST_SAVED: 'hostSaved', HOST_DELETED: 'deleted', WEB_OPENED: 'webOpened', WEB_STOPPED: 'stoppedNotice',
     OPERATION_CANCELLED: 'errorCancelled',
@@ -248,9 +250,29 @@ export function createSshLauncher(React, deps = {}) {
       port: safePort(raw.port, 1, 65_535),
       identityFiles: identityFiles.filter((item) => typeof item === 'string' && item.trim()).slice(0, 8),
       hostCount: Number.isSafeInteger(raw.hostCount) && raw.hostCount >= 0 ? raw.hostCount : Number.isSafeInteger(raw.hosts) ? raw.hosts : null,
+      pluginAlignment: normalizePluginAlignment(raw.pluginAlignment),
       portForwards: normalizePorts(Array.isArray(raw.portForwards) ? raw.portForwards : raw.ports),
       error: raw.error ? safeError(raw.error) : null,
     };
+  }
+  function normalizePluginAlignment(value) {
+    const raw = object(value);
+    if (!Object.hasOwn(raw, 'ok') && !Array.isArray(raw.items)) return null;
+    const items = (Array.isArray(raw.items) ? raw.items : []).slice(0, 32).map((item) => {
+      const entry = object(item);
+      const name = firstString(entry.name);
+      if (!name) return null;
+      const error = firstString(entry.error?.code);
+      return {
+        name: name.slice(0, 256),
+        fromVersion: firstString(entry.fromVersion).slice(0, 128),
+        toVersion: firstString(entry.toVersion).slice(0, 128),
+        ok: entry.ok === true,
+        application: firstString(entry.application).slice(0, 64),
+        ...error ? { error: { code: error } } : {},
+      };
+    }).filter(Boolean);
+    return { ok: raw.ok === true, items, restarted: raw.restarted === true };
   }
   function normalizeStatus(value) {
     const raw = payload(value);
@@ -350,10 +372,13 @@ export function createSshLauncher(React, deps = {}) {
       },
     };
   }
-  function statusTextFor(t, code) {
+  function statusTextFor(t, notice) {
+    const code = typeof notice === 'string' ? notice : notice?.code;
     if (!code) return t('requestFailed');
     const key = NOTICE_KEYS[code] ?? ERROR_KEYS[code];
-    return key ? t(key) : t('requestFailed');
+    if (!key) return t('requestFailed');
+    const count = typeof notice === 'object' && Number.isSafeInteger(notice?.count) ? notice.count : undefined;
+    return t(key, count);
   }
   function phaseText(t, phase) {
     return t('phase_' + (PHASES.has(phase) ? phase : 'unknown'));
@@ -403,7 +428,7 @@ export function createSshLauncher(React, deps = {}) {
     if (!notice?.code) return null;
     const error = notice.kind === 'error';
     return h('div', { className: `wsh-ssh-notice${error ? ' wsh-ssh-notice-error' : ''}`, role: error ? 'alert' : 'status' },
-      h('span', null, statusTextFor(t, notice.code)),
+      h('span', null, statusTextFor(t, notice)),
       onDismiss ? h('button', { type: 'button', className: 'wsh-ssh-link', 'aria-label': t('dismiss'), onClick: onDismiss }, '×') : null);
   }
 
@@ -806,7 +831,10 @@ export function createSshLauncher(React, deps = {}) {
     const notify = typeof props.notify === 'function' ? props.notify : depsCallbacks.notify;
     const t = useMemo(() => {
       const dictionary = messages[locale === 'zh' ? 'zh' : 'en'];
-      return (key) => dictionary[key] ?? messages.en[key] ?? key;
+      return (key, ...args) => {
+        const value = dictionary[key] ?? messages.en[key] ?? key;
+        return typeof value === 'function' ? value(...args) : value;
+      };
     }, [locale]);
 
     const [status, setStatus] = useState({ loading: true, stale: false, error: null, value: { connections: [], dshVersion: '' } });
@@ -1051,7 +1079,7 @@ export function createSshLauncher(React, deps = {}) {
 
     async function connectOnce(connection, controller) {
       const result = payload(await api('/connect', {
-        hostId: connection.id, allowUpgrade: false, background: false,
+        hostId: connection.id, background: false,
       }, controller?.signal));
       return normalizeConnection(object(result).host);
     }
@@ -1087,7 +1115,10 @@ export function createSshLauncher(React, deps = {}) {
           ...current,
           [connection.id]: { ...(current[connection.id] ?? emptyDetail(connection.id)), connected: true, phase: 'connected', error: null },
         }));
-        putNotice(`host:${connection.id}`, { kind: 'notice', code: regenerate ? 'RESTARTED' : 'CONNECTED' });
+        const aligned = host?.pluginAlignment;
+        putNotice(`host:${connection.id}`, aligned?.ok && aligned.items?.length
+          ? { kind: 'notice', code: 'PLUGINS_ALIGNED', count: aligned.items.length }
+          : { kind: 'notice', code: regenerate ? 'RESTARTED' : 'CONNECTED' });
         track(regenerate ? 'restart' : 'connect', 'complete', connection.id);
         notifySafely(regenerate ? 'restarted' : 'connectNotice');
         void loadDetail(connection.id);

@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-workspace-shell",
-  "version": "0.5.7",
+  "version": "0.5.9",
   "private": true,
   "type": "module",
   "description": "Plugin-only multi-profile workspace frame for DeepSeek Harness",

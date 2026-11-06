@@ -80,6 +80,7 @@ export function publicProfileInstance(entry, profileId = null) {
     },
     dshVersion: typeof instance.dshVersion === 'string' ? instance.dshVersion : null,
     buildId: typeof instance.buildId === 'string' ? instance.buildId : null,
+    ...typeof instance.createdBy === 'string' && instance.createdBy ? { createdBy: instance.createdBy } : {},
     startedAt: typeof instance.startedAt === 'string' ? instance.startedAt : null,
     lastAttachAt: typeof instance.lastAttachAt === 'string' ? instance.lastAttachAt : null,
   };

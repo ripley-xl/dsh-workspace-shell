@@ -1,5 +1,5 @@
 import { readFile } from 'node:fs/promises';
-import { validateTabOrder } from './tab-order-store.js';
+import { validateTabAppearance, validateTabOrder } from './workspace-preferences-store.js';
 
 const PREFIX = '/api/workspace-shell';
 const MAX_BODY = 128 * 1024;
@@ -29,7 +29,7 @@ async function body(request) {
   return value;
 }
 
-export function registerShellRoutes(ctx, service, { assetRoot = new URL('../../assets/', import.meta.url), tabOrder = null } = {}) {
+export function registerShellRoutes(ctx, service, { assetRoot = new URL('../../assets/', import.meta.url), preferences = null } = {}) {
   const releases = [];
   const handlers = {
     '/catalog': (input) => service.catalog({ ownerId: input.ownerId }),
@@ -50,14 +50,25 @@ export function registerShellRoutes(ctx, service, { assetRoot = new URL('../../a
       if (results.some((item) => item.status === 'rejected')) throw invalid('RUNTIME_STOP_FAILED');
       return { stopped: owned.length };
     },
-    // Tab order is a per-profile UI preference: unavailable storage reports empty
-    // reads and unsaved writes instead of failing tab creation on the Client.
-    '/tab-order/get': async () => ({ order: tabOrder ? await tabOrder.read() : [] }),
+    // Tab order and appearance are per-profile UI preferences: unavailable
+    // storage reports empty reads and unsaved writes instead of failing tab
+    // creation on the Client.
+    '/tab-order/get': async () => ({ order: preferences ? await preferences.readOrder() : [] }),
     '/tab-order/set': async (input) => {
       let order;
       try { order = validateTabOrder({ version: 1, order: input.order }).order; } catch { throw invalid(); }
-      if (!tabOrder) return { saved: false };
-      return { saved: await tabOrder.write(order) };
+      if (!preferences) return { saved: false };
+      return { saved: await preferences.writeOrder(order) };
+    },
+    '/tab-appearance/get': async () => {
+      if (!preferences) return { entries: [], available: false };
+      return preferences.readAppearance();
+    },
+    '/tab-appearance/set': async (input) => {
+      let entries;
+      try { entries = validateTabAppearance({ version: 1, entries: input.entries }).entries; } catch { throw invalid(); }
+      if (!preferences) return { saved: false };
+      return { saved: await preferences.writeAppearance(entries) };
     },
   };
   let disposal;

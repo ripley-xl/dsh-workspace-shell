@@ -1,9 +1,9 @@
 // Remembered tab order: bounded identity tokens only, never titles, URLs, tokens,
 // working directories, or session content.
 //
-// The Host validator in src/host/tab-order-store.js uses the same limits; keep
-// both copies in sync. This module stays import-free because the Shell build
-// concatenates it with the rest of the Client.
+// The Host validator in src/host/workspace-preferences-store.js uses the same
+// limits; keep both copies in sync. This module stays import-free because the
+// Shell build concatenates it with the rest of the Client.
 const DEFAULT_LIMIT = 64;
 const DEFAULT_TOKEN_LENGTH = 160;
 const TOKEN = /^[A-Za-z0-9:._-]{1,160}$/u;

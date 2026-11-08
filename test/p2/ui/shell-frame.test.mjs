@@ -35,6 +35,20 @@ function makeWorkspace(calls, options = {}) {
     runtimes: options.runtimes ?? [],
   });
   const connections = observable(options.connections ?? []);
+  const appearance = observable(Object.freeze({ revision: 0 }));
+  const appearanceEntries = new Map(Object.entries(options.appearances ?? {}));
+  const appearanceColors = options.appearanceColors ?? ['blue', 'green', 'amber', 'red', 'gray'];
+  const getTabAppearance = (tab) => appearanceEntries.get(tab?.id) ?? null;
+  const canCustomizeTab = (tab) => options.appearanceEditable !== false && !!tab && tab.kind !== 'launcher';
+  const notifyAppearance = () => appearance.set(Object.freeze({ revision: (appearance.getSnapshot().revision ?? 0) + 1 }));
+  const setTabAppearance = async (id, value) => {
+    calls.push(['appearance', id, value]);
+    if (options.appearanceError) throw Object.assign(new Error('secret appearance message'), { code: options.appearanceError });
+    if (!value || (!value.name && !value.color)) appearanceEntries.delete(id);
+    else appearanceEntries.set(id, Object.freeze({ ...(value.name ? { name: value.name } : {}), ...(value.color ? { color: value.color } : {}) }));
+    notifyAppearance();
+    return true;
+  };
   const timing = createWebTiming({ now: () => 0, limit: 4 });
   const currentTabs = () => tabStore.getSnapshot().tabs;
   const select = (id) => tabStore.set({ ...tabStore.getSnapshot(), activeId: id });
@@ -66,6 +80,7 @@ function makeWorkspace(calls, options = {}) {
   return {
     tabs, info: { getSnapshot: infoStore.getSnapshot, subscribe: infoStore.subscribe, set: infoStore.set },
     connections: { getSnapshot: connections.getSnapshot, subscribe: connections.subscribe, set: connections.set },
+    appearance, appearanceColors, appearanceEntries, getTabAppearance, canCustomizeTab, setTabAppearance,
     timing, tabStore, canWeb: options.canWeb ?? true, canTui: options.canTui ?? true,
     async activate(id) { calls.push(['activate', id]); if (options.activateError) throw Object.assign(new Error('secret activate message'), { code: options.activateError }); select(id); return true; },
     async openLauncher() { calls.push(['openLauncher']); return add(Object.freeze({ id: 'launcher-1', kind: 'launcher', key: 'launcher:2', title: '新建工作区', phase: 'ready', identity: identity(), closable: true })); },
@@ -357,6 +372,83 @@ test('SSH tab status provides the dot, connection name and title without a URL',
   assert.equal(rendered.includes('http://'), false);
   assert.equal(rendered.includes('token'), false);
 });
+test('custom tab appearance renders a color marker and drives the window title', async (t) => {
+  const f = fixture({ workspace: true, workspaceOptions: {
+    tabs: [remoteTab('tab-a')], activeId: 'tab-a', appearances: { 'tab-a': { name: '生产', color: 'red' } },
+  } });
+  const app = await mount(t, f.views.Frame, f.props, f.desktop);
+  assert.equal(f.document.title, '生产 — DeepSeek Harness');
+  assert.equal(findTab(app.root, 'tab-a').props['data-appearance-color'], 'red');
+  assert.equal(findTab(app.root, 'tab-a').props['data-custom-title'], 'true');
+  assert.match(textOf(findBody(app.root, 'tab-a')), /生产/);
+  assert.equal(app.root.findAllByProps({ className: 'ct-marker', 'data-color': 'red' }).length, 1);
+});
+
+test('the tab appearance editor saves the trimmed name and chosen marker', async (t) => {
+  const f = fixture({ workspace: true, workspaceOptions: { tabs: [remoteTab('tab-a')], activeId: 'tab-a' } });
+  const app = await mount(t, f.views.Frame, f.props, f.desktop);
+  const edit = app.root.findAll((node) => node.props?.['data-chrome-tab-edit'] === 'tab-a')[0];
+  await flushEffects(() => edit.props.onClick({ stopPropagation() {}, preventDefault() {} }));
+  assert.equal(app.root.findAllByProps({ 'data-tab-editor': 'tab-a' }).length, 1);
+  assert.ok(f.calls.some((call) => call[0] === 'overlay' && call[1] === true));
+
+  const input = app.root.findAll((node) => node.props?.['data-tab-name'] === '')[0];
+  await flushEffects(() => input.props.onChange({ target: { value: '  生产  ' } }));
+  const red = app.root.findAll((node) => node.props?.['data-tab-color'] === 'red')[0];
+  await flushEffects(() => red.props.onClick());
+  const form = app.root.findByProps({ 'data-tab-editor': 'tab-a' });
+  await flushEffects(() => form.props.onSubmit({ preventDefault() {} }));
+
+  assert.deepEqual(f.calls.filter((call) => call[0] === 'appearance'), [['appearance', 'tab-a', { name: '生产', color: 'red' }]]);
+  assert.equal(f.workspace.appearanceEntries.get('tab-a').name, '生产');
+  assert.equal(f.workspace.appearanceEntries.get('tab-a').color, 'red');
+  assert.equal(app.root.findAllByProps({ 'data-tab-editor': 'tab-a' }).length, 0);
+  assert.equal(f.document.title, '生产 — DeepSeek Harness');
+  assert.ok(f.calls.some((call) => call[0] === 'overlay' && call[1] === false));
+});
+
+test('the appearance editor cancels on Escape without saving', async (t) => {
+  const f = fixture({ workspace: true, workspaceOptions: { tabs: [remoteTab('tab-a')], activeId: 'tab-a' } });
+  const app = await mount(t, f.views.Frame, f.props, f.desktop);
+  await flushEffects(() => app.root.findAll((node) => node.props?.['data-chrome-tab-edit'] === 'tab-a')[0]
+    .props.onClick({ stopPropagation() {}, preventDefault() {} }));
+  const form = app.root.findByProps({ 'data-tab-editor': 'tab-a' });
+  await flushEffects(() => form.props.onKeyDown({ key: 'Escape', stopPropagation() {}, preventDefault() {} }));
+  assert.equal(app.root.findAllByProps({ 'data-tab-editor': 'tab-a' }).length, 0);
+  assert.equal(f.calls.some((call) => call[0] === 'appearance'), false);
+  assert.equal(f.calls.some((call) => call[0] === 'overlay' && call[1] === false), true);
+});
+
+test('a failed appearance save keeps the editor open with a safe error', async (t) => {
+  const f = fixture({ workspace: true, workspaceOptions: {
+    tabs: [remoteTab('tab-a')], activeId: 'tab-a', appearanceError: 'TAB_APPEARANCE_UNSAVED',
+  } });
+  const app = await mount(t, f.views.Frame, f.props, f.desktop);
+  await flushEffects(() => app.root.findAll((node) => node.props?.['data-chrome-tab-edit'] === 'tab-a')[0]
+    .props.onClick({ stopPropagation() {}, preventDefault() {} }));
+  await flushEffects(() => app.root.findByProps({ 'data-tab-editor': 'tab-a' }).props.onSubmit({ preventDefault() {} }));
+  assert.equal(app.root.findAllByProps({ 'data-tab-editor': 'tab-a' }).length, 1);
+  assert.match(jsonText(app.toJSON()), /自定义显示未能保存/);
+  assert.equal(f.workspace.appearanceEntries.size, 0);
+  const form = app.root.findByProps({ 'data-tab-editor': 'tab-a' });
+  await flushEffects(() => form.props.onKeyDown({ key: 'Escape', stopPropagation() {}, preventDefault() {} }));
+});
+
+test('Local can be customized while launcher tabs expose no editor', async (t) => {
+  const f = fixture({ workspace: true, workspaceOptions: { tabs: [launcherTab], activeId: 'local' } });
+  const app = await mount(t, f.views.Frame, f.props, f.desktop);
+  assert.equal(app.root.findAll((node) => node.props?.['data-chrome-tab-edit'] === 'local').length, 1);
+  assert.equal(app.root.findAll((node) => node.props?.['data-chrome-tab-edit'] === 'tab-launcher').length, 0);
+  await flushEffects(() => app.root.findAll((node) => node.props?.['data-chrome-tab-edit'] === 'local')[0]
+    .props.onClick({ stopPropagation() {}, preventDefault() {} }));
+  const input = app.root.findAll((node) => node.props?.['data-tab-name'] === '')[0];
+  await flushEffects(() => input.props.onChange({ target: { value: '本机开发' } }));
+  const blue = app.root.findAll((node) => node.props?.['data-tab-color'] === 'blue')[0];
+  await flushEffects(() => blue.props.onClick());
+  await flushEffects(() => app.root.findByProps({ 'data-tab-editor': 'local' }).props.onSubmit({ preventDefault() {} }));
+  assert.deepEqual(f.workspace.appearanceEntries.get('local'), { name: '本机开发', color: 'blue' });
+});
+
 test('drop and Alt+Arrow reorder through the controller without changing identity', async (t) => {
   const first = remoteTab('tab-a');
   const second = remoteTab('tab-b');

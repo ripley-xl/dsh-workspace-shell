@@ -7,6 +7,7 @@ import { createTabController } from '../../../packages/shell/src/tab-controller.
 import { createWorkspaceClient } from '../../../packages/shell/src/workspace-client.js';
 import { createWebTiming } from '../../../packages/shell/src/web-timing.js';
 import { createTabOrderMemory } from '../../../packages/shell/src/tab-order.js';
+import { TAB_APPEARANCE_COLORS, createTabAppearanceMemory } from '../../../packages/shell/src/tab-appearance.js';
 import { createSshRequest } from '../../../packages/manager/src/client/workspace-extension.js';
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
@@ -147,6 +148,7 @@ const harness = (t, options = {}) => {
   const client = createWorkspaceClient({ window, document, ctx, fetch: fetcher, createTabState, createTabController, isFrameActive: options.isFrameActive,
     installInputGate(service) { assert.equal(service, shortcuts); return gate; }, createDesktopGuest, createTuiProvider,
     createTabOrderMemory: options.createTabOrderMemory === false ? undefined : (options.createTabOrderMemory ?? createTabOrderMemory),
+    createTabAppearanceMemory: options.createTabAppearanceMemory === false ? undefined : (options.createTabAppearanceMemory ?? createTabAppearanceMemory),
     ...(options.noTiming ? {} : { now: () => clock.now }),
     createWebTiming: options.noTiming ? undefined : (config) => createWebTiming({ limit: 8, now: () => clock.now }),
     createBrowserGuest: options.createBrowserGuest });
@@ -1384,6 +1386,127 @@ test('dispose clears a pending remembered-order save', async (t) => {
   await h.client.dispose();
   assert.equal(h.timers.size, 0);
 });
+
+// --- custom tab appearance ---------------------------------------------------
+
+test('appearance hydration applies by stable identity, keeps original titles, and rejects launchers', async (t) => {
+  const entries = [
+    { id: 'local', name: '本机开发', color: 'blue' },
+    { id: 'web:alpha', name: 'Alpha 生产', color: 'green' },
+    { id: 'tui:beta', name: 'Beta TUI', color: 'amber' },
+    { id: 'ssh:c1:web', name: 'SSH 生产', color: 'red' },
+  ];
+  const h = await loaded(t, { handlers: { '/tab-appearance/get': () => ({ entries, available: true }) } });
+  assert.deepEqual([...h.client.appearanceColors], [...TAB_APPEARANCE_COLORS]);
+  assert.equal(h.client.canCustomizeTab(h.client.tabs.getSnapshot().tabs[0]), true);
+  assert.deepEqual(h.client.getTabAppearance(h.client.tabs.getSnapshot().tabs[0]), { name: '本机开发', color: 'blue' });
+
+  h.autoSurfaces();
+  const web = await openWeb(h, 'alpha');
+  const tui = await h.client.openTui('beta', '/work', true);
+  const ssh = await h.client.openSshWeb({ id: 'c1', name: 'dev-box', connected: true }, 'http://127.0.0.1:49152/');
+  const sshSecond = await h.client.openSshWeb({ id: 'c1', name: 'dev-box', connected: true }, 'http://127.0.0.1:49152/');
+  await flush();
+
+  assert.deepEqual(h.client.getTabAppearance(tab(h.client, web)), { name: 'Alpha 生产', color: 'green' });
+  assert.deepEqual(h.client.getTabAppearance(tab(h.client, tui)), { name: 'Beta TUI', color: 'amber' });
+  assert.deepEqual(h.client.getTabAppearance(tab(h.client, ssh)), { name: 'SSH 生产', color: 'red' });
+  assert.equal(h.client.getTabAppearance(tab(h.client, ssh)), h.client.getTabAppearance(tab(h.client, sshSecond)), 'views of one identity share appearance');
+  assert.equal(tab(h.client, web).title, 'alpha · Web 1', 'the stored record title is never changed');
+  assert.equal(tab(h.client, ssh).title.includes('dev-box'), false);
+  await h.client.close(web);
+  const reopened = await openWeb(h, 'alpha');
+  await flush();
+  assert.deepEqual(h.client.getTabAppearance(tab(h.client, reopened)), { name: 'Alpha 生产', color: 'green' }, 'reopening keeps the identity appearance');
+
+  const launcher = await h.client.openLauncher();
+  assert.equal(h.client.canCustomizeTab(tab(h.client, launcher)), false);
+  await assert.rejects(h.client.setTabAppearance(launcher, { name: 'x' }), { code: 'TAB_APPEARANCE_UNAVAILABLE' });
+});
+
+test('saving appearance posts only display fields and never writes an SSH host record', async (t) => {
+  const posts = [];
+  const h = await loaded(t, { handlers: {
+    '/tab-appearance/get': () => ({ entries: [], available: true }),
+    '/tab-appearance/set': (input) => { posts.push(input); return { saved: true }; },
+  } });
+  h.autoSurfaces();
+  const id = await h.client.openSshWeb({ id: 'c1', name: 'dev-box', connected: true }, 'http://127.0.0.1:49152/?token=secret', { profileId: 'web' });
+  const before = tab(h.client, id);
+  assert.equal(await h.client.setTabAppearance(id, { name: '  生产  ', color: 'red' }), true);
+  assert.deepEqual(posts, [{ entries: [{ id: 'ssh:c1:web', name: '生产', color: 'red' }] }]);
+  assert.deepEqual(h.client.getTabAppearance(tab(h.client, id)), { name: '生产', color: 'red' });
+  assert.equal(tab(h.client, id).title, before.title, 'custom display does not rewrite the tab title');
+  assert.equal(tab(h.client, id).identity, before.identity);
+  assert.equal(h.calls.some((call) => call.url.includes('/api/ssh-remote/hosts')), false);
+  assert.equal(h.calls.some((call) => /\/(?:connect|disconnect)$/.test(call.path)), false);
+  assert.doesNotMatch(JSON.stringify(posts), /token|http|dev-box|hostAlias|hostName|cwd/);
+
+  await h.client.setTabAppearance(id, { name: '', color: null });
+  assert.deepEqual(posts.at(-1), { entries: [] });
+  assert.equal(h.client.getTabAppearance(tab(h.client, id)), null);
+  await assert.rejects(h.client.setTabAppearance(id, { color: 'teal' }), { code: 'TAB_APPEARANCE_INVALID' });
+  assert.equal(h.calls.filter((call) => call.path === '/tab-appearance/set').length, 2, 'invalid input does not reach the Host');
+});
+
+test('an unsaved appearance does not mutate memory, and an unavailable read disables editing', async (t) => {
+  const saved = await loaded(t, { handlers: {
+    '/tab-appearance/get': () => ({ entries: [{ id: 'local', name: '原', color: 'blue' }], available: true }),
+    '/tab-appearance/set': () => ({ saved: false }),
+  } });
+  assert.equal(saved.client.canCustomizeTab(saved.client.tabs.getSnapshot().tabs[0]), true);
+  await assert.rejects(saved.client.setTabAppearance('local', { name: '新', color: 'red' }), { code: 'TAB_APPEARANCE_UNSAVED' });
+  assert.deepEqual(saved.client.getTabAppearance(saved.client.tabs.getSnapshot().tabs[0]), { name: '原', color: 'blue' });
+
+  const unavailable = await loaded(t, { handlers: {
+    '/tab-appearance/get': () => ({ entries: [], available: false }),
+  } });
+  assert.equal(unavailable.client.canCustomizeTab(unavailable.client.tabs.getSnapshot().tabs[0]), false);
+  await assert.rejects(unavailable.client.setTabAppearance('local', { name: 'x' }), { code: 'TAB_APPEARANCE_UNAVAILABLE' });
+  unavailable.autoSurfaces();
+  const web = await openWeb(unavailable, 'alpha');
+  await flush();
+  assert.ok(tab(unavailable.client, web), 'tabs still open without appearance storage');
+});
+
+test('a late appearance read notifies subscribers, enables editing, and applies to an already open tab', async (t) => {
+  const pending = deferred();
+  const h = harness(t, { handlers: { '/tab-appearance/get': () => pending.promise } });
+  assert.equal(h.client.canCustomizeTab(h.client.tabs.getSnapshot().tabs[0]), false);
+  let notifications = 0;
+  h.client.appearance.subscribe(() => { notifications++; });
+  const ssh = await h.client.openSshWeb({ id: 'c1', name: 'dev-box' }, 'http://127.0.0.1:49152/', { profileId: 'web' });
+  assert.equal(h.client.canCustomizeTab(tab(h.client, ssh)), false);
+  pending.resolve({ entries: [{ id: 'local', name: '本机', color: 'blue' }, { id: 'ssh:c1:web', name: '生产', color: 'red' }], available: true });
+  await flush();
+  assert.equal(h.client.info.getSnapshot().phase, 'ready');
+  assert.ok(notifications > 0);
+  assert.equal(h.client.canCustomizeTab(h.client.tabs.getSnapshot().tabs[0]), true);
+  assert.deepEqual(h.client.getTabAppearance(h.client.tabs.getSnapshot().tabs[0]), { name: '本机', color: 'blue' });
+  assert.deepEqual(h.client.getTabAppearance(tab(h.client, ssh)), { name: '生产', color: 'red' });
+});
+
+test('a launcher conversion publishes the appearance identity immediately', async (t) => {
+  const h = await loaded(t, { handlers: {
+    '/tab-appearance/get': () => ({ entries: [{ id: 'tui:alpha', name: '验收 TUI', color: 'green' }], available: true }),
+  } });
+  const launcher = await h.client.openLauncher();
+  let notifications = 0;
+  h.client.appearance.subscribe(() => { notifications++; });
+  await h.client.openLauncherTui(launcher, { profileId: 'alpha', cwd: '/work' });
+  assert.ok(notifications > 0, 'the converted tab publishes its identity without waiting for the provider');
+  assert.deepEqual(h.client.getTabAppearance(tab(h.client, launcher)), { name: '验收 TUI', color: 'green' });
+  assert.equal(h.client.canCustomizeTab(tab(h.client, launcher)), true);
+});
+
+test('appearance is optional in a Client without the memory factory', async (t) => {
+  const h = await loaded(t, { createTabAppearanceMemory: false });
+  assert.equal(h.client.canCustomizeTab(h.client.tabs.getSnapshot().tabs[0]), false);
+  assert.deepEqual([...h.client.appearanceColors], []);
+  assert.equal(h.client.getTabAppearance(h.client.tabs.getSnapshot().tabs[0]), null);
+  await assert.rejects(h.client.setTabAppearance('local', { name: 'x' }), { code: 'TAB_APPEARANCE_UNAVAILABLE' });
+});
+
 
 // --- launcher, in-place conversion, attach, SSH and measurement --------------
 

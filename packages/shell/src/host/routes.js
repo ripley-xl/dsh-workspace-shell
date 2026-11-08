@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import { validateTabOrder } from './tab-order-store.js';
 
 const PREFIX = '/api/workspace-shell';
 const MAX_BODY = 128 * 1024;
@@ -28,7 +29,7 @@ async function body(request) {
   return value;
 }
 
-export function registerShellRoutes(ctx, service, { assetRoot = new URL('../../assets/', import.meta.url) } = {}) {
+export function registerShellRoutes(ctx, service, { assetRoot = new URL('../../assets/', import.meta.url), tabOrder = null } = {}) {
   const releases = [];
   const handlers = {
     '/catalog': (input) => service.catalog({ ownerId: input.ownerId }),
@@ -48,6 +49,15 @@ export function registerShellRoutes(ctx, service, { assetRoot = new URL('../../a
       const results = await Promise.allSettled(owned.map((item) => service.stop({ runtimeId: item.id, ownerId: input.ownerId })));
       if (results.some((item) => item.status === 'rejected')) throw invalid('RUNTIME_STOP_FAILED');
       return { stopped: owned.length };
+    },
+    // Tab order is a per-profile UI preference: unavailable storage reports empty
+    // reads and unsaved writes instead of failing tab creation on the Client.
+    '/tab-order/get': async () => ({ order: tabOrder ? await tabOrder.read() : [] }),
+    '/tab-order/set': async (input) => {
+      let order;
+      try { order = validateTabOrder({ version: 1, order: input.order }).order; } catch { throw invalid(); }
+      if (!tabOrder) return { saved: false };
+      return { saved: await tabOrder.write(order) };
     },
   };
   let disposal;

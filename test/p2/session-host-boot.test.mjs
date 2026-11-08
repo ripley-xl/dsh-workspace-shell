@@ -28,6 +28,8 @@ test('registration mounts through the real Cordis loader with the actual JSONL p
     assert.equal((await registry.lookup(['live'])).sessions.live.state, 'local');
     assert.ok(routes.has('/api/workspace-session-hosts/status'));
     assert.ok(routes.has('/api/workspace-shell/catalog'));
+    assert.ok(routes.has('/api/workspace-shell/tab-order/get'), 'the remembered tab order has a Host route');
+    assert.ok(routes.has('/api/workspace-shell/tab-order/set'));
     assert.equal([...ctx.loader.entries()].some((entry) => entry.options.id === 'workspace-session-host'), false);
   } finally { await ctx?.fiber.dispose(); await rm(root, { recursive: true, force: true }); }
 });
@@ -105,4 +107,57 @@ test('real plugin inventory exposes only nested SSH; its persisted switch preser
     await ctx.fiber.dispose(); ctx = null;
     assert.equal(routes.size, 0, 'unloading the complete bundle releases its routes');
   } finally { await ctx?.fiber.dispose(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('the remembered tab order round-trips through the real Host route and storage domain', async () => {
+  const root = await mkdtemp('/tmp/wsh-order-boot-');
+  let ctx;
+  const routes = new Map();
+  const records = new Map();
+  try {
+    await mkdir(root + '/sessions');
+    const config = [
+      { id: 'sessions', name: '@deepseek-ai/dsh-session-persistence-jsonl', config: { root: root + '/sessions', compression: 'none' } },
+      { id: 'workspace-shell', name: fileURLToPath(new URL('../../packages/shell/index.js', import.meta.url)), config: [] },
+    ];
+    await writeFile(root + '/cordis.json', JSON.stringify(config));
+    ctx = await boot('workspace-test', root + '/cordis.json', [], (context) => {
+      context.provide('profileContext', { home: root, name: 'test', dir: root, cwd: root });
+      context.provide('agents', { get: () => null });
+      context.provide('subprocess', {});
+      context.provide('tools', { register: () => () => {} });
+      context.provide('connection', { fetch: { register(route) { routes.set(route.path, route); return () => routes.delete(route.path); } } });
+      context.provide('storageDomain', {
+        async open(spec) {
+          assert.equal(spec.name, 'workspace_shell');
+          assert.equal(spec.version, 1);
+          return {
+            table(name) {
+              assert.equal(name, 'tab_order');
+              return {
+                get(key) { return records.get(key); },
+                async put(key, value) { records.set(key, value); },
+              };
+            },
+          };
+        },
+      });
+    }, 'file:///opt/homebrew/lib/node_modules/@deepseek-ai/dsh/');
+    const post = (path, input) => routes.get('/api/workspace-shell' + path).fetch(new Request('http://localhost/api/workspace-shell' + path, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input),
+    }));
+    const read = await post('/tab-order/get', {});
+    assert.equal(read.status, 200);
+    assert.deepEqual((await read.json()).result, { order: [] });
+    const write = await post('/tab-order/set', { order: ['local', 'web:alpha'] });
+    assert.equal(write.status, 200);
+    assert.deepEqual((await write.json()).result, { saved: true });
+    assert.deepEqual(records.get('default'), { version: 1, order: ['local', 'web:alpha'] });
+    assert.deepEqual((await (await post('/tab-order/get', {})).json()).result, { order: ['local', 'web:alpha'] });
+    const invalid = await post('/tab-order/set', { order: ['bad token'] });
+    assert.equal(invalid.status, 400);
+  } finally {
+    await ctx?.fiber.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
 });

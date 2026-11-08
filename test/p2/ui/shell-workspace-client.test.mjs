@@ -6,6 +6,7 @@ import { createTabState } from '../../../packages/shell/src/tab-state.js';
 import { createTabController } from '../../../packages/shell/src/tab-controller.js';
 import { createWorkspaceClient } from '../../../packages/shell/src/workspace-client.js';
 import { createWebTiming } from '../../../packages/shell/src/web-timing.js';
+import { createTabOrderMemory } from '../../../packages/shell/src/tab-order.js';
 import { createSshRequest } from '../../../packages/manager/src/client/workspace-extension.js';
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
@@ -145,6 +146,7 @@ const harness = (t, options = {}) => {
   };
   const client = createWorkspaceClient({ window, document, ctx, fetch: fetcher, createTabState, createTabController, isFrameActive: options.isFrameActive,
     installInputGate(service) { assert.equal(service, shortcuts); return gate; }, createDesktopGuest, createTuiProvider,
+    createTabOrderMemory: options.createTabOrderMemory === false ? undefined : (options.createTabOrderMemory ?? createTabOrderMemory),
     ...(options.noTiming ? {} : { now: () => clock.now }),
     createWebTiming: options.noTiming ? undefined : (config) => createWebTiming({ limit: 8, now: () => clock.now }),
     createBrowserGuest: options.createBrowserGuest });
@@ -178,7 +180,13 @@ const harness = (t, options = {}) => {
   t.after(async () => { unmountAll(); await client.dispose(); });
   return { client, window, document, gate, storage, timers, calls, handlers, guests, tuis, tuiFactories, bridgeCalls, shortcuts, autoSurfaces, clock, removeSsh,
     get ownerId() { return calls.find((call) => call.path === '/catalog').input.ownerId; }, get uuids() { return uuids; },
-    runTimer() { const [id, timer] = timers.entries().next().value; timers.delete(id); timer.fn(); return timer.delay; } };
+    runTimer(delay) {
+      const entry = [...timers.entries()].find(([, timer]) => delay === undefined || timer.delay === delay);
+      assert.ok(entry, `no timer with delay ${delay}`);
+      timers.delete(entry[0]);
+      entry[1].fn();
+      return entry[1].delay;
+    } };
 };
 const ofPath = (h, path) => h.calls.filter((call) => call.path === path);
 const loaded = async (t, options) => { const h = harness(t, options); await flush(); assert.equal(h.client.info.getSnapshot().phase, 'ready'); return h; };
@@ -466,7 +474,7 @@ test('authenticated view URLs reach only the Guest, preserve hash, and add the e
   guest.ready();
   await flush();
   assert.equal(tab(h.client, id).phase, 'ready');
-  assert.equal(h.timers.size, 0);
+  assert.deepEqual([...h.timers.values()].map((timer) => timer.delay).filter((delay) => delay !== 300), []);
   assert.equal(guest.focused, 0);
 });
 
@@ -537,12 +545,12 @@ test('Guest readiness timeout changes the tab to safe error and releases the lea
   const h = await loaded(t);
   h.autoSurfaces();
   const id = await openWeb(h);
-  assert.equal(h.runTimer(), 30000);
+  assert.equal(h.runTimer(30000), 30000);
   await flush();
   assert.equal(tab(h.client, id).phase, 'error');
   assert.deepEqual(tab(h.client, id).error, { code: 'WORKSPACE_VIEW_TIMEOUT' });
   assert.equal(h.guests[0].disposed, 1);
-  assert.equal(h.timers.size, 0);
+  assert.deepEqual([...h.timers.values()].map((timer) => timer.delay).filter((delay) => delay !== 300), []);
   h.guests[0].ready();
   await flush();
   assert.equal(tab(h.client, id).phase, 'error');
@@ -1164,16 +1172,17 @@ test('Local-only and Web-only documents with copied owner storage never adopt ca
     { id: 'other-document-terminal', kind: 'tui', profileId: 'alpha', phase: 'running', canStop: true },
   ] }) });
   assert.equal(h.ownerId, 'copied-owner');
-  const initial = h.calls.length;
+  const nonOrderCalls = () => h.calls.filter((call) => call.path !== '/tab-order/set').length;
+  const initial = nonOrderCalls();
   h.window.emit('pagehide');
   await flush();
-  assert.equal(h.calls.length, initial);
+  assert.equal(nonOrderCalls(), initial);
   h.autoSurfaces();
   await openWeb(h);
-  const afterWeb = h.calls.length;
+  const afterWeb = nonOrderCalls();
   h.window.emit('pagehide');
   await flush();
-  assert.equal(h.calls.length, afterWeb);
+  assert.equal(nonOrderCalls(), afterWeb);
   assert.equal(ofPath(h, '/runtime/close-owner').length, 0);
   assert.equal(ofPath(h, '/runtime/stop').length, 0);
   assert.equal(h.client.info.getSnapshot().runtimes[0].id, 'other-document-terminal');
@@ -1215,10 +1224,10 @@ test('normally closing the final TUI removes document ownership so pagehide does
   assert.equal(ofPath(h, '/runtime/stop').length, 1);
   assert.deepEqual(ofPath(h, '/runtime/stop')[0].input, { runtimeId: 'tui-runtime-alpha', ownerId: 'copied-owner' });
   await flush();
-  const before = h.calls.length;
+  const before = h.calls.filter((call) => call.path !== '/tab-order/set').length;
   h.window.emit('pagehide');
   await flush();
-  assert.equal(h.calls.length, before);
+  assert.equal(h.calls.filter((call) => call.path !== '/tab-order/set').length, before);
   assert.equal(ofPath(h, '/runtime/close-owner').length, 0);
 });
 
@@ -1244,12 +1253,136 @@ test('pagehide sends only document-owned terminal cleanup with keepalive and nev
   h.window.emit('pagehide');
   await flush();
   const requests = h.calls.slice(before);
-  assert.deepEqual(requests.map((call) => call.path), ['/runtime/close-owner']);
-  assert.deepEqual(requests[0].input, { ownerId: h.ownerId, runtimeIds: ['tui-runtime-beta'] });
-  assert.equal(requests[0].init.keepalive, true);
-  assert.equal(requests[0].init.credentials, 'same-origin');
+  const order = requests.filter((call) => call.path === '/tab-order/set');
+  assert.equal(order.length, 1, 'a dirty tab order is flushed once on pagehide');
+  assert.equal(order[0].init.keepalive, true);
+  const cleanup = requests.filter((call) => call.path !== '/tab-order/set');
+  assert.deepEqual(cleanup.map((call) => call.path), ['/runtime/close-owner']);
+  assert.deepEqual(cleanup[0].input, { ownerId: h.ownerId, runtimeIds: ['tui-runtime-beta'] });
+  assert.equal(cleanup[0].init.keepalive, true);
+  assert.equal(cleanup[0].init.credentials, 'same-origin');
   assert.equal(ofPath(h, '/runtime/stop').length, 0);
   assert.equal(h.guests[0].disposed, 0);
+});
+
+// --- remembered tab order ---------------------------------------------------
+
+test('a remembered order survives a fresh Client and places reverse opens back in order', async (t) => {
+  const stored = ['local', 'tui:beta', 'web:alpha'];
+  const handlers = {
+    '/tab-order/get': () => ({ order: [...stored] }),
+    '/tab-order/set': (input) => { stored.splice(0, stored.length, ...input.order); return { saved: true }; },
+  };
+  const first = await loaded(t, { handlers });
+  first.autoSurfaces();
+  const web = await openWeb(first, 'alpha');
+  const tui = await first.client.openTui('beta', '/work', true);
+  await flush();
+  assert.deepEqual(first.client.tabs.getSnapshot().tabs.map((tab) => tab.id), ['local', tui, web]);
+
+  const second = await loaded(t, { handlers });
+  second.autoSurfaces();
+  const web2 = await openWeb(second, 'alpha');
+  const tui2 = await second.client.openTui('beta', '/work', true);
+  await flush();
+  assert.deepEqual(second.client.tabs.getSnapshot().tabs.map((tab) => tab.id), ['local', tui2, web2]);
+});
+
+test('a workspace opened while the remembered order loads keeps its identity', async (t) => {
+  const pending = deferred();
+  const saved = [];
+  const h = harness(t, { handlers: {
+    '/tab-order/get': () => pending.promise,
+    '/tab-order/set': (input) => { saved.push([...input.order]); return { saved: true }; },
+  } });
+  h.autoSurfaces();
+  const web = await h.client.open({ providerId: 'local-web', profileId: 'alpha', key: 'alpha:web:pre', title: 'alpha · Web' });
+  await flush();
+  assert.equal(h.client.tabs.getSnapshot().tabs.some((tab) => tab.id === web), true, 'opening is not blocked by the order read');
+  pending.resolve({ order: ['local', 'tui:beta'] });
+  await flush();
+  assert.equal(h.client.info.getSnapshot().phase, 'ready');
+  assert.equal(h.runTimer(300), 300);
+  await flush();
+  assert.deepEqual(saved[saved.length - 1].includes('web:alpha'), true, 'the in-flight workspace is folded back into the order');
+});
+
+test('a drag is remembered once after the debounce window', async (t) => {
+  const saved = [];
+  const h = await loaded(t, { handlers: { '/tab-order/set': (input) => { saved.push([...input.order]); return { saved: true }; } } });
+  h.autoSurfaces();
+  const web = await openWeb(h, 'alpha');
+  const tui = await h.client.openTui('beta', '/work', true);
+  await flush();
+  assert.deepEqual(saved, [], 'nothing is written before the debounce window elapses');
+  assert.equal(h.client.moveTab(tui, 0), true);
+  assert.equal(h.client.moveTab(web, 0), true);
+  assert.equal([...h.timers.values()].filter((timer) => timer.delay === 300).length, 1, 'live moves coalesce into one save');
+  assert.equal(h.runTimer(300), 300);
+  await flush();
+  assert.equal(saved.length, 1);
+  assert.deepEqual(saved[0], ['web:alpha', 'tui:beta', 'local']);
+});
+
+test('a closed tab returns to its remembered slot when reopened', async (t) => {
+  const h = await loaded(t);
+  h.autoSurfaces();
+  const web = await openWeb(h, 'alpha');
+  const tui = await h.client.openTui('beta', '/work', true);
+  await flush();
+  assert.equal(h.client.moveTab(web, 0), true);
+  assert.equal(await h.client.close(web), true);
+  await flush();
+  assert.deepEqual(h.client.tabs.getSnapshot().tabs.map((tab) => tab.id), ['local', tui]);
+  const again = await openWeb(h, 'alpha');
+  await flush();
+  assert.deepEqual(h.client.tabs.getSnapshot().tabs.map((tab) => tab.id), [again, 'local', tui]);
+});
+
+test('unavailable or rejecting tab-order storage leaves tabs and dragging usable', async (t) => {
+  const h = await loaded(t, { handlers: {
+    '/tab-order/get': () => response({ ok: false, error: { code: 'WORKSPACE_REQUEST_FAILED' } }, false),
+    '/tab-order/set': () => response({ ok: false, error: { code: 'WORKSPACE_REQUEST_FAILED' } }, false),
+  } });
+  h.autoSurfaces();
+  const web = await openWeb(h, 'alpha');
+  const tui = await h.client.openTui('beta', '/work', true);
+  await flush();
+  assert.deepEqual(h.client.tabs.getSnapshot().tabs.map((tab) => tab.id), ['local', web, tui]);
+  assert.equal(h.client.moveTab(tui, 0), true);
+  assert.equal(h.runTimer(300), 300);
+  await flush();
+  assert.deepEqual(h.client.tabs.getSnapshot().tabs.map((tab) => tab.id), [tui, 'local', web]);
+  assert.equal(ofPath(h, '/tab-order/get').length, 1, 'the order is read once per Client');
+  assert.equal(ofPath(h, '/tab-order/set').length, 1);
+});
+
+test('launchers are not remembered and an in-place conversion keeps its slot', async (t) => {
+  const saved = [];
+  const h = await loaded(t, { handlers: { '/tab-order/set': (input) => { saved.push([...input.order]); return { saved: true }; } } });
+  h.autoSurfaces();
+  const web = await openWeb(h, 'alpha');
+  const tui = await h.client.openTui('beta', '/work', true);
+  await flush();
+  assert.equal(h.client.moveTab(web, 0), true);
+  const launcher = await h.client.openLauncher();
+  await flush();
+  assert.deepEqual(h.client.tabs.getSnapshot().tabs.map((tab) => tab.id), [web, 'local', tui, launcher]);
+  await h.client.openLauncherWeb(launcher, { profileId: 'beta' });
+  await flush();
+  assert.deepEqual(h.client.tabs.getSnapshot().tabs.map((tab) => tab.id), [web, 'local', tui, launcher]);
+  assert.equal(h.runTimer(300), 300);
+  await flush();
+  assert.deepEqual(saved[saved.length - 1], ['web:alpha', 'local', 'tui:beta', 'web:beta']);
+});
+
+test('dispose clears a pending remembered-order save', async (t) => {
+  const h = await loaded(t);
+  h.autoSurfaces();
+  await openWeb(h, 'alpha');
+  assert.equal([...h.timers.values()].some((timer) => timer.delay === 300), true);
+  await h.client.dispose();
+  assert.equal(h.timers.size, 0);
 });
 
 // --- launcher, in-place conversion, attach, SSH and measurement --------------
@@ -1401,6 +1534,27 @@ test('SSH views open an authorized loopback URL and expose only connection statu
   assert.deepEqual(status, { source: 'ssh', alias: 'dev-box', name: 'dev-box', connected: true, label: 'dev-box · Web 1' });
   assert.doesNotMatch(JSON.stringify(h.client.tabs.getSnapshot()), /http|tkn|secret/);
   assert.doesNotMatch(JSON.stringify(h.client.connections.getSnapshot()), /http|tkn|secret/);
+});
+
+test('SSH tabs are remembered by host and profile and keep their private URLs out of the order', async (t) => {
+  const saved = [];
+  const h = await loaded(t, { handlers: {
+    '/tab-order/get': () => ({ order: ['local', 'ssh:c1:web', 'ssh:c2:web'] }),
+    '/tab-order/set': (input) => { saved.push([...input.order]); return { saved: true }; },
+  } });
+  h.autoSurfaces();
+  const second = await h.client.openSshWeb({ id: 'c2', name: 'other', connected: true }, 'http://127.0.0.1:49153/?tkn=secret', { profileId: 'web' });
+  await flush();
+  assert.deepEqual(h.client.tabs.getSnapshot().tabs.map((item) => item.id), ['local', second]);
+  const first = await h.client.openSshWeb({ id: 'c1', name: 'dev-box', connected: true }, 'http://127.0.0.1:49152/?tkn=secret');
+  await flush();
+  assert.deepEqual(h.client.tabs.getSnapshot().tabs.map((item) => item.id), ['local', first, second], 'the lower-ranked host wins the remembered slot');
+  assert.equal(h.client.moveTab(first, 2), true);
+  assert.equal(h.runTimer(300), 300);
+  await flush();
+  assert.deepEqual(saved[saved.length - 1], ['local', 'ssh:c2:web', 'ssh:c1:web']);
+  assert.doesNotMatch(JSON.stringify(saved), /http|127\.0\.0\.1|tkn|secret/);
+  assert.doesNotMatch(JSON.stringify(h.client.tabs.getSnapshot()), /http|tkn|secret/);
 });
 
 test('SSH status reports grey when the connection drops and keeps the last known name', async (t) => {

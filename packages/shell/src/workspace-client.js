@@ -6,7 +6,7 @@
 // calls controller.replace so the tab keeps its ID, position, and active state while
 // receiving a fresh identity object that invalidates every earlier callback.
 export function createWorkspaceClient(deps) {
-  const { window, document, ctx, createTabState, createTabController, installInputGate, createDesktopGuest, createTuiProvider } = deps;
+  const { window, document, ctx, createTabState, createTabController, installInputGate, createDesktopGuest, createTuiProvider, createTabOrderMemory } = deps;
   const createBrowserGuest = typeof deps.createBrowserGuest === 'function' ? deps.createBrowserGuest : null;
   const inertTiming = Object.freeze({
     getSnapshot: () => Object.freeze({ entries: Object.freeze([]) }),
@@ -83,6 +83,96 @@ export function createWorkspaceClient(deps) {
       void close(id).catch((cause) => { if (!disposed) publish({ ...infoValue, errorCode: codeOf(cause) }); });
     },
   });
+  // The strip already reorders live; this block only remembers the result. Identities
+  // are bounded, non-secret tokens; a missing Host store degrades to "append".
+  const ORDER_DEBOUNCE_MS = 300;
+  const orderMemory = typeof createTabOrderMemory === 'function' ? createTabOrderMemory({ limit: 64 }) : null;
+  const orderKeys = new Map();
+  let orderHydrated = false;
+  let orderHydrating = null;
+  let orderTimer = null;
+  let orderDirty = false;
+  const orderIdentity = (spec) => {
+    if (!spec || typeof spec !== 'object') return null;
+    const profileId = typeof spec.profileId === 'string' && identifier(spec.profileId) ? spec.profileId : '';
+    if (spec.providerId === 'local-tui') return profileId ? 'tui:' + profileId : null;
+    if (spec.providerId === 'local-web') {
+      const session = spec.sessionHost;
+      if (session && typeof session.sessionId === 'string' && identifier(session.sessionId)) return 'session:' + session.sessionId;
+      return profileId ? 'web:' + profileId : null;
+    }
+    if (spec.providerId === 'ssh-web') {
+      const hostId = typeof spec.hostId === 'string' && identifier(spec.hostId) ? spec.hostId : '';
+      return hostId ? 'ssh:' + hostId + ':' + (profileId || 'web') : null;
+    }
+    return null;
+  };
+  const orderSlots = () => tabs.getSnapshot().tabs.map((tab) => tab.id === 'local' ? 'local' : (orderKeys.get(tab.id) ?? null));
+  const clearOrderTimer = () => {
+    if (orderTimer === null) return;
+    try { window.clearTimeout(orderTimer); } catch { /* Keep the dirty flag for the next flush. */ }
+    orderTimer = null;
+  };
+  const saveOrderNow = (keepalive) => {
+    if (!orderMemory || !orderDirty) return;
+    orderDirty = false;
+    try {
+      const request = fetcher('/api/workspace-shell/tab-order/set', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { accept: 'application/json', 'content-type': 'application/json' },
+        body: JSON.stringify({ order: orderMemory.snapshot() }),
+        ...(keepalive ? { keepalive: true } : {}),
+      });
+      void Promise.resolve(request).catch(() => {});
+    } catch { /* A preference write never blocks tab use. */ }
+  };
+  const syncOrder = () => {
+    if (!orderMemory || disposed) return;
+    if (!orderMemory.sync(orderSlots())) return;
+    orderDirty = true;
+    clearOrderTimer();
+    try {
+      orderTimer = window.setTimeout(() => { orderTimer = null; saveOrderNow(false); }, ORDER_DEBOUNCE_MS);
+    } catch { saveOrderNow(false); }
+  };
+  const hydrateOrder = () => {
+    if (!orderMemory || orderHydrated) return Promise.resolve();
+    if (!orderHydrating) {
+      orderHydrating = (async () => {
+        try {
+          const result = await api('/tab-order/get', {}, refreshAbort.signal);
+          orderMemory.hydrate(result?.order);
+        } catch { /* Older Host or unavailable storage: keep the append order. */ }
+        orderHydrated = true;
+        // A workspace opened while the read was in flight keeps its identity.
+        if (orderKeys.size) syncOrder();
+      })().finally(() => { orderHydrating = null; });
+    }
+    return orderHydrating;
+  };
+  const adoptOrder = (id, spec) => {
+    if (!orderMemory) return;
+    const identity = orderIdentity(spec);
+    if (!identity) return;
+    orderKeys.set(id, identity);
+    syncOrder();
+  };
+  // A freshly opened tab is appended; move it into its remembered slot before returning.
+  const placeOrder = (id, spec) => {
+    if (!orderMemory) return;
+    const identity = orderIdentity(spec);
+    if (!identity) return;
+    const list = tabs.getSnapshot().tabs;
+    if (list.length > 1 && list[list.length - 1]?.id === id) {
+      const slots = orderSlots().slice(0, -1);
+      const index = orderMemory.insertionIndex(identity, slots);
+      if (index < slots.length) {
+        try { tabs.move(id, index); } catch { /* Keep the appended position. */ }
+      }
+    }
+    orderKeys.set(id, identity);
+    syncOrder();
+  };
   const gate = installInputGate(ctx.get?.('shortcuts') ?? ctx.shortcuts);
   const bridge = window.dshDesktop?.browser;
   const desktopUsable = ['acquire', 'release', 'onOpenRequested'].every((key) => typeof bridge?.[key] === 'function');
@@ -153,7 +243,9 @@ export function createWorkspaceClient(deps) {
     if (disposed) return false;
     const generation = ++refreshGeneration;
     try {
-      const result = await api('/catalog', { ownerId }, refreshAbort.signal);
+      // Hydrate the remembered tab order before exposing the catalog, so opening a
+      // workspace after startup does not briefly append before moving.
+      const [result] = await Promise.all([api('/catalog', { ownerId }, refreshAbort.signal), hydrateOrder()]);
       if (disposed || generation !== refreshGeneration) return false;
       if (typeof result?.currentProfile !== 'string' || !Array.isArray(result.profiles) || !Array.isArray(result.runtimes)) throw error('WORKSPACE_INVALID_CATALOG');
       const profiles = result.profiles.slice(0, 256).filter((item) => typeof item?.id === 'string').map(mapProfile);
@@ -211,13 +303,21 @@ export function createWorkspaceClient(deps) {
   }
   const offTabs = tabs.subscribe(() => {
     const snapshot = tabs.getSnapshot();
+    let orderRemoved = false;
     for (const id of tabProviders.keys()) if (!snapshot.tabs.some((tab) => tab.id === id)) tabProviders.delete(id);
     for (const id of launchers.keys()) if (!snapshot.tabs.some((tab) => tab.id === id)) launchers.delete(id);
     for (const id of sshTabs.keys()) if (!snapshot.tabs.some((tab) => tab.id === id)) sshTabs.delete(id);
+    for (const id of orderKeys.keys()) {
+      if (snapshot.tabs.some((tab) => tab.id === id)) continue;
+      orderKeys.delete(id);
+      orderRemoved = true;
+    }
     for (const key of sshSpecs.keys()) if (!snapshot.tabs.some((tab) => tab.key === key)) sshSpecs.delete(key);
     for (const key of terminalCwds.keys()) if (!snapshot.tabs.some((tab) => tab.key === key)) terminalCwds.delete(key);
     for (const key of webCwdReaders.keys()) if (!snapshot.tabs.some((tab) => tab.key === key)) webCwdReaders.delete(key);
     for (const key of webRuntimeIds.keys()) if (!snapshot.tabs.some((tab) => tab.key === key)) webRuntimeIds.delete(key);
+    // A close keeps the identity's remembered slot for the next open.
+    if (orderRemoved) syncOrder();
     syncViews();
     // A surface unmount/error boundary can close outside the normal toolbar path.
     if (!disposed && snapshot.activeId === 'local' && !wantedLocal) {
@@ -280,6 +380,7 @@ export function createWorkspaceClient(deps) {
     // the placeholder was already closed and no resource was acquired.
     if (!id) { token?.fail('OPERATION_CANCELLED'); return null; }
     tabProviders.set(id, spec.providerId);
+    placeOrder(id, merged);
     return id;
   }
   // One monotonic clock feeds both the measurement store and the SSH offsets so
@@ -412,6 +513,7 @@ export function createWorkspaceClient(deps) {
     return profile;
   };
   const pagehide = () => {
+    if (orderMemory && orderDirty) saveOrderNow(true);
     if (!ownedTerminals.size) return;
     // Best effort on document loss; Host disposal is the final process owner.
     try { Promise.resolve(fetcher('/api/workspace-shell/runtime/close-owner', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ownerId, runtimeIds: [...ownedTerminals] }), keepalive: true })).catch(() => {}); } catch {}
@@ -497,6 +599,8 @@ export function createWorkspaceClient(deps) {
     launchers.delete(id);
     tabProviders.set(id, spec.providerId);
     if (provider.kind === 'terminal' && typeof spec.cwd === 'string') terminalCwds.set(key, spec.cwd);
+    // In-place conversion keeps the launcher's position, so only its identity is learned.
+    adoptOrder(id, spec);
     // A provider that failed during acquisition keeps the converted record in a safe
     // error state (retry or close); the conversion itself already preserved ID/position.
     return id;
@@ -530,7 +634,10 @@ export function createWorkspaceClient(deps) {
   }
   function moveTab(id, targetIndex) {
     if (disposed) return false;
-    try { return tabs.move(id, targetIndex) === true; } catch { return false; }
+    let moved = false;
+    try { moved = tabs.move(id, targetIndex) === true; } catch { moved = false; }
+    if (moved) syncOrder();
+    return moved;
   }
 
   // ---- SSH Web -----------------------------------------------------------------
@@ -663,6 +770,8 @@ export function createWorkspaceClient(deps) {
     }
     if (!id) { token?.fail('TAB_OPEN_FAILED'); throw error('TAB_OPEN_FAILED'); }
     sshTabs.set(id, Object.freeze({ hostId: target.id, name: target.name, profileId: specProfileId, instanceId }));
+    // A launcher conversion keeps its slot; a direct SSH open follows the remembered order.
+    if (!launcherId) placeOrder(id, spec);
     const openedTab = tabs.getSnapshot().tabs.find((tab) => tab.id === id);
     if (openedTab) sshSpecs.set(openedTab.key, spec.remote);
     if (sshRegistration !== registration) {
@@ -771,6 +880,8 @@ export function createWorkspaceClient(deps) {
     dispose() {
       if (disposal) return disposal;
       disposed = true; ++navigation; ++refreshGeneration; refreshAbort.abort();
+      clearOrderTimer(); orderDirty = false; orderKeys.clear();
+      try { orderMemory?.dispose(); } catch {}
       sessionTabTokens.clear(); sessionNavigation = null; sessionNavigationListeners.clear();
       sshRegistration?.unsubscribe?.(); sshRegistration?.abort.abort(); sshRegistration = null; extensionListeners.clear(); sshSpecs.clear();
       window.removeEventListener('pagehide', pagehide); offTabs(); listeners.clear(); connectionListeners.clear();

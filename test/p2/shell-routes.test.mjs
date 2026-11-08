@@ -13,6 +13,7 @@ const PREFIX = '/api/workspace-shell';
 const SECRET = 'private-token-never-appear';
 const POST_ROUTES = [
   '/catalog', '/web/open', '/web/attach', '/tui/open', '/terminal/read', '/terminal/write', '/terminal/resize', '/runtime/stop', '/runtime/close-owner',
+  '/tab-order/get', '/tab-order/set',
 ];
 const GET_ROUTES = ['/terminal', '/assets/xterm.js', '/assets/addon-fit.js', '/assets/terminal-document.js', '/assets/xterm.css'];
 
@@ -67,11 +68,25 @@ function routeContext(service, { failAt = 0, release } = {}) {
   return { ctx, routes, released };
 }
 
-function setup(t, { service = fakeService(), assetRoot, failAt, release } = {}) {
+function setup(t, { service = fakeService(), assetRoot, failAt, release, tabOrder } = {}) {
   const state = routeContext(service, { failAt, release });
-  const dispose = registerShellRoutes(state.ctx, service, { ...(assetRoot ? { assetRoot } : {}) });
+  const dispose = registerShellRoutes(state.ctx, service, {
+    ...(assetRoot ? { assetRoot } : {}),
+    ...(tabOrder === undefined ? {} : { tabOrder }),
+  });
   t.after(async () => { await dispose().catch(() => {}); });
-  return { ...state, service, dispose };
+  return { ...state, service, dispose, tabOrder };
+}
+
+function fakeTabOrder(initial = []) {
+  const calls = [];
+  let order = [...initial];
+  return {
+    calls,
+    get order() { return order; },
+    async read() { calls.push('read'); return [...order]; },
+    async write(next) { calls.push('write'); order = [...next]; return true; },
+  };
 }
 
 async function call(state, suffix, { method = 'POST', input, raw, headers = {}, signal, onRequest } = {}) {
@@ -93,7 +108,7 @@ async function responseJson(response) {
   return response.json();
 }
 
-test('registers exactly fourteen routes with the real connection method/body contract', async (t) => {
+test('registers exactly sixteen routes with the real connection method/body contract', async (t) => {
   const state = setup(t);
   assert.deepEqual([...state.routes.keys()].sort(), [...POST_ROUTES, ...GET_ROUTES].map((path) => PREFIX + path).sort());
   for (const path of POST_ROUTES) {
@@ -281,6 +296,39 @@ test('close-owner rejects missing or invalid runtimeIds before reading the catal
   assert.equal(state.service.calls.length, 0);
 });
 
+test('tab-order routes read and write one bounded identity list', async (t) => {
+  const tabOrder = fakeTabOrder(['local', 'web:alpha']);
+  const state = setup(t, { tabOrder });
+  const read = await call(state, '/tab-order/get', { input: {} });
+  assert.equal(read.status, 200);
+  assert.deepEqual(await responseJson(read), { ok: true, result: { order: ['local', 'web:alpha'] } });
+  const write = await call(state, '/tab-order/set', { input: { order: ['web:alpha', 'local'] } });
+  assert.equal(write.status, 200);
+  assert.deepEqual(await responseJson(write), { ok: true, result: { saved: true } });
+  assert.deepEqual(tabOrder.calls, ['read', 'write']);
+  assert.deepEqual(tabOrder.order, ['web:alpha', 'local']);
+  for (const order of [undefined, 'x', [1], ['bad token'], Array.from({ length: 65 }, (_, index) => `t${index}`)]) {
+    const response = await call(state, '/tab-order/set', { input: order === undefined ? {} : { order } });
+    assert.equal(response.status, 400);
+    assert.deepEqual(await responseJson(response), { ok: false, error: { code: 'INVALID_INPUT' } });
+  }
+  assert.equal(tabOrder.calls.filter((entry) => entry === 'write').length, 1);
+});
+
+test('tab-order stays optional and reports unsaved writes without failing tab creation', async (t) => {
+  const state = setup(t);
+  const read = await call(state, '/tab-order/get', { input: {} });
+  assert.equal(read.status, 200);
+  assert.deepEqual(await responseJson(read), { ok: true, result: { order: [] } });
+  const write = await call(state, '/tab-order/set', { input: { order: ['local'] } });
+  assert.equal(write.status, 200);
+  assert.deepEqual(await responseJson(write), { ok: true, result: { saved: false } });
+
+  const failing = setup(t, { tabOrder: { async read() { return []; }, async write() { return false; } } });
+  const unsaved = await call(failing, '/tab-order/set', { input: { order: ['local'] } });
+  assert.deepEqual(await responseJson(unsaved), { ok: true, result: { saved: false } });
+});
+
 test('dispose is idempotent, awaits asynchronous unregister, and removes every route', async (t) => {
   const first = deferred();
   const second = deferred();
@@ -296,7 +344,7 @@ test('dispose is idempotent, awaits asynchronous unregister, and removes every r
   const pending = dispose();
   assert.equal(dispose(), pending);
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(state.released.length, 14);
+  assert.equal(state.released.length, 16);
   assert.equal(firstFinished, false);
   assert.equal(secondFinished, false);
   first.resolve();
@@ -306,7 +354,7 @@ test('dispose is idempotent, awaits asynchronous unregister, and removes every r
   assert.equal(secondFinished, true);
   assert.equal(state.routes.size, 0);
   await dispose();
-  assert.equal(state.released.length, 14);
+  assert.equal(state.released.length, 16);
 });
 
 test('one rejected unregister does not block other cleanup or leak its error', async (t) => {
@@ -321,7 +369,7 @@ test('one rejected unregister does not block other cleanup or leak its error', a
     assert.equal(JSON.stringify(error).includes(SECRET), false);
     return true;
   });
-  assert.equal(state.released.length, 14);
+  assert.equal(state.released.length, 16);
   assert.equal(state.routes.size, 1);
   assert.equal(state.routes.has(`${PREFIX}/catalog`), true);
 });

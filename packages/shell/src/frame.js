@@ -237,6 +237,9 @@ export function createFrameViews(React, deps) {
     const [errorCode, setErrorCode] = React.useState(null);
     const focusRequest = React.useRef(null);
     const localFocus = React.useRef(null);
+    // A Surface may hold an Electron <webview>. Reordering the strip must not move that
+    // node in the DOM, so every remote Surface keeps its creation slot for this mount.
+    const surfaceSlots = React.useRef({ next: 0, slots: new Map() });
     const overlayOpen = Object.keys(modals).some((key) => modals[key]);
     const native = document.documentElement.dataset.platform === 'darwin' || document.documentElement.hasAttribute('data-windows-titlebar');
     const g = solveFrame(info, native ? 0 : 56);
@@ -389,6 +392,12 @@ export function createFrameViews(React, deps) {
     const tabsView = ChromeTabStrip
       ? h(ChromeTabStrip, stripProps)
       : h(FallbackStrip, stripProps);
+    const remotes = tabs.filter((tab) => tab.id !== 'local');
+    const order = surfaceSlots.current;
+    const live = new Set(remotes.map((tab) => tab.id));
+    for (const id of [...order.slots.keys()]) if (!live.has(id)) order.slots.delete(id);
+    for (const tab of remotes) if (!order.slots.has(tab.id)) order.slots.set(tab.id, order.next++);
+    remotes.sort((left, right) => order.slots.get(left.id) - order.slots.get(right.id));
     return h('div', { ref: root, className: classes.frame + ' wsh-frame', 'data-workspace-shell': 'active',
       'data-sidebar-collapsed': g.collapsed || undefined,
       'data-rightbar-collapsed': g.right === 0 || undefined,
@@ -421,7 +430,7 @@ export function createFrameViews(React, deps) {
         h('div', { className: classes.overlayLayer + ' wsh-overlay', 'data-shell-overlay': true }, overlay),
         !g.collapsed && h(Resize, { key: 'left-resize', side: 'sidebar', width: g.sidebar, actions, onDragging: setDragging }),
         info.rightbarShown && !info.rightbarFullscreen && g.normalRight > 0 && h(Resize, { key: 'right-resize', side: 'rightbar', width: g.normalRight, offset: g.right - g.normalRight, actions, onDragging: setDragging })),
-      tabs.filter((tab) => tab.id !== 'local').map((tab) => h(Surface, {
+      remotes.map((tab) => h(Surface, {
         key: tab.id, tab, active: tab.id === activeId, modal: overlayOpen, tabs: tabStore, workspace, workspaceInfo, connections, extension, localDefaultCwd,
         onError: setErrorCode, onRetry: retryTab, onClose: closeTab,
         onModalChange: setModalFor,

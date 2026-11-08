@@ -295,6 +295,24 @@ test('workspace tabs keep Local slots and every remote Surface mounted across se
   assert.equal(f.viewportContainers['tab-a'].getBoundingClientRect().width, 1200);
   assert.equal(app.root.findAllByProps({ role: 'tabpanel' }).length, 3);
 });
+test('tab reordering keeps every remote Surface in its creation slot', async (t) => {
+  const f = fixture({ workspace: true, workspaceOptions: { tabs: [remoteTab('tab-a'), remoteTab('tab-b')] } });
+  const app = await mount(t, f.views.Frame, f.props, f.desktop);
+  const strip = () => app.root.findAll((node) => typeof node.props?.['data-chrome-tab-body'] === 'string')
+    .map((node) => node.props['data-chrome-tab-body']);
+  const panels = () => app.root.findAll((node) => node.props?.role === 'tabpanel' && typeof node.props['data-tab-id'] === 'string')
+    .map((node) => node.props['data-tab-id']);
+  assert.deepEqual(strip(), ['local', 'tab-a', 'tab-b']);
+  assert.deepEqual(panels(), ['tab-a', 'tab-b']);
+  // A strip reorder must not move a mounted Surface: its Guest must keep its DOM node.
+  await flushEffects(() => f.workspace.tabs.move('tab-a', 2));
+  assert.deepEqual(strip(), ['local', 'tab-b', 'tab-a']);
+  assert.deepEqual(panels(), ['tab-a', 'tab-b']);
+  // Moving a tab ahead of Local still leaves the Surface order untouched.
+  await flushEffects(() => f.workspace.tabs.move('tab-b', 0));
+  assert.deepEqual(strip(), ['tab-b', 'local', 'tab-a']);
+  assert.deepEqual(panels(), ['tab-a', 'tab-b']);
+});
 test('plus creates and selects a launcher tab immediately without any dialog', async (t) => {
   const f = fixture({ workspace: true });
   const app = await mount(t, f.views.Frame, f.props, f.desktop);

@@ -733,8 +733,140 @@ function createTabController(state, lifecycle = {}) {
 return { createTabController };
 })();
 const { createTabController } = m3;
-// ---- module: input-gate ----
+// ---- module: tab-order ----
 const m4 = (() => {
+// Remembered tab order: bounded identity tokens only, never titles, URLs, tokens,
+// working directories, or session content.
+//
+// The Host validator in src/host/tab-order-store.js uses the same limits; keep
+// both copies in sync. This module stays import-free because the Shell build
+// concatenates it with the rest of the Client.
+const DEFAULT_LIMIT = 64;
+const DEFAULT_TOKEN_LENGTH = 160;
+const TOKEN = /^[A-Za-z0-9:._-]{1,160}$/u;
+
+function sameOrder(left, right) {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
+}
+
+// Accept both the bare array and the Host envelope, then drop invalid or repeated
+// tokens. A corrupted preference degrades to "append", never to an error.
+function normalized(value, limit, tokenLength) {
+  const source = Array.isArray(value)
+    ? value
+    : value && typeof value === 'object' && Array.isArray(value.order) ? value.order : null;
+  if (!source) return [];
+  const seen = new Set();
+  const order = [];
+  for (const item of source) {
+    if (order.length >= limit) break;
+    if (typeof item !== 'string' || item.length > tokenLength || !TOKEN.test(item)) continue;
+    if (seen.has(item)) continue;
+    seen.add(item);
+    order.push(item);
+  }
+  return order;
+}
+
+function createTabOrderMemory(options = {}) {
+  const input = options && typeof options === 'object' ? options : {};
+  const limit = Number.isInteger(input.limit) && input.limit > 0 && input.limit <= 512 ? input.limit : DEFAULT_LIMIT;
+  const tokenLength = Number.isInteger(input.maxToken) && input.maxToken > 0 && input.maxToken <= 1024
+    ? input.maxToken
+    : DEFAULT_TOKEN_LENGTH;
+  let order = Object.freeze([]);
+  let disposed = false;
+
+  function valid(identity) {
+    return typeof identity === 'string' && identity.length <= tokenLength && TOKEN.test(identity);
+  }
+
+  function apply(next) {
+    if (sameOrder(order, next)) return false;
+    order = Object.freeze(next);
+    return true;
+  }
+
+  return Object.freeze({
+    // Load a persisted order. The newest snapshot replaces the previous one.
+    hydrate(value) {
+      if (disposed) return false;
+      return apply(normalized(value, limit, tokenLength));
+    },
+    rankOf(identity) {
+      if (disposed || !valid(identity)) return -1;
+      return order.indexOf(identity);
+    },
+    // Index the tab should occupy among `slots`, which are the identities of the
+    // tabs already on screen in display order (null for unremembered tabs).
+    insertionIndex(identity, slots) {
+      const list = Array.isArray(slots) ? slots : [];
+      if (disposed || !valid(identity)) return list.length;
+      const rank = order.indexOf(identity);
+      if (rank < 0) return list.length;
+      let index = 0;
+      for (let position = 0; position < list.length; position += 1) {
+        const slot = list[position];
+        if (slot === identity) {
+          // Multiple tabs of one family stay adjacent, in arrival order.
+          index = position + 1;
+          continue;
+        }
+        if (!valid(slot)) continue;
+        const other = order.indexOf(slot);
+        if (other >= 0 && other < rank) index = position + 1;
+      }
+      return Math.min(Math.max(index, 0), list.length);
+    },
+    // Fold the displayed identities into the remembered order. Closed identities keep
+    // their slots so reopening a tab returns it to the familiar place; new identities
+    // append. Overflow evicts closed identities from the left first.
+    sync(slots) {
+      if (disposed) return false;
+      const list = Array.isArray(slots) ? slots : [];
+      const open = [];
+      const present = new Set();
+      for (const item of list) {
+        if (!valid(item) || present.has(item)) continue;
+        present.add(item);
+        open.push(item);
+      }
+      const next = [...order];
+      const positions = [];
+      for (let index = 0; index < next.length; index += 1) {
+        if (present.has(next[index])) positions.push(index);
+      }
+      for (let index = 0; index < positions.length && index < open.length; index += 1) {
+        next[positions[index]] = open[index];
+      }
+      for (let index = positions.length; index < open.length; index += 1) {
+        next.push(open[index]);
+      }
+      while (next.length > limit) {
+        const closed = next.findIndex((identity) => !present.has(identity));
+        next.splice(closed >= 0 ? closed : 0, 1);
+      }
+      return apply(next);
+    },
+    snapshot() {
+      return order;
+    },
+    dispose() {
+      disposed = true;
+      order = Object.freeze([]);
+    },
+  });
+}
+
+return { createTabOrderMemory };
+})();
+const { createTabOrderMemory } = m4;
+// ---- module: input-gate ----
+const m5 = (() => {
 // Private ShortcutsService adapter; this module owns neither commands nor preferences.
 function installInputGate(service) {
   const unsupported = () => Object.freeze({
@@ -934,9 +1066,9 @@ function installInputGate(service) {
 
 return { installInputGate };
 })();
-const { installInputGate } = m4;
+const { installInputGate } = m5;
 // ---- module: web-timing ----
-const m5 = (() => {
+const m6 = (() => {
 // Safe, numeric-only Web open measurements. No URLs, tokens, host names, or errors
 // beyond an allowlisted code ever enter the public snapshot.
 const TIMING_STAGES = Object.freeze(['input', 'connect', 'instance', 'forward', 'host', 'lease', 'load']);
@@ -1080,9 +1212,9 @@ const webTimingStages = TIMING_STAGES;
 
 return { createWebTiming, webTimingStages };
 })();
-const { createWebTiming, webTimingStages } = m5;
+const { createWebTiming, webTimingStages } = m6;
 // ---- module: desktop-guest ----
-const m6 = (() => {
+const m7 = (() => {
 // Origin-checked scalar channel shared by the Native and browser Guests. The guest
 // companion answers a random request id; the parent never evaluates guest script.
 const WORKSPACE_SHELL_CWD_REQUEST = 'workspace-shell-cwd-request';
@@ -1567,9 +1699,9 @@ function createDesktopGuest({
 
 return { createDesktopGuest };
 })();
-const { createDesktopGuest } = m6;
+const { createDesktopGuest } = m7;
 // ---- module: browser-guest ----
-const m7 = (() => {
+const m8 = (() => {
 // Browser Guest for dsh web. An iframe is the whole isolation boundary: no Native
 // bridge, no Desktop profile, and no Node, download, or popup surface.
 const ERROR_CODES = {
@@ -1912,9 +2044,9 @@ function createBrowserGuest({
 
 return { createBrowserGuest };
 })();
-const { createBrowserGuest } = m7;
+const { createBrowserGuest } = m8;
 // ---- module: tui-provider ----
-const m8 = (() => {
+const m9 = (() => {
 // Parent owns Host RPC and runtime identity; the iframe receives only terminal messages.
 function createTuiProvider({ document, window, api, ownerId, locale = 'zh' }) {
   if (typeof api !== 'function' || typeof ownerId !== 'string' || !ownerId) throw new TypeError('Invalid TUI provider options');
@@ -2171,9 +2303,9 @@ function createTuiProvider({ document, window, api, ownerId, locale = 'zh' }) {
 
 return { createTuiProvider };
 })();
-const { createTuiProvider } = m8;
+const { createTuiProvider } = m9;
 // ---- module: chrome-tabs ----
-const m9 = (() => {
+const m10 = (() => {
 // Reusable Chrome-style workspace tab strip.
 // React, document and window are injected so this module stays import-free and
 // can be concatenated by the Shell build without extra runtime dependencies.
@@ -2868,9 +3000,9 @@ const css = [
 
 return { createChromeTabs, css };
 })();
-const { createChromeTabs, css } = m9;
+const { createChromeTabs, css } = m10;
 // ---- module: workspace-client ----
-const m10 = (() => {
+const m11 = (() => {
 // Window-owned composition. Public snapshots never contain view URLs or handles.
 //
 // The client owns several private maps: provider tabs (Guest/TUI resources), SSH tab
@@ -2879,7 +3011,7 @@ const m10 = (() => {
 // calls controller.replace so the tab keeps its ID, position, and active state while
 // receiving a fresh identity object that invalidates every earlier callback.
 function createWorkspaceClient(deps) {
-  const { window, document, ctx, createTabState, createTabController, installInputGate, createDesktopGuest, createTuiProvider } = deps;
+  const { window, document, ctx, createTabState, createTabController, installInputGate, createDesktopGuest, createTuiProvider, createTabOrderMemory } = deps;
   const createBrowserGuest = typeof deps.createBrowserGuest === 'function' ? deps.createBrowserGuest : null;
   const inertTiming = Object.freeze({
     getSnapshot: () => Object.freeze({ entries: Object.freeze([]) }),
@@ -2956,6 +3088,96 @@ function createWorkspaceClient(deps) {
       void close(id).catch((cause) => { if (!disposed) publish({ ...infoValue, errorCode: codeOf(cause) }); });
     },
   });
+  // The strip already reorders live; this block only remembers the result. Identities
+  // are bounded, non-secret tokens; a missing Host store degrades to "append".
+  const ORDER_DEBOUNCE_MS = 300;
+  const orderMemory = typeof createTabOrderMemory === 'function' ? createTabOrderMemory({ limit: 64 }) : null;
+  const orderKeys = new Map();
+  let orderHydrated = false;
+  let orderHydrating = null;
+  let orderTimer = null;
+  let orderDirty = false;
+  const orderIdentity = (spec) => {
+    if (!spec || typeof spec !== 'object') return null;
+    const profileId = typeof spec.profileId === 'string' && identifier(spec.profileId) ? spec.profileId : '';
+    if (spec.providerId === 'local-tui') return profileId ? 'tui:' + profileId : null;
+    if (spec.providerId === 'local-web') {
+      const session = spec.sessionHost;
+      if (session && typeof session.sessionId === 'string' && identifier(session.sessionId)) return 'session:' + session.sessionId;
+      return profileId ? 'web:' + profileId : null;
+    }
+    if (spec.providerId === 'ssh-web') {
+      const hostId = typeof spec.hostId === 'string' && identifier(spec.hostId) ? spec.hostId : '';
+      return hostId ? 'ssh:' + hostId + ':' + (profileId || 'web') : null;
+    }
+    return null;
+  };
+  const orderSlots = () => tabs.getSnapshot().tabs.map((tab) => tab.id === 'local' ? 'local' : (orderKeys.get(tab.id) ?? null));
+  const clearOrderTimer = () => {
+    if (orderTimer === null) return;
+    try { window.clearTimeout(orderTimer); } catch { /* Keep the dirty flag for the next flush. */ }
+    orderTimer = null;
+  };
+  const saveOrderNow = (keepalive) => {
+    if (!orderMemory || !orderDirty) return;
+    orderDirty = false;
+    try {
+      const request = fetcher('/api/workspace-shell/tab-order/set', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { accept: 'application/json', 'content-type': 'application/json' },
+        body: JSON.stringify({ order: orderMemory.snapshot() }),
+        ...(keepalive ? { keepalive: true } : {}),
+      });
+      void Promise.resolve(request).catch(() => {});
+    } catch { /* A preference write never blocks tab use. */ }
+  };
+  const syncOrder = () => {
+    if (!orderMemory || disposed) return;
+    if (!orderMemory.sync(orderSlots())) return;
+    orderDirty = true;
+    clearOrderTimer();
+    try {
+      orderTimer = window.setTimeout(() => { orderTimer = null; saveOrderNow(false); }, ORDER_DEBOUNCE_MS);
+    } catch { saveOrderNow(false); }
+  };
+  const hydrateOrder = () => {
+    if (!orderMemory || orderHydrated) return Promise.resolve();
+    if (!orderHydrating) {
+      orderHydrating = (async () => {
+        try {
+          const result = await api('/tab-order/get', {}, refreshAbort.signal);
+          orderMemory.hydrate(result?.order);
+        } catch { /* Older Host or unavailable storage: keep the append order. */ }
+        orderHydrated = true;
+        // A workspace opened while the read was in flight keeps its identity.
+        if (orderKeys.size) syncOrder();
+      })().finally(() => { orderHydrating = null; });
+    }
+    return orderHydrating;
+  };
+  const adoptOrder = (id, spec) => {
+    if (!orderMemory) return;
+    const identity = orderIdentity(spec);
+    if (!identity) return;
+    orderKeys.set(id, identity);
+    syncOrder();
+  };
+  // A freshly opened tab is appended; move it into its remembered slot before returning.
+  const placeOrder = (id, spec) => {
+    if (!orderMemory) return;
+    const identity = orderIdentity(spec);
+    if (!identity) return;
+    const list = tabs.getSnapshot().tabs;
+    if (list.length > 1 && list[list.length - 1]?.id === id) {
+      const slots = orderSlots().slice(0, -1);
+      const index = orderMemory.insertionIndex(identity, slots);
+      if (index < slots.length) {
+        try { tabs.move(id, index); } catch { /* Keep the appended position. */ }
+      }
+    }
+    orderKeys.set(id, identity);
+    syncOrder();
+  };
   const gate = installInputGate(ctx.get?.('shortcuts') ?? ctx.shortcuts);
   const bridge = window.dshDesktop?.browser;
   const desktopUsable = ['acquire', 'release', 'onOpenRequested'].every((key) => typeof bridge?.[key] === 'function');
@@ -3026,7 +3248,9 @@ function createWorkspaceClient(deps) {
     if (disposed) return false;
     const generation = ++refreshGeneration;
     try {
-      const result = await api('/catalog', { ownerId }, refreshAbort.signal);
+      // Hydrate the remembered tab order before exposing the catalog, so opening a
+      // workspace after startup does not briefly append before moving.
+      const [result] = await Promise.all([api('/catalog', { ownerId }, refreshAbort.signal), hydrateOrder()]);
       if (disposed || generation !== refreshGeneration) return false;
       if (typeof result?.currentProfile !== 'string' || !Array.isArray(result.profiles) || !Array.isArray(result.runtimes)) throw error('WORKSPACE_INVALID_CATALOG');
       const profiles = result.profiles.slice(0, 256).filter((item) => typeof item?.id === 'string').map(mapProfile);
@@ -3084,13 +3308,21 @@ function createWorkspaceClient(deps) {
   }
   const offTabs = tabs.subscribe(() => {
     const snapshot = tabs.getSnapshot();
+    let orderRemoved = false;
     for (const id of tabProviders.keys()) if (!snapshot.tabs.some((tab) => tab.id === id)) tabProviders.delete(id);
     for (const id of launchers.keys()) if (!snapshot.tabs.some((tab) => tab.id === id)) launchers.delete(id);
     for (const id of sshTabs.keys()) if (!snapshot.tabs.some((tab) => tab.id === id)) sshTabs.delete(id);
+    for (const id of orderKeys.keys()) {
+      if (snapshot.tabs.some((tab) => tab.id === id)) continue;
+      orderKeys.delete(id);
+      orderRemoved = true;
+    }
     for (const key of sshSpecs.keys()) if (!snapshot.tabs.some((tab) => tab.key === key)) sshSpecs.delete(key);
     for (const key of terminalCwds.keys()) if (!snapshot.tabs.some((tab) => tab.key === key)) terminalCwds.delete(key);
     for (const key of webCwdReaders.keys()) if (!snapshot.tabs.some((tab) => tab.key === key)) webCwdReaders.delete(key);
     for (const key of webRuntimeIds.keys()) if (!snapshot.tabs.some((tab) => tab.key === key)) webRuntimeIds.delete(key);
+    // A close keeps the identity's remembered slot for the next open.
+    if (orderRemoved) syncOrder();
     syncViews();
     // A surface unmount/error boundary can close outside the normal toolbar path.
     if (!disposed && snapshot.activeId === 'local' && !wantedLocal) {
@@ -3153,6 +3385,7 @@ function createWorkspaceClient(deps) {
     // the placeholder was already closed and no resource was acquired.
     if (!id) { token?.fail('OPERATION_CANCELLED'); return null; }
     tabProviders.set(id, spec.providerId);
+    placeOrder(id, merged);
     return id;
   }
   // One monotonic clock feeds both the measurement store and the SSH offsets so
@@ -3285,6 +3518,7 @@ function createWorkspaceClient(deps) {
     return profile;
   };
   const pagehide = () => {
+    if (orderMemory && orderDirty) saveOrderNow(true);
     if (!ownedTerminals.size) return;
     // Best effort on document loss; Host disposal is the final process owner.
     try { Promise.resolve(fetcher('/api/workspace-shell/runtime/close-owner', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ownerId, runtimeIds: [...ownedTerminals] }), keepalive: true })).catch(() => {}); } catch {}
@@ -3370,6 +3604,8 @@ function createWorkspaceClient(deps) {
     launchers.delete(id);
     tabProviders.set(id, spec.providerId);
     if (provider.kind === 'terminal' && typeof spec.cwd === 'string') terminalCwds.set(key, spec.cwd);
+    // In-place conversion keeps the launcher's position, so only its identity is learned.
+    adoptOrder(id, spec);
     // A provider that failed during acquisition keeps the converted record in a safe
     // error state (retry or close); the conversion itself already preserved ID/position.
     return id;
@@ -3403,7 +3639,10 @@ function createWorkspaceClient(deps) {
   }
   function moveTab(id, targetIndex) {
     if (disposed) return false;
-    try { return tabs.move(id, targetIndex) === true; } catch { return false; }
+    let moved = false;
+    try { moved = tabs.move(id, targetIndex) === true; } catch { moved = false; }
+    if (moved) syncOrder();
+    return moved;
   }
 
   // ---- SSH Web -----------------------------------------------------------------
@@ -3536,6 +3775,8 @@ function createWorkspaceClient(deps) {
     }
     if (!id) { token?.fail('TAB_OPEN_FAILED'); throw error('TAB_OPEN_FAILED'); }
     sshTabs.set(id, Object.freeze({ hostId: target.id, name: target.name, profileId: specProfileId, instanceId }));
+    // A launcher conversion keeps its slot; a direct SSH open follows the remembered order.
+    if (!launcherId) placeOrder(id, spec);
     const openedTab = tabs.getSnapshot().tabs.find((tab) => tab.id === id);
     if (openedTab) sshSpecs.set(openedTab.key, spec.remote);
     if (sshRegistration !== registration) {
@@ -3644,6 +3885,8 @@ function createWorkspaceClient(deps) {
     dispose() {
       if (disposal) return disposal;
       disposed = true; ++navigation; ++refreshGeneration; refreshAbort.abort();
+      clearOrderTimer(); orderDirty = false; orderKeys.clear();
+      try { orderMemory?.dispose(); } catch {}
       sessionTabTokens.clear(); sessionNavigation = null; sessionNavigationListeners.clear();
       sshRegistration?.unsubscribe?.(); sshRegistration?.abort.abort(); sshRegistration = null; extensionListeners.clear(); sshSpecs.clear();
       window.removeEventListener('pagehide', pagehide); offTabs(); listeners.clear(); connectionListeners.clear();
@@ -3658,9 +3901,9 @@ function createWorkspaceClient(deps) {
 
 return { createWorkspaceClient };
 })();
-const { createWorkspaceClient } = m10;
+const { createWorkspaceClient } = m11;
 // ---- module: launcher ----
-const m11 = (() => {
+const m12 = (() => {
 // Launcher page: a real workspace tab, not a modal. The component owns only UI
 // state; every effect goes through the injected workspace client, and every
 // conversion preserves the tab ID/position through `launcher.replace`.
@@ -4269,9 +4512,9 @@ function createLauncher(React, deps = {}) {
 
 return { parseTuiCommand, parseTuiCwd, launcherCss, createLauncher };
 })();
-const { parseTuiCommand, parseTuiCwd, launcherCss, createLauncher } = m11;
+const { parseTuiCommand, parseTuiCwd, launcherCss, createLauncher } = m12;
 // ---- module: styles ----
-const m12 = (() => {
+const m13 = (() => {
 const shellCss = [
 '.wsh-frame{--wsh-header-height:48px;grid-template-rows:var(--wsh-header-height) minmax(0,1fr)!important;min-height:0;min-width:0;isolation:isolate;position:relative}',
 '.wsh-header{grid-column:1/-1;grid-row:1;display:flex;align-items:center;gap:8px;padding:0 12px;background:var(--dsw-specific-sidebar-fill,var(--dsw-alias-bg-base));border-bottom:1px solid var(--dsw-alias-border-l3);min-width:0;z-index:2;user-select:none;-webkit-app-region:drag}',
@@ -4318,9 +4561,9 @@ const shellCss = [
 
 return { shellCss };
 })();
-const { shellCss } = m12;
+const { shellCss } = m13;
 // ---- module: frame ----
-const m13 = (() => {
+const m14 = (() => {
 // Window frame: the permanent Local surface, Chrome-style workspace tabs, and one
 // launcher page per `launcher` tab. Tab metadata is identity-based; the frame never
 // reads a numeric generation and never owns provider resources itself.
@@ -4560,6 +4803,9 @@ function createFrameViews(React, deps) {
     const [errorCode, setErrorCode] = React.useState(null);
     const focusRequest = React.useRef(null);
     const localFocus = React.useRef(null);
+    // A Surface may hold an Electron <webview>. Reordering the strip must not move that
+    // node in the DOM, so every remote Surface keeps its creation slot for this mount.
+    const surfaceSlots = React.useRef({ next: 0, slots: new Map() });
     const overlayOpen = Object.keys(modals).some((key) => modals[key]);
     const native = document.documentElement.dataset.platform === 'darwin' || document.documentElement.hasAttribute('data-windows-titlebar');
     const g = solveFrame(info, native ? 0 : 56);
@@ -4712,6 +4958,12 @@ function createFrameViews(React, deps) {
     const tabsView = ChromeTabStrip
       ? h(ChromeTabStrip, stripProps)
       : h(FallbackStrip, stripProps);
+    const remotes = tabs.filter((tab) => tab.id !== 'local');
+    const order = surfaceSlots.current;
+    const live = new Set(remotes.map((tab) => tab.id));
+    for (const id of [...order.slots.keys()]) if (!live.has(id)) order.slots.delete(id);
+    for (const tab of remotes) if (!order.slots.has(tab.id)) order.slots.set(tab.id, order.next++);
+    remotes.sort((left, right) => order.slots.get(left.id) - order.slots.get(right.id));
     return h('div', { ref: root, className: classes.frame + ' wsh-frame', 'data-workspace-shell': 'active',
       'data-sidebar-collapsed': g.collapsed || undefined,
       'data-rightbar-collapsed': g.right === 0 || undefined,
@@ -4744,7 +4996,7 @@ function createFrameViews(React, deps) {
         h('div', { className: classes.overlayLayer + ' wsh-overlay', 'data-shell-overlay': true }, overlay),
         !g.collapsed && h(Resize, { key: 'left-resize', side: 'sidebar', width: g.sidebar, actions, onDragging: setDragging }),
         info.rightbarShown && !info.rightbarFullscreen && g.normalRight > 0 && h(Resize, { key: 'right-resize', side: 'rightbar', width: g.normalRight, offset: g.right - g.normalRight, actions, onDragging: setDragging })),
-      tabs.filter((tab) => tab.id !== 'local').map((tab) => h(Surface, {
+      remotes.map((tab) => h(Surface, {
         key: tab.id, tab, active: tab.id === activeId, modal: overlayOpen, tabs: tabStore, workspace, workspaceInfo, connections, extension, localDefaultCwd,
         onError: setErrorCode, onRetry: retryTab, onClose: closeTab,
         onModalChange: setModalFor,
@@ -4768,9 +5020,9 @@ function createFrameViews(React, deps) {
 
 return { createFrameViews };
 })();
-const { createFrameViews } = m13;
+const { createFrameViews } = m14;
 // ---- module: entry ----
-const m14 = (() => {
+const m15 = (() => {
 function createWorkspaceSelection(React, slots) {
   const key = 'conversation.hero.workspace';
   const core = slots?._core;
@@ -4928,9 +5180,9 @@ return {
 
 return { createWorkspaceSelection, createShellPlugin };
 })();
-const { createWorkspaceSelection, createShellPlugin } = m14;
+const { createWorkspaceSelection, createShellPlugin } = m15;
 // ---- module: ../session-host/submissions ----
-const m15 = (() => {
+const m16 = (() => {
 // Observe the public Session prompt boundary without changing admission or draft restoration.
 function observeSessionSubmissions(sessions, { failed, succeeded }) {
   const bindings = new Map();
@@ -4992,9 +5244,9 @@ function applyTransferredDraft(ctx, sessionId, draft, received) {
 
 return { observeSessionSubmissions, applyTransferredDraft };
 })();
-const { observeSessionSubmissions, applyTransferredDraft } = m15;
+const { observeSessionSubmissions, applyTransferredDraft } = m16;
 // ---- module: ../session-host/controller ----
-const m16 = (() => {
+const m17 = (() => {
 const validToken = (value) => typeof value === 'string' && /^[a-f0-9]{32}$/.test(value);
 const fail = (code) => Object.assign(new Error(code), { code });
 
@@ -5224,9 +5476,9 @@ function createSessionHostClient({ ctx, window, applyDraft }) {
 
 return { createSessionHostClient };
 })();
-const { createSessionHostClient } = m16;
+const { createSessionHostClient } = m17;
 // ---- module: ../session-host/ui ----
-const m17 = (() => {
+const m18 = (() => {
 const sessionHostCss = `
 .wsh-session-notice{display:flex;align-items:center;flex-wrap:wrap;gap:8px;width:calc(100% - var(--dsh-composer-side-clearance,16px) - var(--dsh-composer-side-clearance,16px));max-width:var(--dsh-composer-card-max-width,760px);margin:0 auto;box-sizing:border-box;padding:8px 0;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;letter-spacing:0}
 .wsh-session-notice>span{flex:1 1 180px;min-width:0;overflow-wrap:anywhere}
@@ -5294,6 +5546,6 @@ function createSessionHostPlugin(React, primitives, deps) {
 
 return { sessionHostCss, createSessionHostPlugin };
 })();
-const { sessionHostCss, createSessionHostPlugin } = m17;
-return createShellPlugin(React,{installFrameAdapter,createFrameViews,solveFrame,createPointerResize,shellCss,createTabState,createTabController,installInputGate,createWebTiming,createDesktopGuest,createBrowserGuest,createTuiProvider,createChromeTabs,createWorkspaceClient,createLauncher,createSessionHostPlugin,createSessionHostClient,observeSessionSubmissions,applyTransferredDraft,sessionHostCss,primitives,document,window});
+const { sessionHostCss, createSessionHostPlugin } = m18;
+return createShellPlugin(React,{installFrameAdapter,createFrameViews,solveFrame,createPointerResize,shellCss,createTabState,createTabController,createTabOrderMemory,installInputGate,createWebTiming,createDesktopGuest,createBrowserGuest,createTuiProvider,createChromeTabs,createWorkspaceClient,createLauncher,createSessionHostPlugin,createSessionHostClient,observeSessionSubmissions,applyTransferredDraft,sessionHostCss,primitives,document,window});
 }});

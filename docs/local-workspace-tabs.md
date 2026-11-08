@@ -2,7 +2,7 @@
 
 ## 当前版本
 
-- Workspace Shell：`0.5.9`，见[插件清单](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/packages/shell/package.json)。
+- Workspace Shell：`0.5.12`，见[插件清单](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/packages/shell/package.json)。
 - SSH Remote manager：`0.3.5`，见[manager 清单](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/packages/manager/package.json)。
 - 远程 controller：`0.2.2`，见[版本常量](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/controller/src/constants.js)。
 - 目标 DSH：远端运行包 `0.2.2-rc.1`（内置 pnpm `11.28.5`）；本机 CLI 页签仍按 `0.2.1-rc.5` 校验。终端资产为 xterm `6.0.0`、addon-fit `0.11.0`。
@@ -16,6 +16,11 @@
 - 点击 `+` 创建真正的 launcher 页签；选择 Open 后在原页签内转换，保留 ID、位置和选中状态。
 - 页签使用记录身份对象和当前运行检查处理迟到回调，不再使用数值 generation。
 - Chrome 风格页签支持实时拖拽、边缘滚动、键盘操作、关闭、Escape 回滚和窄窗口布局。
+- 页签重排只改变页签条和记录顺序；已挂载的远端 Surface 保持创建时的 DOM 顺序。Desktop 的 Web Guest 是 Electron `<webview>`，移动它的 DOM 节点会让原生视图脱离，内容显示为空白。
+- 拖拽和键盘排序结果按 profile 记在 Host 存储里；重建 Client 或重启 Desktop 后，重新打开的工作区按记忆位置插入，关闭过的页签保留原槽位。
+- 顺序只记页签身份（Local、`web:<profile>`、`tui:<profile>`、`session:<id>`、`ssh:<host>:<profile>`），落在 `<DSH_HOME>/storages/workspace_shell/tab_order/default.json`，最多 64 条，超限先淘汰已关闭的。
+- 身份 token 不含标题、URL、cwd、token 或会话正文；存储不可用或数据损坏时按追加处理，拖拽、打开页签和 launcher 不受影响，下一次拖拽覆盖坏记录。
+- 不恢复页签本身，不自动连接 SSH，不启动 Host 或 TUI；同一 profile 多开的页签共用身份，按打开顺序相邻插入。
 - launcher 显示本机与 SSH 来源，不自动连接未启用的 SSH 记录。
 - 本机列表隐藏 Desktop、headless 和无有效能力的 profile；Web 排在 TUI 前面。未识别 profile 显示“未识别”。
 - 名称包含 `tui` 的 profile 使用通用 TUI 适配，匹配不区分大小写；DSH TUI 和 Pi TUI 保留各自的严格适配。
@@ -96,6 +101,10 @@ node controller/scripts/build-runtime.mjs --platform linux --arch x64 --libc gli
 - [SSH Remote manager 0.2.0](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/artifacts/workspace-tabs/release-cwd/local-dsh-ssh-remote-0.2.0.tgz)
 
 ## 验证结果
+
+2026-11-08 页签重排与 Web Guest：连续拖拽排序后，`web · Web 4` 的 Guest 停在 `about:blank`，与空白页签的现象一致；根因是页签数组重排会移动已挂载的 `<webview>` DOM 节点。Shell `0.5.12` 让远端 Surface 按创建顺序挂载，页签条单独排序；新增 `test/p2/ui/shell-frame.test.mjs` 用例锁定 Surface 顺序。全量 **1003 项，997 通过，0 失败，6 跳过**。
+
+2026-11-08 页签顺序记忆：Shell `0.5.11` 新增 `test/p2/ui/shell-tab-order.test.mjs`、`test/p2/shell-tab-order-store.test.mjs` 和客户端记忆顺序用例；全量 **1002 项，996 通过，0 失败，6 跳过**。拖拽手势与回归用例不变。
 
 2026-11-04 点击修复回归：**983 项，978 通过，0 失败，5 跳过**，包含真实浏览器点击用例。完整结果见[测试日志](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/artifacts/workspace-tabs/native-click-regression.log)。
 

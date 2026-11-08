@@ -2327,6 +2327,13 @@ const DRAG_THRESHOLD = 4;
 // Auto-scroll starts inside this distance from the strip viewport edges.
 const EDGE_ZONE = 32;
 const EDGE_STEP = 16;
+// Reorder transition: long enough to read as motion, short enough to stay out
+// of the way of the next midpoint crossing.
+const FLIP_DURATION = 140;
+const FLIP_EASING = 'cubic-bezier(.2,0,0,1)';
+// The floating copy tilts with horizontal travel, capped so it stays readable.
+const GHOST_TILT_MAX = 2;
+const GHOST_TILT_DISTANCE = 60;
 
 function measureRect(node) {
   if (!node || typeof node.getBoundingClientRect !== 'function') return null;
@@ -2342,6 +2349,16 @@ function measureRect(node) {
 function coordinate(value) {
   const number = Number(value);
   return Number.isFinite(number) ? number : 0;
+}
+
+// Direct manipulation stays available when motion is reduced; only the cosmetic
+// tilt and the reorder animation are dropped.
+function prefersReducedMotion(win) {
+  try {
+    return typeof win?.matchMedia === 'function' && win.matchMedia('(prefers-reduced-motion: reduce)')?.matches === true;
+  } catch {
+    return false;
+  }
 }
 
 // Interactive descendants (close button, add button, links, form controls) must
@@ -2408,6 +2425,9 @@ function createChromeTabs(React, deps = {}) {
     throw new TypeError('createChromeTabs requires React hooks');
   }
   const h = React.createElement;
+  // Layout effects are required to measure before paint; the fallback keeps the
+  // factory importable in renderers that only expose useEffect.
+  const useLayout = typeof React.useLayoutEffect === 'function' ? React.useLayoutEffect : useEffect;
   const doc = deps.document ?? globalThis.document ?? null;
   const win = deps.window ?? globalThis.window ?? null;
   const schedule = typeof win?.requestAnimationFrame === 'function'
@@ -2438,7 +2458,82 @@ function createChromeTabs(React, deps = {}) {
     const dragRef = useRef(null);
     const suppressClick = useRef(false);
     const latest = useRef(null);
+    const rootRef = useRef(null);
+    const ghostRef = useRef(null);
+    const positions = useRef(new Map());
+    const order = useRef('');
+    const animations = useRef(new Map());
     latest.current = { tabs: list, activeId, copy, onSelect, onClose, onAdd, onMove, getStatus, ids };
+
+    // A reorder is the only layout change that should animate. Comparing the id
+    // sequence filters out selection, status refreshes and window resizes, which
+    // also change measured rects but must not animate.
+    useLayout(() => {
+      const current = latest.current.tabs;
+      const next = new Map();
+      const keys = [];
+      for (const tab of current) {
+        keys.push(String(tab.id));
+        const rect = measureRect(shells.current.get(tab.id));
+        if (rect) next.set(tab.id, rect);
+      }
+      for (const id of [...animations.current.keys()]) {
+        if (next.has(id)) continue;
+        const animation = animations.current.get(id);
+        animations.current.delete(id);
+        try {
+          animation?.cancel?.();
+        } catch {
+          // A removed tab's animation is already gone.
+        }
+      }
+      const currentOrder = keys.join('\u0000');
+      const previousOrder = order.current;
+      if (previousOrder && previousOrder !== currentOrder && !prefersReducedMotion(win)) {
+        for (const tab of current) {
+          const node = shells.current.get(tab.id);
+          const before = positions.current.get(tab.id);
+          const after = next.get(tab.id);
+          if (!node || !before || !after) continue;
+          const dx = before.left - after.left;
+          const dy = before.top - after.top;
+          if (Math.abs(dx) < 1 && Math.abs(dy) < 1) continue;
+          if (typeof node.animate !== 'function') continue;
+          const running = animations.current.get(tab.id);
+          animations.current.delete(tab.id);
+          try {
+            running?.cancel?.();
+          } catch {
+            // The newer animation replaces it.
+          }
+          try {
+            const animation = node.animate(
+              [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'translate(0px, 0px)' }],
+              { duration: FLIP_DURATION, easing: FLIP_EASING },
+            );
+            if (animation) animations.current.set(tab.id, animation);
+          } catch {
+            // Animation support is optional; the order has already changed.
+          }
+        }
+      }
+      order.current = currentOrder;
+      positions.current = next;
+      const drag = dragRef.current;
+      if (drag && drag.started) positionGhost(drag);
+    });
+
+    useEffect(() => () => {
+      for (const animation of animations.current.values()) {
+        try {
+          animation?.cancel?.();
+        } catch {
+          // Unmount continues.
+        }
+      }
+      animations.current.clear();
+      positions.current.clear();
+    }, []);
 
     useEffect(() => {
       mounted.current = true;
@@ -2498,6 +2593,30 @@ function createChromeTabs(React, deps = {}) {
         }
       }
       if (announce) announceMove(id, index);
+    }
+
+    // The copy is positioned against the strip root, not the viewport, so an
+    // ancestor with a transform or filter cannot move it.
+    function ghostTransform(drag) {
+      const root = measureRect(rootRef.current);
+      const originLeft = root ? root.left : 0;
+      const originTop = root ? root.top : 0;
+      const x = drag.lastX - originLeft - drag.grabX;
+      const y = drag.lastY - originTop - drag.grabY;
+      const travel = drag.reduced
+        ? 0
+        : Math.max(-GHOST_TILT_MAX, Math.min(GHOST_TILT_MAX, (drag.lastX - drag.startX) / GHOST_TILT_DISTANCE));
+      return `translate3d(${x}px, ${y}px, 0) rotate(${travel}deg)`;
+    }
+
+    function positionGhost(drag) {
+      const node = ghostRef.current;
+      if (!drag || !node || !node.style) return;
+      try {
+        node.style.transform = ghostTransform(drag);
+      } catch {
+        // The copy is cosmetic; a style failure must not break the gesture.
+      }
     }
 
     function edgeSpeed(clientX) {
@@ -2607,6 +2726,11 @@ function createChromeTabs(React, deps = {}) {
     function beginDrag(drag) {
       if (!drag || drag.started || drag.ended) return;
       drag.started = true;
+      const rect = measureRect(drag.shell);
+      drag.rect = rect;
+      drag.grabX = rect ? drag.startX - rect.left : 0;
+      drag.grabY = rect ? drag.startY - rect.top : 0;
+      drag.reduced = prefersReducedMotion(win);
       try {
         drag.shell?.setPointerCapture?.(drag.pointerId);
         drag.captured = true;
@@ -2691,6 +2815,7 @@ function createChromeTabs(React, deps = {}) {
         if (!drag.started) return;
       }
       event.preventDefault?.();
+      positionGhost(drag);
       updateTarget(drag, drag.lastX);
       updateEdgeScroll(drag, drag.lastX);
     }
@@ -2819,6 +2944,17 @@ function createChromeTabs(React, deps = {}) {
       return { tab: tabId, panel: panelId };
     }
 
+    function tabContentNodes(tab, status) {
+      return [
+        status ? h('span', {
+          key: 'dot', className: 'ct-dot', 'data-connected': status.connected ? 'true' : 'false', 'aria-hidden': 'true',
+        }) : null,
+        status ? h('span', { key: 'state', className: 'ct-sr-only' }, status.connected ? copy.connected : copy.disconnected) : null,
+        status && status.alias ? h('span', { key: 'alias', className: 'ct-alias' }, status.alias) : null,
+        h('span', { key: 'title', className: 'ct-title' }, tabTitle(tab)),
+      ];
+    }
+
     function renderTab(tab) {
       const selected = tab.id === activeId;
       const tabbable = tab.id === tabbableId;
@@ -2829,14 +2965,7 @@ function createChromeTabs(React, deps = {}) {
       const domIds = domIdsFor(tab);
       const shortcuts = [closable ? 'Delete' : null, typeof onMove === 'function' ? 'Alt+ArrowLeft Alt+ArrowRight' : null]
         .filter(Boolean).join(' ');
-      const content = [
-        status ? h('span', {
-          key: 'dot', className: 'ct-dot', 'data-connected': status.connected ? 'true' : 'false', 'aria-hidden': 'true',
-        }) : null,
-        status ? h('span', { key: 'state', className: 'ct-sr-only' }, status.connected ? copy.connected : copy.disconnected) : null,
-        status && status.alias ? h('span', { key: 'alias', className: 'ct-alias' }, status.alias) : null,
-        h('span', { key: 'title', className: 'ct-title' }, title),
-      ];
+      const content = tabContentNodes(tab, status);
       return h('div', {
         key: tab.id,
         role: 'presentation',
@@ -2894,10 +3023,35 @@ function createChromeTabs(React, deps = {}) {
       }, '×') : null);
     }
 
+    // The copy carries the tab's content but none of its interaction or identity:
+    // no tab role, no tab id, no close button and no pointer events.
+    function renderGhost() {
+      const drag = dragRef.current;
+      if (!drag || !drag.started || drag.ended || !drag.rect) return null;
+      if (!(drag.rect.width > 0) || !(drag.rect.height > 0)) return null;
+      const tab = latest.current.tabs.find((item) => item.id === drag.id);
+      if (!tab) return null;
+      return h('div', {
+        key: 'ghost',
+        className: 'ct-ghost',
+        'data-chrome-tab-ghost': String(tab.id),
+        'aria-hidden': 'true',
+        ref: ghostRef,
+        style: {
+          width: `${drag.rect.width}px`,
+          height: `${drag.rect.height}px`,
+          transform: ghostTransform(drag),
+          WebkitAppRegion: 'no-drag',
+        },
+      }, h('div', { className: 'ct-tab-body' }, tabContentNodes(tab, statusFor(tab))));
+    }
+
+    const ghost = renderGhost();
     return h('div', {
       className: typeof className === 'string' && className.trim() ? `ct-root ${className.trim()}` : 'ct-root',
       'data-chrome-tabs': '',
       'data-dragging': draggingId != null ? 'true' : undefined,
+      ref: rootRef,
     },
     h('div', {
       className: 'ct-tabs',
@@ -2913,6 +3067,7 @@ function createChromeTabs(React, deps = {}) {
       onPointerCancel,
       onLostPointerCapture,
     }, list.map(renderTab)),
+    ghost,
     typeof onAdd === 'function' ? h('button', {
       type: 'button',
       className: 'ct-add',
@@ -2967,15 +3122,20 @@ const css = [
   '--ct-hover-bg:color-mix(in srgb, var(--ct-fg) 7%, transparent);',
   '--ct-press-bg:color-mix(in srgb, var(--ct-fg) 12%, transparent);',
   '--ct-veil:color-mix(in srgb, var(--ct-fg) 14%, transparent);',
-  'box-sizing:border-box;display:flex;align-items:stretch;gap:2px;height:var(--ct-height);min-width:0;max-width:100%;padding:0 var(--ct-inline-padding);background:var(--ct-bar-bg);color:var(--ct-fg-muted);font-family:inherit;font-size:var(--ct-font-size);line-height:1;user-select:none;-webkit-user-select:none;',
+  '--ct-ghost-bg:var(--ct-tab-active-bg);',
+  '--ct-ghost-shadow:var(--dsw-shadow-lv2, 0 12px 28px color-mix(in srgb, var(--ct-fg) 18%, transparent));',
+  'box-sizing:border-box;display:flex;align-items:stretch;gap:2px;height:var(--ct-height);min-width:0;max-width:100%;padding:0 var(--ct-inline-padding);background:var(--ct-bar-bg);color:var(--ct-fg-muted);font-family:inherit;font-size:var(--ct-font-size);line-height:1;user-select:none;-webkit-user-select:none;position:relative;',
   '}',
   '.ct-tabs{display:flex;align-items:flex-end;gap:var(--ct-gap);flex:0 1 auto;min-width:0;height:100%;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;overscroll-behavior-x:contain;touch-action:pan-x;-webkit-app-region:no-drag}',
   '.ct-tabs::-webkit-scrollbar{display:none;width:0;height:0}',
   '.ct-tab{position:relative;display:flex;align-items:center;flex:1 1 auto;min-width:var(--ct-tab-min-width);max-width:var(--ct-tab-max-width);height:var(--ct-tab-height);padding:0 4px 0 10px;box-sizing:border-box;border-radius:var(--ct-radius) var(--ct-radius) 0 0;background:transparent;color:var(--ct-fg-muted);cursor:default;touch-action:none;-webkit-app-region:no-drag}',
   '.ct-tab:not([data-active=true]):hover,.ct-tab:not([data-active=true]):focus-within{background:var(--ct-hover-bg)}',
   '.ct-tab[data-active=true]{background:var(--ct-tab-active-bg);color:var(--ct-fg)}',
-  '.ct-tab[data-dragging=true]{opacity:.72}',
+  '.ct-tab[data-dragging=true]{opacity:.45;background:var(--ct-hover-bg);box-shadow:inset 0 0 0 1px var(--ct-veil)}',
+  '.ct-tab[data-dragging=true] .ct-close{opacity:0;pointer-events:none}',
   '.ct-root[data-dragging=true]{cursor:grabbing}',
+  '.ct-root[data-dragging=true] .ct-tab{cursor:grabbing}',
+  '.ct-ghost{position:absolute;left:0;top:0;z-index:40;display:flex;align-items:center;box-sizing:border-box;padding:0 4px 0 10px;border-radius:var(--ct-radius) var(--ct-radius) 0 0;background:var(--ct-ghost-bg);color:var(--ct-fg);box-shadow:var(--ct-ghost-shadow),0 0 0 1px var(--ct-veil);pointer-events:none;will-change:transform;transform-origin:50% 0;overflow:hidden;-webkit-app-region:no-drag}',
   '.ct-tab-body{display:flex;align-items:center;gap:6px;flex:1 1 auto;min-width:0;height:100%;padding:0;border:0;border-radius:var(--ct-radius-sm);background:transparent;color:inherit;font:inherit;cursor:inherit;outline:none}',
   '.ct-tab-body:focus-visible{outline:var(--ct-focus-width) solid var(--ct-focus-ring);outline-offset:-2px}',
   '.ct-title{min-width:0;flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
@@ -2993,8 +3153,9 @@ const css = [
   '.ct-add:focus-visible{outline:var(--ct-focus-width) solid var(--ct-focus-ring);outline-offset:0}',
   '.ct-blank{flex:1 1 auto;min-width:8px;align-self:stretch;-webkit-app-region:drag}',
   '.ct-sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}',
-  '@media(prefers-reduced-motion:no-preference){.ct-tab,.ct-close,.ct-add{transition:background-color 120ms ease,color 120ms ease,opacity 120ms ease}}',
-  '@media(prefers-reduced-motion:reduce){.ct-tab,.ct-close,.ct-add{transition:none!important;animation:none!important}}',
+  '@keyframes ct-ghost-in{from{opacity:0}to{opacity:1}}',
+  '@media(prefers-reduced-motion:no-preference){.ct-tab,.ct-close,.ct-add{transition:background-color 120ms ease,color 120ms ease,opacity 120ms ease,box-shadow 120ms ease}.ct-ghost{animation:ct-ghost-in 90ms ease-out}}',
+  '@media(prefers-reduced-motion:reduce){.ct-tab,.ct-close,.ct-add,.ct-ghost{transition:none!important;animation:none!important}}',
   '@media(max-width:640px){.ct-root{--ct-tab-min-width:56px;--ct-tab-max-width:160px;--ct-font-size:12px;--ct-font-size-compact:11px;--ct-inline-padding:6px}.ct-alias{max-width:32%}}',
 ].join('\n');
 

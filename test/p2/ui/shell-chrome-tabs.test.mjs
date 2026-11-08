@@ -23,6 +23,8 @@ function createEnvironment(options = {}) {
   const focusCalls = [];
   const shells = new Map();
   const bodies = new Map();
+  const ghosts = new Map();
+  const animations = [];
   let frameId = 0;
   const mirror = { tabs: [] };
 
@@ -55,6 +57,7 @@ function createEnvironment(options = {}) {
       if (index >= 0) frames.splice(index, 1);
     },
   };
+  if (options.reducedMotion) window.matchMedia = () => ({ matches: true });
 
   const scroller = {
     tagName: 'DIV',
@@ -67,6 +70,13 @@ function createEnvironment(options = {}) {
     },
   };
 
+  const root = {
+    tagName: 'DIV',
+    getBoundingClientRect() {
+      return { left: 0, right: scroller.clientWidth, top: 0, bottom: 48, width: scroller.clientWidth, height: 48 };
+    },
+  };
+
   function shellNode(id) {
     if (shells.has(id)) return shells.get(id);
     const node = {
@@ -74,6 +84,20 @@ function createEnvironment(options = {}) {
       tagName: 'DIV',
       attributes: new Map(),
       captured: new Set(),
+      style: {},
+      ...(options.noAnimate ? {} : {
+        animate(frames, animationOptions) {
+          const animation = {
+            id,
+            frames,
+            options: animationOptions,
+            cancelled: false,
+            cancel() { animation.cancelled = true; },
+          };
+          animations.push(animation);
+          return animation;
+        },
+      }),
       setPointerCapture(pointerId) {
         captureCalls.push([id, pointerId]);
         node.captured.add(pointerId);
@@ -102,6 +126,13 @@ function createEnvironment(options = {}) {
     return node;
   }
 
+  function ghostNode(id) {
+    if (ghosts.has(id)) return ghosts.get(id);
+    const node = { id, tagName: 'DIV', style: {}, attributes: new Map() };
+    ghosts.set(id, node);
+    return node;
+  }
+
   function bodyNode(id) {
     if (bodies.has(id)) return bodies.get(id);
     const node = {
@@ -121,7 +152,10 @@ function createEnvironment(options = {}) {
 
   function createNodeMock(element) {
     const props = element?.props ?? {};
+    if (props['data-chrome-tabs'] !== undefined) return root;
     if (props['data-chrome-tablist'] !== undefined) return scroller;
+    const ghostId = props['data-chrome-tab-ghost'];
+    if (ghostId !== undefined) return ghostNode(String(ghostId));
     const bodyId = props['data-chrome-tab-body'];
     if (bodyId !== undefined) return bodyNode(String(bodyId));
     const shellId = props['data-chrome-tab'];
@@ -137,8 +171,8 @@ function createEnvironment(options = {}) {
   }
 
   return {
-    document, window, mirror, scroller, createNodeMock, captureCalls, releaseCalls, focusCalls,
-    frames, cancelledFrames, runFrames, shellNode, bodyNode,
+    document, window, mirror, scroller, root, createNodeMock, captureCalls, releaseCalls, focusCalls,
+    frames, cancelledFrames, animations, ghosts, runFrames, shellNode, ghostNode, bodyNode,
     pendingFrames: () => frames.length,
   };
 }
@@ -388,6 +422,16 @@ test('stylesheet uses only official tokens or its own variables, keeps 48px, the
   assert.match(css, /--ct-dot-on:var\(--dsw-alias-state-success-primary/);
   assert.match(css, /--ct-dot-off:var\(--dsw-alias-state-idle-primary/);
   assert.match(css, /--ct-tab-active-bg:var\(--dsw-alias-bg-base\)/);
+  // Drag feedback: a raised copy over a dimmed slot, both theme-derived.
+  assert.match(css, /\.ct-root\{[^}]*position:relative/);
+  assert.match(css, /--ct-ghost-bg:var\(--ct-tab-active-bg\)/);
+  assert.match(css, /--ct-ghost-shadow:var\(--dsw-shadow-lv2/);
+  assert.match(css, /\.ct-tab\[data-dragging=true\]\{[^}]*opacity:\.45[^}]*box-shadow:inset 0 0 0 1px/);
+  assert.match(css, /\.ct-tab\[data-dragging=true\] \.ct-close\{opacity:0;pointer-events:none\}/);
+  assert.match(css, /\.ct-ghost\{[^}]*position:absolute[^}]*box-shadow:var\(--ct-ghost-shadow\),0 0 0 1px var\(--ct-veil\)[^}]*pointer-events:none/);
+  assert.match(css, /@keyframes ct-ghost-in\{from\{opacity:0\}to\{opacity:1\}\}/);
+  assert.match(css, /\.ct-ghost\{animation:ct-ghost-in 90ms ease-out\}/);
+  assert.match(css, /@media\(prefers-reduced-motion:reduce\)\{[^}]*\.ct-ghost\{[^}]*animation:none!important/);
 });
 
 // ---------------------------------------------------------------------------
@@ -866,4 +910,132 @@ test('the whole gesture runs against frozen records without mutating the host ta
   assert.deepEqual(fixture.env.mirror.tabs.map((tab) => tab.id), ['ssh:1', 'ssh:2', 'local']);
   assert.deepEqual(fixture.log.select, []);
   assert.deepEqual(records.map((tab) => tab.id), ['local', 'ssh:1', 'ssh:2']);
+});
+
+// ---------------------------------------------------------------------------
+// Drag feedback: floating copy and reorder transition
+// ---------------------------------------------------------------------------
+
+test('crossing the threshold mounts one pointer-following copy of the tab', async (t) => {
+  const a = { id: 'a', identity: {}, kind: 'web', title: 'A', closable: true };
+  const b = { id: 'b', identity: {}, kind: 'web', title: 'B', closable: true };
+  const c = { id: 'c', identity: {}, kind: 'web', title: 'C', closable: true };
+  const fixture = await setup(t, [a, b, c], { activeId: 'a' });
+  const ghosts = () => fixture.root.findAll((node) => node.props['data-chrome-tab-ghost'] !== undefined);
+  assert.equal(ghosts().length, 0);
+
+  await fixture.pointerDown('c', { clientX: 450, clientY: 10, pointerId: 1 });
+  await fixture.pointerMove(pointerEvent({ clientX: 430, clientY: 10, pointerId: 1 }));
+  assert.equal(ghosts().length, 1);
+  const ghost = ghosts()[0];
+  assert.equal(ghost.props['data-chrome-tab-ghost'], 'c');
+  assert.equal(ghost.props['aria-hidden'], 'true');
+  assert.equal(ghost.props.role, undefined);
+  assert.equal(ghost.props['data-chrome-tab'], undefined);
+  assert.equal(ghost.props.style.width, '200px');
+  assert.equal(ghost.props.style.height, '36px');
+  assert.match(ghost.props.style.transform, /^translate3d\(380px, 0px, 0\) rotate\(-0\.33/);
+  assert.equal(renderedText(ghost), 'C');
+  assert.match(fixture.env.ghostNode('c').style.transform, /^translate3d\(380px, 0px, 0\) rotate\(-0\.33/);
+
+  await fixture.pointerMove(pointerEvent({ clientX: 420, clientY: 20, pointerId: 1 }));
+  assert.match(fixture.env.ghostNode('c').style.transform, /^translate3d\(370px, 10px, 0\) rotate\(-0\.5deg\)$/);
+
+  await fixture.pointerUp(pointerEvent({ clientX: 420, clientY: 20, pointerId: 1 }));
+  assert.equal(ghosts().length, 0);
+});
+
+test('drag and keyboard reorders animate moved tabs, reduced motion skips the animation', async (t) => {
+  const a = { id: 'a', identity: {}, kind: 'web', title: 'A', closable: true };
+  const b = { id: 'b', identity: {}, kind: 'web', title: 'B', closable: true };
+  const c = { id: 'c', identity: {}, kind: 'web', title: 'C', closable: true };
+  const fixture = await setup(t, [a, b, c], { activeId: 'a' });
+  await fixture.pointerDown('c', { clientX: 450, pointerId: 2 });
+  await fixture.pointerMove(pointerEvent({ clientX: 430, pointerId: 2 }));
+  assert.equal(fixture.env.animations.length, 0, 'Starting a drag alone must not animate');
+  await fixture.pointerMove(pointerEvent({ clientX: 210, pointerId: 2 }));
+  assert.equal(fixture.env.animations.length, 2);
+  const dragged = new Map(fixture.env.animations.map((animation) => [animation.id, animation]));
+  assert.deepEqual(dragged.get('c').frames, [
+    { transform: 'translate(200px, 0px)' },
+    { transform: 'translate(0px, 0px)' },
+  ]);
+  assert.deepEqual(dragged.get('b').frames, [
+    { transform: 'translate(-200px, 0px)' },
+    { transform: 'translate(0px, 0px)' },
+  ]);
+  assert.equal(dragged.get('c').options.duration, 140);
+  assert.equal(dragged.get('c').options.easing, 'cubic-bezier(.2,0,0,1)');
+  await fixture.pointerUp(pointerEvent({ clientX: 210, pointerId: 2 }));
+
+  const keyboard = await setup(t, [a, b, c], { activeId: 'a' });
+  await keyboard.fire(keyboard.shell('a').props.onKeyDown, keyEvent({ key: 'ArrowRight', altKey: true }));
+  assert.deepEqual(keyboard.log.move, [['a', 1]]);
+  assert.equal(keyboard.env.animations.length, 2);
+  const moved = new Map(keyboard.env.animations.map((animation) => [animation.id, animation]));
+  assert.deepEqual(moved.get('a').frames[0], { transform: 'translate(-200px, 0px)' });
+  assert.deepEqual(moved.get('b').frames[0], { transform: 'translate(200px, 0px)' });
+
+  const reduced = await setup(t, [a, b, c], { activeId: 'a', reducedMotion: true });
+  await reduced.pointerDown('c', { clientX: 450, pointerId: 3 });
+  await reduced.pointerMove(pointerEvent({ clientX: 430, pointerId: 3 }));
+  assert.match(reduced.env.ghostNode('c').style.transform, /rotate\(0deg\)$/);
+  await reduced.pointerMove(pointerEvent({ clientX: 210, pointerId: 3 }));
+  assert.deepEqual(reduced.env.mirror.tabs.map((tab) => tab.id), ['a', 'c', 'b']);
+  assert.equal(reduced.env.animations.length, 0);
+});
+
+test('escape, cancel, removal and unmount release the copy and its animations', async (t) => {
+  const a = { id: 'a', identity: {}, kind: 'web', title: 'A', closable: true };
+  const b = { id: 'b', identity: {}, kind: 'web', title: 'B', closable: true };
+  const c = { id: 'c', identity: {}, kind: 'web', title: 'C', closable: true };
+  const ghosts = (fixture) => fixture.root.findAll((node) => node.props['data-chrome-tab-ghost'] !== undefined);
+
+  const escaped = await setup(t, [a, b, c], { activeId: 'a' });
+  await escaped.pointerDown('c', { clientX: 450, pointerId: 4 });
+  await escaped.pointerMove(pointerEvent({ clientX: 430, pointerId: 4 }));
+  await escaped.pointerMove(pointerEvent({ clientX: 210, pointerId: 4 }));
+  assert.equal(ghosts(escaped).length, 1);
+  assert.ok(escaped.env.animations.length > 0);
+  const escape = keyEvent({ key: 'Escape' });
+  await act(async () => { escaped.env.document.emit('keydown', escape); });
+  assert.equal(ghosts(escaped).length, 0);
+  assert.deepEqual(escaped.env.mirror.tabs.map((tab) => tab.id), ['a', 'b', 'c']);
+  await escaped.app.unmount();
+  assert.ok(escaped.env.animations.every((animation) => animation.cancelled));
+
+  const cancelled = await setup(t, [a, b, c], { activeId: 'a' });
+  await cancelled.pointerDown('c', { clientX: 450, pointerId: 5 });
+  await cancelled.pointerMove(pointerEvent({ clientX: 430, pointerId: 5 }));
+  await cancelled.pointerMove(pointerEvent({ clientX: 210, pointerId: 5 }));
+  assert.equal(ghosts(cancelled).length, 1);
+  await cancelled.pointerCancel(pointerEvent({ clientX: 210, pointerId: 5 }));
+  assert.equal(ghosts(cancelled).length, 0);
+  assert.equal(cancelled.env.document.listenerCount('keydown'), 0);
+  assert.deepEqual(cancelled.env.mirror.tabs.map((tab) => tab.id), ['a', 'c', 'b']);
+  await cancelled.app.unmount();
+  assert.ok(cancelled.env.animations.every((animation) => animation.cancelled));
+
+  const removed = await setup(t, [a, b, c], { activeId: 'a' });
+  await removed.pointerDown('c', { clientX: 450, pointerId: 6 });
+  await removed.pointerMove(pointerEvent({ clientX: 430, pointerId: 6 }));
+  await removed.pointerMove(pointerEvent({ clientX: 210, pointerId: 6 }));
+  assert.equal(ghosts(removed).length, 1);
+  await removed.removeTab('c');
+  assert.equal(ghosts(removed).length, 0);
+  assert.equal(removed.env.document.listenerCount('keydown'), 0);
+});
+
+test('a renderer without Element.animate still mounts the copy and reorders', async (t) => {
+  const a = { id: 'a', identity: {}, kind: 'web', title: 'A', closable: true };
+  const b = { id: 'b', identity: {}, kind: 'web', title: 'B', closable: true };
+  const c = { id: 'c', identity: {}, kind: 'web', title: 'C', closable: true };
+  const fixture = await setup(t, [a, b, c], { activeId: 'a', noAnimate: true });
+  await fixture.pointerDown('c', { clientX: 450, pointerId: 7 });
+  await fixture.pointerMove(pointerEvent({ clientX: 430, pointerId: 7 }));
+  assert.equal(fixture.root.findAll((node) => node.props['data-chrome-tab-ghost'] !== undefined).length, 1);
+  await fixture.pointerMove(pointerEvent({ clientX: 210, pointerId: 7 }));
+  assert.deepEqual(fixture.env.mirror.tabs.map((tab) => tab.id), ['a', 'c', 'b']);
+  assert.equal(fixture.env.animations.length, 0);
+  await fixture.pointerUp(pointerEvent({ clientX: 210, pointerId: 7 }));
 });

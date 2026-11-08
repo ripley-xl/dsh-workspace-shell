@@ -2,8 +2,8 @@
 
 ## 当前版本
 
-- Workspace Shell：`0.5.12`，见[插件清单](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/packages/shell/package.json)。
-- SSH Remote manager：`0.3.5`，见[manager 清单](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/packages/manager/package.json)。
+- Workspace Shell：`0.5.13`，见[插件清单](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/packages/shell/package.json)。
+- SSH Remote manager：`0.3.6`，见[manager 清单](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/packages/manager/package.json)。
 - 远程 controller：`0.2.2`，见[版本常量](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/controller/src/constants.js)。
 - 目标 DSH：远端运行包 `0.2.2-rc.1`（内置 pnpm `11.28.5`）；本机 CLI 页签仍按 `0.2.1-rc.5` 校验。终端资产为 xterm `6.0.0`、addon-fit `0.11.0`。
 - 设计和验收口径见[工作区设计文档](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/docs/workspace-launcher-design.md)。
@@ -16,6 +16,8 @@
 - 点击 `+` 创建真正的 launcher 页签；选择 Open 后在原页签内转换，保留 ID、位置和选中状态。
 - 页签使用记录身份对象和当前运行检查处理迟到回调，不再使用数值 generation。
 - Chrome 风格页签支持实时拖拽、边缘滚动、键盘操作、关闭、Escape 回滚和窄窗口布局。
+- 拖拽越过 4px 阈值后显示跟随指针的页签副本，原位置变为占位槽；经过其它页签中点时实时重排，页签位置用 140ms 过渡更新。`prefers-reduced-motion: reduce` 时保留副本跟随，关闭倾斜、入场和位置过渡。
+- 副本只参与显示和坐标计算，不改变页签记录、排序回调、顺序持久化或 Surface 挂载顺序。
 - 页签重排只改变页签条和记录顺序；已挂载的远端 Surface 保持创建时的 DOM 顺序。Desktop 的 Web Guest 是 Electron `<webview>`，移动它的 DOM 节点会让原生视图脱离，内容显示为空白。
 - 拖拽和键盘排序结果按 profile 记在 Host 存储里；重建 Client 或重启 Desktop 后，重新打开的工作区按记忆位置插入，关闭过的页签保留原槽位。
 - 顺序只记页签身份（Local、`web:<profile>`、`tui:<profile>`、`session:<id>`、`ssh:<host>:<profile>`），落在 `<DSH_HOME>/storages/workspace_shell/tab_order/default.json`，最多 64 条，超限先淘汰已关闭的。
@@ -101,6 +103,10 @@ node controller/scripts/build-runtime.mjs --platform linux --arch x64 --libc gli
 - [SSH Remote manager 0.2.0](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/artifacts/workspace-tabs/release-cwd/local-dsh-ssh-remote-0.2.0.tgz)
 
 ## 验证结果
+
+2026-11-08 页签拖拽反馈：Shell `0.5.13` 为 Chrome 页签增加跟手副本、原位占位槽和 140ms 位置过渡；`prefers-reduced-motion: reduce` 下关闭倾斜、入场和位置过渡。新增 4 个 `shell-chrome-tabs` 用例，覆盖副本跟随、拖拽与键盘过渡、reduce motion、取消与卸载清理。全量 **1007 项，1001 通过，0 失败，6 跳过**（`--test-concurrency=4`）。
+
+2026-11-08 拖拽反馈渲染检查：用 Playwright 将 `shell-chrome-tabs` 的真实渲染树套用组件 CSS，确认副本绝对定位、背景与阴影、2° 内倾斜，占位槽为 45% 不透明度和内描边；截图见 [drag-ghost.png](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/.worktrees/feat-tab-drag-effects/artifacts/workspace-tabs/release-drag-effects-0.5.13/drag-ghost.png)。真实 Desktop 窗口中的拖拽手感和主题叠层尚未验收。
 
 2026-11-08 页签重排与 Web Guest：连续拖拽排序后，`web · Web 4` 的 Guest 停在 `about:blank`，与空白页签的现象一致；根因是页签数组重排会移动已挂载的 `<webview>` DOM 节点。Shell `0.5.12` 让远端 Surface 按创建顺序挂载，页签条单独排序；新增 `test/p2/ui/shell-frame.test.mjs` 用例锁定 Surface 顺序。全量 **1003 项，997 通过，0 失败，6 跳过**。
 

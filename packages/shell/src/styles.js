@@ -47,6 +47,12 @@ export const shellCss = [
 '.wsh-frame[data-dragging]{transition:none!important;user-select:none}',
 // The frame is the window: no plugin's stray body-level inline node may scroll the document.
 'html[data-workspace-shell-active],html[data-workspace-shell-active] body{overflow:hidden}',
+// dsh-pet 0.4.3 appends a static inline <svg width="0" height="0" aria-hidden="true"> to
+// body for its alpha filter. A static inline element still generates a line box, so the
+// document measures one line (19px at the default body font) taller than the window and the
+// frame's bottom edge no longer reaches the window edge. Take that svg out of flow; dsh-pet
+// 0.4.7 sets position:absolute on it itself, and this rule covers older installs.
+'html[data-workspace-shell-active] body>svg[aria-hidden=true][width="0"][height="0"],html[data-workspace-shell-active] svg[data-dsh-pet-alpha-fix]{position:absolute!important;width:0!important;height:0!important;overflow:hidden!important;pointer-events:none!important}',
 'html[data-platform=darwin]:not([data-fullscreen]) .wsh-header{padding-left:100px}',
 // The theme's top fade is a body child: DSH's no-drag rule overrides pointer-events:none.
 // Exclude only this decorative overlay from native regions while our frame is mounted.

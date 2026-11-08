@@ -94,9 +94,13 @@ export function validateTabAppearance(value) {
 export function createWorkspacePreferencesStore({ getStorageDomain } = {}) {
   let opening = null;
   let tables = null;
+  let domainHandle = null;
+  let domainOwned = false;
   let unavailable = false;
+  let disposed = false;
 
   async function open() {
+    if (disposed) return null;
     if (tables) return tables;
     if (unavailable) return null;
     if (!opening) {
@@ -104,8 +108,22 @@ export function createWorkspacePreferencesStore({ getStorageDomain } = {}) {
         .then(async () => {
           const storage = typeof getStorageDomain === 'function' ? getStorageDomain() : null;
           if (!storage || typeof storage.open !== 'function') throw new Error('storage unavailable');
-          const domain = await storage.open(DOMAIN);
+          let domain;
+          let owned = true;
+          try {
+            domain = await storage.open(DOMAIN);
+          } catch (error) {
+            // A hot-reloaded Shell can race the previous generation's unclosed
+            // domain. Reuse that open handle instead of degrading appearance
+            // and order until the whole Host restarts.
+            if (typeof storage.get !== 'function') throw error;
+            try { domain = storage.get(DOMAIN.name); } catch { domain = undefined; }
+            if (!domain || typeof domain.table !== 'function') throw error;
+            owned = false;
+          }
           if (!domain || typeof domain.table !== 'function') throw new Error('storage unavailable');
+          domainHandle = domain;
+          domainOwned = owned;
           return Object.freeze({ order: domain.table('tab_order'), appearance: domain.table('tab_appearance') });
         })
         .then((value) => { tables = value; return value; })
@@ -113,6 +131,26 @@ export function createWorkspacePreferencesStore({ getStorageDomain } = {}) {
         .finally(() => { opening = null; });
     }
     return opening;
+  }
+
+  // The storage facility allows only one open handle per domain name. A plugin
+  // reload must release this handle or the next Shell instance cannot read
+  // order or appearance until the whole Host restarts.
+  async function dispose() {
+    if (disposed) return;
+    disposed = true;
+    unavailable = true;
+    const pending = opening;
+    if (pending) { try { await pending; } catch { /* Opening already failed. */ } }
+    const domain = domainHandle;
+    const owned = domainOwned;
+    domainHandle = null;
+    domainOwned = false;
+    tables = null;
+    // A shared handle belongs to an earlier generation; Host shutdown owns it.
+    if (owned && domain && typeof domain.close === 'function') {
+      try { await domain.close(); } catch { /* Closing is best effort during unload. */ }
+    }
   }
 
   return Object.freeze({
@@ -172,5 +210,6 @@ export function createWorkspacePreferencesStore({ getStorageDomain } = {}) {
         return false;
       }
     },
+    dispose,
   });
 }

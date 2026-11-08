@@ -15,12 +15,21 @@ import {
 function memoryStorage() {
   const tables = new Map();
   const opened = [];
+  let closes = 0;
+  let active = null;
+  let activeName = '';
   return {
     opened,
+    get closes() { return closes; },
     storage: {
       async open(spec) {
+        if (active) throw new Error('domain already open');
         opened.push(spec);
-        return {
+        const domain = {
+          async close() {
+            closes += 1;
+            if (active === domain) active = null;
+          },
           table(name) {
             if (!tables.has(name)) tables.set(name, new Map());
             const records = tables.get(name);
@@ -33,7 +42,11 @@ function memoryStorage() {
             };
           },
         };
+        active = domain;
+        activeName = spec.name;
+        return domain;
       },
+      get(name) { return active && name === activeName ? active : undefined; },
     },
     records(name) { return tables.get(name); },
   };
@@ -161,6 +174,55 @@ test('corrupt stored records read as empty and recover independently on the next
   assert.equal(await store.writeAppearance([{ id: 'local', name: '本机' }]), true);
   assert.deepEqual(await store.readOrder(), ['local']);
   assert.deepEqual(await store.readAppearance(), { entries: [{ id: 'local', name: '本机' }], available: true });
+});
+
+test('dispose closes the opened domain once and releases it for a reloaded store', async () => {
+  const io = memoryStorage();
+  const first = createWorkspacePreferencesStore({ getStorageDomain: () => io.storage });
+  assert.deepEqual(await first.readOrder(), []);
+  assert.equal(io.opened.length, 1);
+  await first.dispose();
+  assert.equal(io.closes, 1, 'the single-open domain is released on unload');
+  assert.deepEqual(await first.readOrder(), []);
+  assert.deepEqual(await first.readAppearance(), { entries: [], available: false });
+  await first.dispose();
+  assert.equal(io.closes, 1, 'disposing twice closes once');
+
+  const second = createWorkspacePreferencesStore({ getStorageDomain: () => io.storage });
+  assert.deepEqual(await second.readOrder(), []);
+  assert.equal(io.opened.length, 2, 'the replacement store can open the domain again');
+  assert.equal(await second.writeAppearance([{ id: 'local', name: '本机' }]), true);
+  await second.dispose();
+  assert.equal(io.closes, 2);
+});
+
+test('a reloaded store reuses an already-open domain instead of degrading', async () => {
+  const io = memoryStorage();
+  const first = createWorkspacePreferencesStore({ getStorageDomain: () => io.storage });
+  assert.deepEqual(await first.readOrder(), []);
+  const second = createWorkspacePreferencesStore({ getStorageDomain: () => io.storage });
+  assert.deepEqual(await second.readOrder(), []);
+  assert.equal(await second.writeAppearance([{ id: 'local', name: '本机', color: 'blue' }]), true);
+  assert.deepEqual(await first.readAppearance(), {
+    entries: [{ id: 'local', name: '本机', color: 'blue' }], available: true,
+  });
+  await second.dispose();
+  assert.equal(io.closes, 0, 'a shared handle is not closed by the new generation');
+  assert.deepEqual(await first.readAppearance(), {
+    entries: [{ id: 'local', name: '本机', color: 'blue' }], available: true,
+  });
+  await first.dispose();
+  assert.equal(io.closes, 1);
+});
+
+test('dispose after an in-flight open still closes the domain', async () => {
+  const io = memoryStorage();
+  const store = createWorkspacePreferencesStore({ getStorageDomain: () => io.storage });
+  const opening = store.readAppearance();
+  await store.dispose();
+  await opening;
+  assert.equal(io.closes, 1);
+  assert.deepEqual(await store.readAppearance(), { entries: [], available: false });
 });
 
 test('an appearance table read failure reports unavailable instead of overwriting unseen data', async () => {

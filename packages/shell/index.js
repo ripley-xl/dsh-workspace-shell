@@ -25,6 +25,7 @@ export async function apply(ctx) {
   ctx.provide('workspaceLocalRuntimes', service);
   ctx.effect(() => () => service.dispose(), 'workspace-owned local runtimes');
   const preferences = createWorkspacePreferencesStore({ getStorageDomain: () => storageDomainOf(ctx) });
+  ctx.effect(() => () => preferences.dispose(), 'workspace tab preferences');
   ctx.effect(() => registerShellRoutes(ctx, service, { preferences }), 'workspace HTTP routes');
   ctx.effect(() => registerWorkspaceRuntimeTool(ctx, service, { defineTool }), 'workspace_runtime');
 }

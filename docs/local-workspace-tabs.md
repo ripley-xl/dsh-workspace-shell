@@ -2,7 +2,7 @@
 
 ## 当前版本
 
-- Workspace Shell：`0.5.15`，见[插件清单](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/packages/shell/package.json)。
+- Workspace Shell：`0.5.16`，见[插件清单](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/packages/shell/package.json)。
 - SSH Remote manager：`0.3.6`，见[manager 清单](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/packages/manager/package.json)。
 - 远程 controller：`0.2.2`，见[版本常量](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/controller/src/constants.js)。
 - 目标 DSH：远端运行包 `0.2.2-rc.1`（内置 pnpm `11.28.5`）；本机 CLI 页签仍按 `0.2.1-rc.5` 校验。终端资产为 xterm `6.0.0`、addon-fit `0.11.0`。
@@ -106,6 +106,8 @@ node controller/scripts/build-runtime.mjs --platform linux --arch x64 --libc gli
 - [SSH Remote manager 0.2.0](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/artifacts/workspace-tabs/release-cwd/local-dsh-ssh-remote-0.2.0.tgz)
 
 ## 验证结果
+
+2026-11-08 修复热重载后外观丢失：Desktop 加载 `0.5.15` 后，插件重载时旧 Shell 实例没有关闭 `workspace_shell` 存储域；新实例打开同一域失败，外观读取降级为不可用，页签编辑按钮和色条消失。`0.5.16` 在插件卸载时关闭自建域，并在域已被旧实例占用时通过 `storage.get()` 复用同一句柄；安装后无需重启 Desktop，Local 的蓝色标记和编辑按钮即恢复。截图见 [恢复后的 Desktop 页签条](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/artifacts/workspace-tabs/release-tab-appearance-reload-0.5.16-bundle/desktop-restored.png)。新增 3 个 store 用例覆盖关闭、热重载复用和 in-flight open。全量 **1034 项，1028 通过，0 失败，6 跳过**（`--test-concurrency=4`）。
 
 2026-11-08 页签拖拽反馈：Shell `0.5.15` 在合并 `main` 的页签自定义名称与彩色标记后，为 Chrome 页签增加跟手副本、原位占位槽和 140ms 位置过渡；`prefers-reduced-motion: reduce` 下关闭倾斜、入场和位置过渡。新增 4 个 `shell-chrome-tabs` 用例，覆盖副本跟随、拖拽与键盘过渡、reduce motion、取消与卸载清理。全量 **1031 项，1025 通过，0 失败，6 跳过**（`--test-concurrency=4`）。
 

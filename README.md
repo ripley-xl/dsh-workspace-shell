@@ -6,7 +6,7 @@ SSH Remote 在本地和远程 DSH Web 之间切换。Desktop 使用当前窗口�
 
 已接入窗口内的主机选择与备份通知：管理页面卸载后仍保留每台主机最近一次待检查的备份元数据，插件卸载或页面重载时清空。备份记录不含凭据值或认证地址；Guest 仍未移出中央面板。
 
-实现依据见[设计说明](<../docs/ssh-remote-design.md>)，当前测试范围见[验证记录](<../docs/ssh-remote-p2-validation.md>)。
+实现依据见[设计说明](<docs/ssh-remote-design.md>)，当前测试范围见[验证记录](<docs/ssh-remote-p2-validation.md>)。
 
 ## 已实现
 

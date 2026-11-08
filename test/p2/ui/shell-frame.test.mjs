@@ -254,6 +254,16 @@ test('the frame locks document scrolling while mounted and releases it on unmoun
   await app.unmount();
   assert.equal(f.document.documentElement.hasAttribute('data-workspace-shell-active'), false);
 });
+test('the frame takes stray body-level inline svgs out of flow', () => {
+  // dsh-pet 0.4.3 appends a static inline <svg width="0" height="0" aria-hidden="true"> to
+  // body. The line box it generates measures 19px past the window, so the frame's bottom edge
+  // no longer reaches the window edge. The rule must cover both that generic shape and the
+  // plugin's marker, and must only apply while this frame owns the window.
+  assert.ok(shellCss.includes('html[data-workspace-shell-active] body>svg[aria-hidden=true][width="0"][height="0"]'));
+  assert.ok(shellCss.includes('html[data-workspace-shell-active] svg[data-dsh-pet-alpha-fix]'));
+  assert.match(shellCss, /svg\[data-dsh-pet-alpha-fix\]\{position:absolute!important;width:0!important;height:0!important;overflow:hidden!important;pointer-events:none!important\}/);
+  assert.equal(shellCss.includes('body>svg[aria-hidden=true][width="0"][height="0"]'), true);
+});
 test('Local-only fallback has no launcher entry and never navigates the original layout', () => {
   const f = fixture();
   assert.equal(f.views.Frame.toString().includes('ssh-remote'), false);

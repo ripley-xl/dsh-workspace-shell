@@ -67,9 +67,12 @@ export function remoteState() {
     instances: [],
     hosts: [],
     calls: [],
+    starts: [],
+    execs: [],
     stops: [],
     releases: [],
     restartNext: false,
+    failOpenAfterAttach: false,
     failSettingsUpdate: false,
     profiles: undefined,
     profileCalls: 0,
@@ -96,6 +99,10 @@ function channelFor(state) {
     remote.once('error', () => callback(new Error('remote port refused')));
   };
   const channel = new SshControlChannel(client, { alias: 'p0-test' });
+  channel.exec = async (request) => {
+    state.execs.push(request);
+    return { code: 0, stdout: '', stderr: '' };
+  };
   const close = channel.close.bind(channel);
   channel.close = async () => {
     await close();
@@ -121,7 +128,8 @@ function controllerFor(state, channel, runtimeId = null) {
           && (input.profileId === undefined || (entry.instance.profileId ?? 'web') === input.profileId)),
       };
     },
-    async start({ version, buildId, workspace, profileId = 'web' }) {
+    async start({ version, buildId, workspace, patch, profileId = 'web' }) {
+      state.starts.push({ version, buildId, workspace, patch, profileId });
       state.sequence += 1;
       const instance = {
         instanceId: `instance-${state.sequence}`,
@@ -164,6 +172,7 @@ export class FakeRemoteHost extends EventEmitter {
     Object.assign(this, options);
     this.closed = false;
     this.instanceId = null;
+    this.startedInstanceId = null;
     this.client = null;
     this.browserUrl = null;
     this.profileId = options.profileId ?? 'web';
@@ -186,13 +195,16 @@ export class FakeRemoteHost extends EventEmitter {
       error.code = 'REMOTE_INSTANCE_UNAVAILABLE';
       throw error;
     }
-    if (!instance) instance = (await this.controller.start({
-      version: this.version,
-      buildId: this.buildId,
-      workspace: this.workspace,
-      patch: this.patch,
-      profileId: this.profileId,
-    })).instance;
+    if (!instance) {
+      instance = (await this.controller.start({
+        version: this.version,
+        buildId: this.buildId,
+        workspace: this.workspace,
+        patch: this.patch,
+        profileId: this.profileId,
+      })).instance;
+      this.startedInstanceId = instance.instanceId;
+    }
     const attached = await this.controller.attach({
       instanceId: instance.instanceId, version: this.version, buildId: this.buildId, profileId: this.profileId,
     });
@@ -247,6 +259,9 @@ export class FakeRemoteHost extends EventEmitter {
         return { ok: true };
       },
     };
+    if (this.state?.failOpenAfterAttach) {
+      throw Object.assign(new Error('simulated status check failure'), { code: 'REMOTE_OPERATION_FAILED' });
+    }
     return this;
   }
 
@@ -283,7 +298,12 @@ export async function serviceFixture({
     return {
       channel,
       controller: controllerFor(state, channel, selected.runtimeId),
-      installed: { home: '/home/test', root: '/home/test/.dsh/ssh-remote', runtime: { ...selected, ...selected.target } },
+      installed: {
+        home: '/home/test',
+        root: '/home/test/.dsh/ssh-remote',
+        executable: '/home/test/.dsh/ssh-remote/servers/runtime/bin/dsh-ssh-remote-controller',
+        runtime: { ...selected, ...selected.target },
+      },
       artifact: selected,
       target: selected.target,
     };

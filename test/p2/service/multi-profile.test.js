@@ -347,3 +347,38 @@ test('stopping an offline profile host reconnects and leaves the others alone', 
   const reopened = await service.webOpen(record.id, { profileId: 'web', reuseOnly: true });
   assert.equal(reopened.instanceId, web.instanceId);
 });
+
+test('a profile Host start writes the status-plugin patch before it starts', async (t) => {
+  const { service, record, state } = await transportOnlyFixture(t);
+  const opened = await service.webOpen(record.id, { profileId: 'web' });
+  assert.equal(opened.ok, true);
+  const start = state.starts.at(-1);
+  assert.ok(start, 'the controller start should carry the profile Host request');
+  assert.match(start.patch, /\/home\/test\/\.dsh\/ssh-remote\/tmp\/status-[0-9a-f-]+\.yml$/u);
+  const tee = state.execs.find((entry) => entry.command === 'tee' && entry.args?.[0] === start.patch);
+  assert.ok(tee, 'the patch file must be written over the SSH channel');
+  assert.match(tee.input, /ssh-remote-status/u);
+  assert.match(tee.input, /"p0-test"/u);
+  assert.match(tee.input, /127\.0\.0\.1:54542/u);
+  assert.equal(state.hosts.at(-1).patch, start.patch);
+});
+
+test('a failed profile Host start stops the instance it created', async (t) => {
+  const { service, record, state } = await transportOnlyFixture(t);
+  state.failOpenAfterAttach = true;
+  await assert.rejects(service.webOpen(record.id, { profileId: 'web' }), (error) => {
+    assert.equal(error.message, 'simulated status check failure');
+    return true;
+  });
+  const created = state.instances.at(-1).instance.instanceId;
+  assert.deepEqual(state.stops, [created]);
+});
+
+test('a failure keeps the original error message instead of [object Object]', async (t) => {
+  const { service, record } = await transportOnlyFixture(t);
+  const runtime = service.profileRuntime(record.id, 'web');
+  runtime.instanceId = 'instance-lost';
+  runtime.error = { code: 'REMOTE_OPERATION_FAILED', message: 'attach failed before status check' };
+  const [host] = service.profileHosts(record.id);
+  assert.deepEqual(host.error, { code: 'REMOTE_OPERATION_FAILED', message: 'attach failed before status check' });
+});

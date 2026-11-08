@@ -25,6 +25,9 @@ export class RemoteHostConnection extends EventEmitter {
     this.gateway = null;
     this.client = null;
     this.instanceId = null;
+    // Set only when this connection itself asked the controller to start a
+    // Host. Callers use it to stop an orphan instance after a failed start.
+    this.startedInstanceId = null;
     this.clientLeaseId = null;
     this.heartbeatTimer = null;
     this.closed = false;
@@ -60,6 +63,7 @@ export class RemoteHostConnection extends EventEmitter {
         profileId: this.profileId,
       });
       instance = started.instance;
+      this.startedInstanceId = instance.instanceId;
       if (instanceProfileId(instance) !== this.profileId) {
         throw instanceUnavailable('The started remote instance does not match the requested profile.', {
           profileId: this.profileId,

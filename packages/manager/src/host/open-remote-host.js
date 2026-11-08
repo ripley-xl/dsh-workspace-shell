@@ -36,6 +36,28 @@ export function statusPluginPatch({ runtimeRoot, hostAlias, localReturnUrl, dshV
   ].join('\n');
 }
 
+/**
+ * Writes the per-connection status-plugin overlay into the remote runtime tmp
+ * directory and returns its absolute path. Every Host start needs this overlay:
+ * without it the remote Host has no `/api/ssh-remote/status` endpoint, so the
+ * attach performed right after the start cannot succeed.
+ */
+export async function writeStatusPluginPatch(channel, { installed, hostAlias, localReturnUrl, dshVersion, signal }) {
+  if (typeof installed?.executable !== 'string' || typeof installed?.root !== 'string') {
+    throw new Error('The remote runtime installation is incomplete.');
+  }
+  const runtimeRoot = posix.dirname(posix.dirname(installed.executable));
+  const patch = posix.join(installed.root, 'tmp', `status-${randomUUID()}.yml`);
+  const patchResult = await channel.exec({
+    command: 'tee',
+    args: [patch],
+    input: statusPluginPatch({ runtimeRoot, hostAlias, localReturnUrl, dshVersion }),
+    signal,
+  });
+  if (patchResult.code !== 0) throw new Error('Could not install the remote status plugin patch.');
+  return patch;
+}
+
 export async function openRemoteHost(options) {
   const connectionOptions = {
     signal: options.signal,
@@ -70,20 +92,13 @@ export async function openRemoteHost(options) {
       executable: installed.executable,
       root: installed.root,
     });
-    const runtimeRoot = posix.dirname(posix.dirname(installed.executable));
-    const patch = posix.join(installed.root, 'tmp', `status-${randomUUID()}.yml`);
-    const patchResult = await channel.exec({
-      command: 'tee',
-      args: [patch],
-      input: statusPluginPatch({
-        runtimeRoot,
-        hostAlias: options.config?.alias ?? options.alias,
-        localReturnUrl: options.localReturnUrl,
-        dshVersion: options.version,
-      }),
+    const patch = await writeStatusPluginPatch(channel, {
+      installed,
+      hostAlias: options.config?.alias ?? options.alias,
+      localReturnUrl: options.localReturnUrl,
+      dshVersion: options.version,
       signal: options.signal,
     });
-    if (patchResult.code !== 0) throw new Error('Could not install the remote status plugin patch.');
 
     const host = new RemoteHostConnection({
       channel,

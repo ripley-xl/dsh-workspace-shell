@@ -125,3 +125,16 @@ test('sync requires a connected instance and stop rejects an ambiguous target', 
   await fixture.service.connect(record.id);
   await assert.rejects(fixture.service.stop(record.id, { instanceId: 'some-other-instance' }), (error) => error.code === 'REMOTE_INSTANCE_UNAVAILABLE');
 });
+
+test('a failed connect keeps the original error message', async (t) => {
+  const fixture = await serviceFixture();
+  t.after(fixture.close);
+  const record = await fixture.store.upsert({ hostAlias: 'p0-test', syncPolicy: { appearance: false } });
+  fixture.service.openRemoteHost = async () => {
+    throw Object.assign(new Error('connect-boom'), { code: 'SSH_CONNECTION_FAILED' });
+  };
+  await assert.rejects(fixture.service.connect(record.id), (error) => error.message === 'connect-boom');
+  const connection = fixture.service.publicConnection(record.id);
+  assert.equal(connection.phase, 'failed');
+  assert.deepEqual(connection.error, { code: 'SSH_CONNECTION_FAILED', message: 'connect-boom' });
+});

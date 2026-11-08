@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 
-import { openRemoteHost } from './open-remote-host.js';
+import { openRemoteHost, writeStatusPluginPatch } from './open-remote-host.js';
 import { openControllerSession } from './controller-session.js';
 import { compareDshVersions } from './dsh-version.js';
 import { buildPluginAlignmentPlan } from './plugin-alignment.js';
@@ -412,7 +412,7 @@ export class SshRemoteService extends EventEmitter {
         hostAlive: healthy,
         supervisorAlive: healthy,
       },
-      error: publicError(runtime.error),
+      error: runtime.error ?? null,
     };
   }
 
@@ -588,8 +588,11 @@ export class SshRemoteService extends EventEmitter {
       await runtime.host.close().catch(() => {});
       runtime.host = null;
     }
+    let session = null;
+    let host = null;
+    let existing = null;
     try {
-      const session = await this.ensureProfileTransport(hostId, { background: false });
+      session = await this.ensureProfileTransport(hostId, { background: false });
       runtime.session = session;
       signal.throwIfAborted();
       if (this.closed) throw operationCancelled(signal);
@@ -602,7 +605,7 @@ export class SshRemoteService extends EventEmitter {
       });
       signal.throwIfAborted();
       const listed = normalizeInstanceList(await session.controller.list({ version: artifact.dshVersion, buildId: artifact.buildId, profileId }));
-      const existing = listed.find((instance) => instance.profileId === profileId
+      existing = listed.find((instance) => instance.profileId === profileId
         && instance.health.healthy
         && instance.state !== 'stopped'
         && runtimeIdentityMatches(instance, artifact.runtimeId));
@@ -637,24 +640,32 @@ export class SshRemoteService extends EventEmitter {
           this.publish(hostId);
         }
       }
-      const host = new this.RemoteHostConnection({
+      // This path also starts Hosts; it needs the same status-plugin overlay as
+      // the default connect path. Without it the new Host has no
+      // /api/ssh-remote/status endpoint and the attach below fails every time.
+      const patch = existing
+        ? null
+        : await writeStatusPluginPatch(session.channel, {
+          installed: session.installed,
+          hostAlias: this.store.require(hostId).hostAlias,
+          localReturnUrl: this.localReturnUrl,
+          dshVersion: artifact.dshVersion,
+          signal,
+        });
+      host = new this.RemoteHostConnection({
         channel: session.channel,
         controller: session.controller,
         version: artifact.dshVersion,
         buildId: artifact.buildId,
         workspace: session.installed?.home,
+        patch,
         startMode: existing ? 'reuse-only' : 'auto',
         profileId,
       });
       await host.open();
-      // The last waiter cancelled before the Host became ready: stop a process
-      // this operation created, but never touch an instance it merely reused.
+      // The last waiter cancelled before the Host became ready. The catch below
+      // closes this Host and stops only an instance this call started.
       if (signal.aborted || runtime.phase !== 'starting') {
-        const instanceId = host.instanceId;
-        await host.close().catch(() => {});
-        if (!existing && instanceId) {
-          await session.controller.stop({ instanceId }).catch(() => {});
-        }
         throw operationCancelled(signal);
       }
       runtime.host = host;
@@ -666,6 +677,13 @@ export class SshRemoteService extends EventEmitter {
       const alignment = publicPluginAlignment(runtime.pluginAlignment);
       return { ...this.publicWebHost(runtime), ...alignment ? { pluginAlignment: alignment } : {} };
     } catch (cause) {
+      // A Host this call started must not survive a failed start: it carries
+      // this connection's overlay and would otherwise be reused by later opens.
+      const startedInstanceId = existing ? null : host?.startedInstanceId ?? null;
+      if (host) await host.close().catch(() => {});
+      if (startedInstanceId && session?.controller) {
+        await session.controller.stop({ instanceId: startedInstanceId }).catch(() => {});
+      }
       runtime.host = null;
       const cancelled = cause?.code === 'OPERATION_CANCELLED' || signal.aborted;
       runtime.phase = cancelled ? 'idle' : 'failed';
@@ -812,7 +830,7 @@ export class SshRemoteService extends EventEmitter {
       remoteBuildId: runtime.host?.buildId ?? null,
       pluginAlignment: publicPluginAlignment(runtime.pluginAlignment),
       connected: Boolean(session?.connected),
-      error: publicError(runtime.error),
+      error: runtime.error ?? null,
       sync: runtime.sync,
       reconnectAttempts: runtime.reconnectAttempts,
       portForwards: runtime.portManager?.list() ?? runtime.portForwards ?? [],

@@ -33,7 +33,12 @@ function harness({ autoConnectOnStart = true, connectResolves = true } = {}) {
     credentials: { async resolve() { throw new Error('not expected'); } },
     openControllerSession: async () => {
       calls.push('connect');
-      if (!connectResolves) throw Object.assign(new Error('needs a password'), { code: 'SSH_AUTH_INTERACTION_REQUIRED' });
+      if (!connectResolves) {
+        throw Object.assign(new Error('interactive authentication required'), {
+          code: 'SSH_AUTH_INTERACTION_REQUIRED',
+          details: { password: 'do-not-leak-this' },
+        });
+      }
       await gate;
       throw Object.assign(new Error('transport refused'), { code: 'SSH_CONNECTION_FAILED' });
     },
@@ -56,7 +61,8 @@ test('service creation does not block on autoConnect records', async (t) => {
   assert.deepEqual(calls, ['connect']);
   const connection = service.publicConnection(store.list()[0].id);
   assert.equal(connection.phase, 'failed');
-  assert.equal(JSON.stringify(connection).includes('password'), false);
+  assert.equal(JSON.stringify(connection).includes('do-not-leak-this'), false);
+  assert.equal(connection.error.details.password, '[redacted]');
 });
 
 test('autoConnect failures stay structured and never prompt interactively', async (t) => {

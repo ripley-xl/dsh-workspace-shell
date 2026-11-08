@@ -22,7 +22,7 @@ function loadClient(window = {}) {
     },
   };
   vm.runInNewContext(clientSource, { window, URL, URLSearchParams }, { filename: 'guest-cwd-client.js' });
-  assert.equal(registration.id, '@local/dsh-workspace-shell-guest-cwd');
+  assert.equal(registration.id, 'dsh-workspace-shell-guest-cwd');
   assert.equal(typeof registration.factory, 'function');
   const plugin = registration.factory();
   assert.deepEqual([...plugin.inject], ['sessions']);

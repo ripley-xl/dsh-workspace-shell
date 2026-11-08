@@ -17,7 +17,7 @@ test('workspace bundle includes SSH by default and SSH is not a separate bundle'
   assert.match(patch, /group:\s*true/);
   assert.doesNotMatch(patch, /disabled:\s*true/);
   assert.equal(manager.dsh.bundle, undefined);
-  assert.deepEqual(manager.dsh.client.inject, ['@local/dsh-workspace-shell']);
+  assert.deepEqual(manager.dsh.client.inject, ['dsh-workspace-shell']);
 });
 function fixture(t, handler = () => ({ ok: true, connections: [] })) {
   const calls = [], sources = [], inputs = [{ value: '' }];

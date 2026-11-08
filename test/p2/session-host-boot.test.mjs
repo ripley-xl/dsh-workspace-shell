@@ -41,10 +41,9 @@ test('real plugin inventory exposes only nested SSH; its persisted switch preser
     await mkdir(root + '/sessions');
     await mkdir(root + '/node_modules/@local', { recursive: true });
     await symlink('/opt/homebrew/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai', root + '/node_modules/@deepseek-ai');
-    for (const [name, directory] of [['dsh-workspace-shell', 'shell'], ['dsh-ssh-remote', 'manager']]) {
-      await symlink(fileURLToPath(new URL('../../packages/' + directory, import.meta.url)), root + '/node_modules/@local/' + name);
-    }
-    await writeFile(root + '/package.json', JSON.stringify({ dsh: { profile: { bundles: ['@local/dsh-workspace-shell'] } } }));
+    await symlink(fileURLToPath(new URL('../../packages/shell', import.meta.url)), root + '/node_modules/dsh-workspace-shell');
+    await symlink(fileURLToPath(new URL('../../packages/manager', import.meta.url)), root + '/node_modules/@local/dsh-ssh-remote');
+    await writeFile(root + '/package.json', JSON.stringify({ dsh: { profile: { bundles: ['dsh-workspace-shell'] } } }));
     await writeFile(root + '/cordis.json', '[]');
     const profile = { home: root, dir: root, name: 'test', cwd: root, patchPath: root + '/profile.patch.yml',
       installAnchor: '/opt/homebrew/lib/node_modules/@deepseek-ai/dsh/package.json', startedBundles: [], overlays: [{ insert: [
@@ -70,7 +69,7 @@ test('real plugin inventory exposes only nested SSH; its persisted switch preser
     const registry = ctx.workspaceSessionHosts, runtimes = ctx.workspaceLocalRuntimes;
     const coreRoute = routes.get('/api/workspace-shell/catalog');
     const rows = await ctx.pluginManager.listPlugins();
-    assert.equal(rows.some((row) => row.moduleName === '@local/dsh-workspace-shell'), false);
+    assert.equal(rows.some((row) => row.moduleName === 'dsh-workspace-shell'), false);
     assert.equal(rows.some((row) => row.moduleName.includes('session-host')), false);
     const ssh = rows.find((row) => row.moduleName === '@local/dsh-ssh-remote');
     assert.equal(ssh.readOnlyReason, undefined);
@@ -87,10 +86,10 @@ test('real plugin inventory exposes only nested SSH; its persisted switch preser
       assert.equal((await ctx.pluginManager.listPlugins()).find((row) => row.entryId === ssh.entryId).enabled, enabled);
     }
     assert.equal(opens, 2); assert.equal(closes, 2);
-    assert.equal((await ctx.pluginManager.setBundleEnabled('@local/dsh-workspace-shell', false)).application, 'applied');
+    assert.equal((await ctx.pluginManager.setBundleEnabled('dsh-workspace-shell', false)).application, 'applied');
     assert.equal(routes.size, 0, 'bundle deactivation removes core routes too');
     assert.equal(ctx.get('workspaceSessionHosts'), undefined);
-    assert.equal((await ctx.pluginManager.setBundleEnabled('@local/dsh-workspace-shell', true)).application, 'applied');
+    assert.equal((await ctx.pluginManager.setBundleEnabled('dsh-workspace-shell', true)).application, 'applied');
     assert.ok(ctx.get('workspaceSessionHosts'));
     assert.notEqual(ctx.workspaceSessionHosts, registry);
     assert.equal(routes.has('/api/ssh-remote/status'), false, 'persisted SSH disable survives a fresh bundle activation');

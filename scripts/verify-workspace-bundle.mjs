@@ -20,9 +20,9 @@ try {
   }
   const profile = join(home, 'profile');
   await mkdir(join(profile, 'node_modules/@local'), { recursive: true });
-  await symlink(join(home, 'shell'), join(profile, 'node_modules/@local/dsh-workspace-shell'));
+  await symlink(join(home, 'shell'), join(profile, 'node_modules/dsh-workspace-shell'));
   await symlink(join(home, 'manager'), join(profile, 'node_modules/@local/dsh-ssh-remote'));
-  await writeFile(join(profile, 'package.json'), JSON.stringify({ dsh: { profile: { bundles: ['@local/dsh-workspace-shell'] } } }));
+  await writeFile(join(profile, 'package.json'), JSON.stringify({ dsh: { profile: { bundles: ['dsh-workspace-shell'] } } }));
   const loaded = loadProfileDirectory('workspace-test', profile, '/opt/homebrew/lib/node_modules/@deepseek-ai/dsh/package.json');
   assert.deepEqual(loaded.skippedBundles, []);
   const entries = composeEntries(loaded.layers.map((layer) => layer.patches));

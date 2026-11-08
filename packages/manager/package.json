@@ -21,7 +21,7 @@
     "client": {
       "platform": "web",
       "immediately": true,
-      "inject": ["@local/dsh-workspace-shell"]
+      "inject": ["dsh-workspace-shell"]
     }
   },
   "engines": { "dsh": ">=0.2.1-rc.5 <0.3.0-0" },

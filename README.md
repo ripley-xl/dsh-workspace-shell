@@ -2,7 +2,7 @@
 
 SSH Remote 在本地和远程 DSH Web 之间切换。Desktop 使用当前窗口内的沙箱 Webview；普通浏览器使用整页导航。两种形态都不在同一页面混合两端插件、配置或 Session。
 
-**工作区框架正在进入本机多 profile 阶段。** 0.2.0 源码已接入常驻 Local、Web/TUI 同级页签、provider 接口及运行时工具；已应用更新，用户重开后确认新版入口可见；真实 Web/TUI 启动与切换尚待验收，见[本机页签说明](</Users/okarinhuang/dsh-workspace/ssh-remote/docs/local-workspace-tabs.md>)。旧版框架的 macOS 初验记录仍见[第一阶段记录](</Users/okarinhuang/dsh-workspace/ssh-remote/docs/frame-redraw.md>)。SSH 管理器尚未迁入新框架，旧 Guest 仍在中央面板。
+**工作区框架正在进入本机多 profile 阶段。** 0.2.0 源码已接入常驻 Local、Web/TUI 同级页签、provider 接口及运行时工具；已应用更新，用户重开后确认新版入口可见；真实 Web/TUI 启动与切换尚待验收，见[本机页签说明](</Users/okarinhuang/dsh-workspace/dsh-workspace-shell/docs/local-workspace-tabs.md>)。旧版框架的 macOS 初验记录仍见[第一阶段记录](</Users/okarinhuang/dsh-workspace/dsh-workspace-shell/docs/frame-redraw.md>)。SSH 管理器尚未迁入新框架，旧 Guest 仍在中央面板。
 
 已接入窗口内的主机选择与备份通知：管理页面卸载后仍保留每台主机最近一次待检查的备份元数据，插件卸载或页面重载时清空。备份记录不含凭据值或认证地址；Guest 仍未移出中央面板。
 
@@ -52,7 +52,7 @@ SSH Remote 在本地和远程 DSH Web 之间切换。Desktop 使用当前窗口�
 
 ## 构建运行包
 
-在 `ssh-remote/` 下执行：
+在 `dsh-workspace-shell/` 下执行：
 
 ```sh
 node controller/scripts/build-runtime.mjs --platform linux --arch all --libc glibc

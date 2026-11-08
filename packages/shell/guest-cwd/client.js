@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-  id: '@local/dsh-workspace-shell-guest-cwd',
+  id: 'dsh-workspace-shell-guest-cwd',
   factory() {
     const GLOBAL_KEY = '__workspaceShellGuestCwd';
     const REQUEST_TYPE = 'workspace-shell-cwd-request';

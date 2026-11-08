@@ -1,5 +1,5 @@
 {
-  "name": "@local/dsh-workspace-shell",
+  "name": "dsh-workspace-shell",
   "version": "0.5.10",
   "private": true,
   "type": "module",

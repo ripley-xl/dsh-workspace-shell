@@ -2,11 +2,11 @@
 
 ## 当前版本
 
-- Workspace Shell：`0.5.9`，见[插件清单](/Users/okarinhuang/dsh-workspace/ssh-remote/packages/shell/package.json)。
-- SSH Remote manager：`0.3.5`，见[manager 清单](/Users/okarinhuang/dsh-workspace/ssh-remote/packages/manager/package.json)。
-- 远程 controller：`0.2.2`，见[版本常量](/Users/okarinhuang/dsh-workspace/ssh-remote/controller/src/constants.js)。
+- Workspace Shell：`0.5.9`，见[插件清单](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/packages/shell/package.json)。
+- SSH Remote manager：`0.3.5`，见[manager 清单](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/packages/manager/package.json)。
+- 远程 controller：`0.2.2`，见[版本常量](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/controller/src/constants.js)。
 - 目标 DSH：远端运行包 `0.2.2-rc.1`（内置 pnpm `11.28.5`）；本机 CLI 页签仍按 `0.2.1-rc.5` 校验。终端资产为 xterm `6.0.0`、addon-fit `0.11.0`。
-- 设计和验收口径见[工作区设计文档](/Users/okarinhuang/dsh-workspace/ssh-remote/docs/workspace-launcher-design.md)。
+- 设计和验收口径见[工作区设计文档](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/docs/workspace-launcher-design.md)。
 
 本轮只修改插件、controller 和开发工作区，没有修改 DSH 源码。Native、Web 和 TUI 的公共生命周期保持一致；dsh web 使用 iframe Guest，不使用 Node、下载或任意弹窗能力。
 
@@ -42,7 +42,7 @@ TUI 使用固定同源 iframe 和 MessageChannel。输出读取串行，等待 x
 3. 当前选中工作区；
 4. 无法可靠读取时保留空白，要求手填。
 
-Web Guest 使用[窄 companion](/Users/okarinhuang/dsh-workspace/ssh-remote/packages/shell/guest-cwd/client.js)读取 `sessions.list` 中主会话的 `workingDirectory`。它不读取 Session 正文，也不返回 Session ID、标题或原始 URL。
+Web Guest 使用[窄 companion](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/packages/shell/guest-cwd/client.js)读取 `sessions.list` 中主会话的 `workingDirectory`。它不读取 Session 正文，也不返回 Session ID、标题或原始 URL。
 
 cwd 使用带版本和 requestId 的 `postMessage` 请求/响应。父页校验 source、origin、requestId 和当前 launcher；Guest 只接受实际 `window.parent`，并在首个合法请求后锁定其 origin。该校验不依赖认证重定向会清除的 query、fragment 或 `window.name`。
 
@@ -52,7 +52,7 @@ cwd 使用带版本和 requestId 的 `postMessage` 请求/响应。父页校验 
 
 SSH 只支持远程 Web，不提供远程 TUI 或 Browser。远端 DSH 监听 `127.0.0.1`；本机 Guest 使用回环 SSH 端口转发，不开放公网监听。
 
-SSH profile 行只提供“新建页签”和“停止”。“新建页签”复用现有健康 Host，没有可复用实例时启动 Host；界面不再提供单独的“接入新页签”按钮。`0.3.2` 已在 Desktop 验证此按钮可打开原有持久 Host，记录见[单一打开入口验收](/Users/okarinhuang/dsh-workspace/ssh-remote/artifacts/workspace-tabs/release-single-open/verification.md)。
+SSH profile 行只提供“新建页签”和“停止”。“新建页签”复用现有健康 Host，没有可复用实例时启动 Host；界面不再提供单独的“接入新页签”按钮。`0.3.2` 已在 Desktop 验证此按钮可打开原有持久 Host，记录见[单一打开入口验收](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/artifacts/workspace-tabs/release-single-open/verification.md)。
 
 - 连接页提供 autoConnect、设置、重启、断开和删除。
 - 设置页管理端口转发；新增连接只接受 OpenSSH alias。
@@ -92,14 +92,14 @@ node controller/scripts/build-runtime.mjs --platform linux --arch x64 --libc gli
 
 最终验收包：
 
-- [Workspace Shell 0.3.1](/Users/okarinhuang/dsh-workspace/ssh-remote/artifacts/workspace-tabs/release-native-click/local-dsh-workspace-shell-0.3.1.tgz)
-- [SSH Remote manager 0.2.0](/Users/okarinhuang/dsh-workspace/ssh-remote/artifacts/workspace-tabs/release-cwd/local-dsh-ssh-remote-0.2.0.tgz)
+- [Workspace Shell 0.3.1](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/artifacts/workspace-tabs/release-native-click/local-dsh-workspace-shell-0.3.1.tgz)
+- [SSH Remote manager 0.2.0](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/artifacts/workspace-tabs/release-cwd/local-dsh-ssh-remote-0.2.0.tgz)
 
 ## 验证结果
 
-2026-11-04 点击修复回归：**983 项，978 通过，0 失败，5 跳过**，包含真实浏览器点击用例。完整结果见[测试日志](/Users/okarinhuang/dsh-workspace/ssh-remote/artifacts/workspace-tabs/native-click-regression.log)。
+2026-11-04 点击修复回归：**983 项，978 通过，0 失败，5 跳过**，包含真实浏览器点击用例。完整结果见[测试日志](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/artifacts/workspace-tabs/native-click-regression.log)。
 
-`0.3.1` 修复了空 viewport 覆盖 launcher 的问题。已在 Desktop 原窗口验证中文、profile 和来源切换、关闭、重新创建及本地页签往返。安装后插件热加载，Desktop 和内部 Host 未重启。截图、包哈希及范围见[验收记录](/Users/okarinhuang/dsh-workspace/ssh-remote/artifacts/workspace-tabs/native-click-verification-20261104.md)。
+`0.3.1` 修复了空 viewport 覆盖 launcher 的问题。已在 Desktop 原窗口验证中文、profile 和来源切换、关闭、重新创建及本地页签往返。安装后插件热加载，Desktop 和内部 Host 未重启。截图、包哈希及范围见[验收记录](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/artifacts/workspace-tabs/native-click-verification-20261104.md)。
 
 浏览器用例默认跳过，避免普通单元测试操作浏览器。先用 Kimi WebBridge 将独立 `workspace-web` Host 的已认证页面打开到 `dsh-native-click` session，再运行：
 

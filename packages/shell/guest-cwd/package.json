@@ -1,5 +1,5 @@
 {
-  "name": "@local/dsh-workspace-shell-guest-cwd",
+  "name": "dsh-workspace-shell-guest-cwd",
   "version": "0.1.0",
   "private": true,
   "type": "module",

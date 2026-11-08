@@ -45,7 +45,7 @@ if (/^\s*(import|export)\s/m.test(source)) throw new Error('Unsupported runtime 
 // not landed yet omits its binding; the entry code treats the missing dependency
 // as an unavailable optional panel instead of failing to load.
 const candidates = [
-  'installFrameAdapter', 'createFrameViews', 'solveFrame', 'createPointerResize', 'shellCss',
+  'installFrameAdapter', 'installRightbarSlotRecovery', 'createFrameViews', 'solveFrame', 'createPointerResize', 'shellCss',
   'createTabState', 'createTabController', 'createTabOrderMemory', 'createTabAppearanceMemory', 'installInputGate', 'createWebTiming',
   'createDesktopGuest', 'createBrowserGuest', 'createTuiProvider',
   'createChromeTabs', 'createWorkspaceClient', 'createLauncher',

@@ -403,6 +403,10 @@ test('stylesheet uses only official tokens or its own variables, keeps 48px, the
   assert.match(css, /\.ct-title\{[^}]*overflow:hidden;text-overflow:ellipsis;white-space:nowrap/);
   // Width shrinks before the title is truncated.
   assert.match(css, /\.ct-tab\{[^}]*flex:1 1 auto;min-width:var\(--ct-tab-min-width\);max-width:var\(--ct-tab-max-width\)/);
+  // Tabs and the alias share stay wide enough for short SSH aliases such as "anydev".
+  assert.match(css, /--ct-tab-min-width:88px;/);
+  assert.match(css, /--ct-tab-max-width:360px;/);
+  assert.match(css, /\.ct-alias\{[^}]*max-width:60%/);
   // Close button is hidden until hover, focus-within or the active tab.
   assert.match(css, /\.ct-close\{[^}]*opacity:0;pointer-events:none/);
   assert.match(css, /\.ct-tab:hover \.ct-close,\.ct-tab:focus-within \.ct-close,\.ct-tab\[data-active=true\] \.ct-close\{opacity:1;pointer-events:auto\}/);
@@ -425,7 +429,9 @@ test('stylesheet uses only official tokens or its own variables, keeps 48px, the
   assert.match(css, /\.ct-tab-body:focus-visible\{outline:var\(--ct-focus-width\) solid var\(--ct-focus-ring\)/);
   assert.match(css, /@media\(prefers-reduced-motion:reduce\)\{[^}]*transition:none!important/);
   assert.match(css, /@media\(prefers-reduced-motion:no-preference\)/);
-  assert.match(css, /@media\(max-width:640px\)\{\.ct-root\{--ct-tab-min-width:56px;--ct-tab-max-width:160px/);
+  assert.match(css, /@media\(max-width:640px\)\{\.ct-root\{--ct-tab-min-width:72px;--ct-tab-max-width:240px/);
+  // Narrow tabs also keep a readable alias share (50%).
+  assert.match(css, /@media\(max-width:640px\)\{[^\n]*\.ct-alias\{max-width:50%\}\}/);
   assert.match(css, /--ct-dot-on:var\(--dsw-alias-state-success-primary/);
   assert.match(css, /--ct-dot-off:var\(--dsw-alias-state-idle-primary/);
   assert.match(css, /--ct-tab-active-bg:var\(--dsw-alias-bg-base\)/);

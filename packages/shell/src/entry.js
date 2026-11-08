@@ -71,7 +71,7 @@ export function createWorkspaceSelection(React, slots) {
 
 export function createShellPlugin(React, deps) {
 // Runtime composition; the build wraps this in the dynamic Client factory.
-const { installFrameAdapter, createFrameViews, solveFrame, createPointerResize, shellCss, document, window, createWorkspaceClient } = deps;
+const { installFrameAdapter, installRightbarSlotRecovery, createFrameViews, solveFrame, createPointerResize, shellCss, document, window, createWorkspaceClient } = deps;
 const shellMessages = {
   en: { workspace: 'Workspace', sidebarResize: 'Resize sidebar', rightbarResize: 'Resize right panel', workspaceTabs: 'Workspace tabs' },
   zh: { workspace: '工作区', sidebarResize: '调整侧栏宽度', rightbarResize: '调整右栏宽度', workspaceTabs: '工作区页签' },
@@ -149,6 +149,20 @@ return {
       });
       return () => controller.dispose();
     }, 'workspace frame adapter');
+    // A single render crash in the right column's DSH Slot entry makes the slot
+    // core abdicate it for the rest of the page; the Sidebar store still reports
+    // expanded, so the header's expand control never returns. Revive the crashed
+    // entry a bounded number of times and, if it keeps failing, collapse the
+    // column so the control is reachable.
+    ctx.effect(() => {
+      const recovery = installRightbarSlotRecovery?.(ctx.slots, {
+        getService: (name) => ctx.get(name),
+        onFailure: (error) => {
+          try { console.error('workspace-shell: right Sidebar slot recovery exhausted', error); } catch { /* Diagnostics never break recovery. */ }
+        },
+      });
+      return () => { try { recovery?.dispose?.(); } catch { /* Disposal is best effort. */ } };
+    }, 'right Sidebar slot recovery');
   },
 };
 }

@@ -121,9 +121,191 @@ function installFrameAdapter(slots, makeView, validate = () => true) {
   };
 }
 
-return { frameSeats, matchesFrameEntry, installFrameAdapter };
+// The right column's occupant is a DSH Slot entry. The slot core catches one
+// render crash and "abdicates" that entry: it is removed from the cell for the
+// rest of the page. The right Sidebar's own store still says `expanded`, so the
+// conversation header's expand control (rendered only while collapsed) is gone
+// and the panel cannot be reached again. A crashed entry can be revived by
+// removing it from the core's abdication set and marking the cell dirty: a
+// fresh error boundary then renders it again from the current state, which
+// covers transient commit-phase failures (session view churn). The attempt
+// budget is bounded so a deterministic crash cannot loop; after exhaustion the
+// column is collapsed so the header control comes back.
+const RIGHTBAR_RECOVERY_SLOTS = Object.freeze(['rightbar', 'rightbar.session']);
+const RIGHTBAR_RECOVERY_DELAYS = Object.freeze([120, 400, 1200]);
+const DEFAULT_TIMERS = Object.freeze({
+  setTimeout: (callback, delay) => setTimeout(callback, delay),
+  clearTimeout: (handle) => clearTimeout(handle),
+});
+
+function installRightbarSlotRecovery(slots, options = {}) {
+  const input = options && typeof options === 'object' ? options : {};
+  const core = slots?._core;
+  const timers = input.timers ?? DEFAULT_TIMERS;
+  const delays = Array.isArray(input.delays) && input.delays.length ? input.delays : RIGHTBAR_RECOVERY_DELAYS;
+  const maxAttempts = Number.isInteger(input.maxAttempts) && input.maxAttempts > 0 ? input.maxAttempts : 3;
+  const quietMs = Number.isFinite(input.quietMs) && input.quietMs >= 0 ? input.quietMs : 2000;
+  const onFailure = typeof input.onFailure === 'function' ? input.onFailure : null;
+  const getService = typeof input.getService === 'function' ? input.getService : () => undefined;
+  const supported = typeof slots?.subscribe === 'function' && typeof slots.entries === 'function'
+    && typeof slots.entriesOfSlot === 'function' && core instanceof Object
+    && typeof core.records?.get === 'function' && typeof core.markDirty === 'function'
+    && core.abdicated instanceof WeakSet;
+  if (!supported) return null;
+
+  let stopped = false;
+  let attempts = 0;
+  let retryTimer = null;
+  let quietTimer = null;
+  let lastError = null;
+  let exhausted = false;
+
+  const raw = (key) => {
+    try { return Array.isArray(slots.entries(key)) ? slots.entries(key) : []; } catch { return []; }
+  };
+  const active = (key) => {
+    try { return Array.isArray(slots.entriesOfSlot(key)) ? slots.entriesOfSlot(key) : []; } catch { return []; }
+  };
+  // A cell is broken when it still has registrations but none of them render,
+  // and the core remembers abdicating at least one of them.
+  function broken() {
+    for (const key of RIGHTBAR_RECOVERY_SLOTS) {
+      const entries = raw(key);
+      if (!entries.length || active(key).length) continue;
+      const dead = entries.filter((entry) => core.abdicated.has(entry));
+      if (dead.length) return { key, entries: dead };
+    }
+    return null;
+  }
+  function clearQuiet() {
+    if (quietTimer === null) return;
+    timers.clearTimeout(quietTimer);
+    quietTimer = null;
+  }
+  function scheduleQuiet() {
+    if (stopped || quietTimer !== null) return;
+    quietTimer = timers.setTimeout(() => {
+      quietTimer = null;
+      if (stopped) return;
+      // Only a column that stayed healthy earns a fresh attempt budget.
+      if (broken() === null) {
+        attempts = 0;
+        exhausted = false;
+      }
+    }, quietMs);
+  }
+  function revive(target) {
+    const record = core.records?.get?.(target.key);
+    let changed = false;
+    for (const entry of target.entries) {
+      if (core.abdicated.delete(entry)) changed = true;
+    }
+    if (changed && record !== undefined) core.markDirty(target.key, record);
+    return changed;
+  }
+  // Collapse the expanded right column so the header's expand control (which
+  // renders only on a collapsed layout) becomes reachable again.
+  function releaseControl() {
+    let sidebarRight;
+    try { sidebarRight = getService('sidebarRight'); } catch { sidebarRight = null; }
+    if (!sidebarRight || typeof sidebarRight.isExpanded !== 'function' || typeof sidebarRight.toggleExpanded !== 'function') return false;
+    try {
+      if (sidebarRight.isExpanded() !== true) return false;
+      sidebarRight.toggleExpanded();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  function fail() {
+    if (exhausted) return;
+    exhausted = true;
+    releaseControl();
+    try { onFailure?.(lastError); } catch { /* A diagnostic hook never breaks recovery. */ }
+    // A later, unrelated crash may deserve its own attempts.
+    retryTimer = timers.setTimeout(() => {
+      retryTimer = null;
+      attempts = 0;
+      exhausted = false;
+    }, 30000);
+  }
+  function examine() {
+    if (stopped) return;
+    if (retryTimer !== null) return;
+    const target = broken();
+    if (target === null) {
+      scheduleQuiet();
+      return;
+    }
+    clearQuiet();
+    if (attempts >= maxAttempts) {
+      fail();
+      return;
+    }
+    const delay = delays[Math.min(attempts, delays.length - 1)];
+    attempts += 1;
+    retryTimer = timers.setTimeout(() => {
+      retryTimer = null;
+      if (stopped) return;
+      const next = broken();
+      if (next === null) {
+        scheduleQuiet();
+        return;
+      }
+      // markDirty notifies this installer on its next microtask flush; a crash
+      // during the retry lands here as a fresh, already-abdicated cell.
+      revive(next);
+    }, delay);
+  }
+  const unsubscribers = [];
+  for (const key of RIGHTBAR_RECOVERY_SLOTS) {
+    try {
+      const off = slots.subscribe(key, examine);
+      if (typeof off === 'function') unsubscribers.push(off);
+    } catch { /* A slot without a live record still needs the other watcher. */ }
+  }
+  const unsubscribe = () => { for (const off of unsubscribers.splice(0)) off(); };
+  const offEntryError = typeof core.onEntryError === 'function'
+    ? core.onEntryError((key, _entry, error) => {
+      if (!RIGHTBAR_RECOVERY_SLOTS.includes(key)) return;
+      lastError = Object.freeze({ code: key, message: safeMessage(error) });
+    })
+    : () => {};
+  // Repair an already-broken column when this installer attaches (plugin reload
+  // and frame re-attachment happen after a crash as well).
+  examine();
+  return Object.freeze({
+    getSnapshot: () => Object.freeze({ attempts, maxAttempts, exhausted, error: lastError }),
+    reviveNow: () => {
+      const target = broken();
+      return target === null ? false : revive(target);
+    },
+    dispose() {
+      if (stopped) return;
+      stopped = true;
+      try { unsubscribe?.(); } catch { /* Subscription teardown is best effort. */ }
+      try { offEntryError?.(); } catch { /* Listener teardown is best effort. */ }
+      clearQuiet();
+      if (retryTimer !== null) {
+        timers.clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+    },
+  });
+}
+
+function safeMessage(error) {
+  try {
+    const message = typeof error === 'string' ? error : error?.message;
+    return typeof message === 'string' && message.length <= 240 ? message : 'Right Sidebar slot crashed';
+  } catch {
+    return 'Right Sidebar slot crashed';
+  }
+}
+
+return { frameSeats, matchesFrameEntry, installFrameAdapter, RIGHTBAR_RECOVERY_SLOTS, RIGHTBAR_RECOVERY_DELAYS, installRightbarSlotRecovery };
 })();
-const { frameSeats, matchesFrameEntry, installFrameAdapter } = m0;
+const { frameSeats, matchesFrameEntry, installFrameAdapter, RIGHTBAR_RECOVERY_SLOTS, RIGHTBAR_RECOVERY_DELAYS, installRightbarSlotRecovery } = m0;
 // ---- module: geometry ----
 const m1 = (() => {
 // Geometry only; the original DSH Store remains authoritative.
@@ -3307,8 +3489,8 @@ const css = [
   '.ct-root{',
   '--ct-height:48px;',
   '--ct-tab-height:36px;',
-  '--ct-tab-min-width:64px;',
-  '--ct-tab-max-width:240px;',
+  '--ct-tab-min-width:88px;',
+  '--ct-tab-max-width:360px;',
   '--ct-gap:2px;',
   '--ct-inline-padding:8px;',
   '--ct-font-size:13px;',
@@ -3345,7 +3527,7 @@ const css = [
   '.ct-tab-body{display:flex;align-items:center;gap:6px;flex:1 1 auto;min-width:0;height:100%;padding:0;border:0;border-radius:var(--ct-radius-sm);background:transparent;color:inherit;font:inherit;cursor:inherit;outline:none}',
   '.ct-tab-body:focus-visible{outline:var(--ct-focus-width) solid var(--ct-focus-ring);outline-offset:-2px}',
   '.ct-title{min-width:0;flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-  '.ct-alias{flex:0 1 auto;min-width:0;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ct-fg-faint);font-size:var(--ct-font-size-compact)}',
+  '.ct-alias{flex:0 1 auto;min-width:0;max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ct-fg-faint);font-size:var(--ct-font-size-compact)}',
   '.ct-marker{flex:none;width:3px;height:14px;border-radius:2px;background:var(--dsw-alias-state-idle-primary)}',
   '.ct-marker[data-color=blue]{background:var(--dsw-alias-state-business-primary)}',
   '.ct-marker[data-color=green]{background:var(--dsw-alias-state-success-primary)}',
@@ -3373,7 +3555,7 @@ const css = [
   '@keyframes ct-ghost-in{from{opacity:0}to{opacity:1}}',
   '@media(prefers-reduced-motion:no-preference){.ct-tab,.ct-close,.ct-edit,.ct-add{transition:background-color 120ms ease,color 120ms ease,opacity 120ms ease,box-shadow 120ms ease}.ct-ghost{animation:ct-ghost-in 90ms ease-out}}',
   '@media(prefers-reduced-motion:reduce){.ct-tab,.ct-close,.ct-edit,.ct-add,.ct-ghost{transition:none!important;animation:none!important}}',
-  '@media(max-width:640px){.ct-root{--ct-tab-min-width:56px;--ct-tab-max-width:160px;--ct-font-size:12px;--ct-font-size-compact:11px;--ct-inline-padding:6px}.ct-alias{max-width:32%}}',
+  '@media(max-width:640px){.ct-root{--ct-tab-min-width:72px;--ct-tab-max-width:240px;--ct-font-size:12px;--ct-font-size-compact:11px;--ct-inline-padding:6px}.ct-alias{max-width:50%}}',
 ].join('\n');
 
 return { createChromeTabs, css };
@@ -5696,7 +5878,7 @@ function createWorkspaceSelection(React, slots) {
 
 function createShellPlugin(React, deps) {
 // Runtime composition; the build wraps this in the dynamic Client factory.
-const { installFrameAdapter, createFrameViews, solveFrame, createPointerResize, shellCss, document, window, createWorkspaceClient } = deps;
+const { installFrameAdapter, installRightbarSlotRecovery, createFrameViews, solveFrame, createPointerResize, shellCss, document, window, createWorkspaceClient } = deps;
 const shellMessages = {
   en: { workspace: 'Workspace', sidebarResize: 'Resize sidebar', rightbarResize: 'Resize right panel', workspaceTabs: 'Workspace tabs' },
   zh: { workspace: '工作区', sidebarResize: '调整侧栏宽度', rightbarResize: '调整右栏宽度', workspaceTabs: '工作区页签' },
@@ -5774,6 +5956,20 @@ return {
       });
       return () => controller.dispose();
     }, 'workspace frame adapter');
+    // A single render crash in the right column's DSH Slot entry makes the slot
+    // core abdicate it for the rest of the page; the Sidebar store still reports
+    // expanded, so the header's expand control never returns. Revive the crashed
+    // entry a bounded number of times and, if it keeps failing, collapse the
+    // column so the control is reachable.
+    ctx.effect(() => {
+      const recovery = installRightbarSlotRecovery?.(ctx.slots, {
+        getService: (name) => ctx.get(name),
+        onFailure: (error) => {
+          try { console.error('workspace-shell: right Sidebar slot recovery exhausted', error); } catch { /* Diagnostics never break recovery. */ }
+        },
+      });
+      return () => { try { recovery?.dispose?.(); } catch { /* Disposal is best effort. */ } };
+    }, 'right Sidebar slot recovery');
   },
 };
 }
@@ -6147,5 +6343,5 @@ function createSessionHostPlugin(React, primitives, deps) {
 return { sessionHostCss, createSessionHostPlugin };
 })();
 const { sessionHostCss, createSessionHostPlugin } = m19;
-return createShellPlugin(React,{installFrameAdapter,createFrameViews,solveFrame,createPointerResize,shellCss,createTabState,createTabController,createTabOrderMemory,createTabAppearanceMemory,installInputGate,createWebTiming,createDesktopGuest,createBrowserGuest,createTuiProvider,createChromeTabs,createWorkspaceClient,createLauncher,createSessionHostPlugin,createSessionHostClient,observeSessionSubmissions,applyTransferredDraft,sessionHostCss,primitives,document,window});
+return createShellPlugin(React,{installFrameAdapter,installRightbarSlotRecovery,createFrameViews,solveFrame,createPointerResize,shellCss,createTabState,createTabController,createTabOrderMemory,createTabAppearanceMemory,installInputGate,createWebTiming,createDesktopGuest,createBrowserGuest,createTuiProvider,createChromeTabs,createWorkspaceClient,createLauncher,createSessionHostPlugin,createSessionHostClient,observeSessionSubmissions,applyTransferredDraft,sessionHostCss,primitives,document,window});
 }});

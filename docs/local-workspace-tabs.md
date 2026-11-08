@@ -109,7 +109,9 @@ node controller/scripts/build-runtime.mjs --platform linux --arch x64 --libc gli
 
 2026-11-08 页签拖拽反馈：Shell `0.5.15` 在合并 `main` 的页签自定义名称与彩色标记后，为 Chrome 页签增加跟手副本、原位占位槽和 140ms 位置过渡；`prefers-reduced-motion: reduce` 下关闭倾斜、入场和位置过渡。新增 4 个 `shell-chrome-tabs` 用例，覆盖副本跟随、拖拽与键盘过渡、reduce motion、取消与卸载清理。全量 **1031 项，1025 通过，0 失败，6 跳过**（`--test-concurrency=4`）。
 
-2026-11-08 拖拽反馈渲染检查：用 Playwright 将 `shell-chrome-tabs` 的真实渲染树套用组件 CSS，确认副本绝对定位、背景与阴影、2° 内倾斜，占位槽为 45% 不透明度和内描边；截图见 [drag-ghost.png](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/.worktrees/feat-tab-drag-effects/artifacts/workspace-tabs/release-drag-effects-0.5.15/drag-ghost.png)。真实 Desktop 窗口中的拖拽手感和主题叠层尚未验收。
+2026-11-08 拖拽反馈渲染检查：用 Playwright 将 `shell-chrome-tabs` 的真实渲染树套用组件 CSS，确认副本绝对定位、背景与阴影、2° 内倾斜，占位槽为 45% 不透明度和内描边；截图见 [drag-ghost.png](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/.worktrees/feat-tab-drag-effects/artifacts/workspace-tabs/release-drag-effects-0.5.15/drag-ghost.png)。真实 Desktop 窗口中的拖拽验收见下一条。
+
+2026-11-08 Desktop 拖拽验收：重启 Desktop 加载 Shell `0.5.15` 后，用真实指针新建两个临时 launcher 页签并拖拽。拖动时页签副本跟随指针，带阴影和轻微倾斜；原位置显示降透明度的占位槽；跨过中点后页签实时重排，松开后顺序提交、副本消失。随后用 Delete 关闭两个临时 launcher，页签条恢复为单个“本地”。Local 的蓝色标记和编辑按钮同时可见。截图：[拖拽副本](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/.worktrees/feat-tab-drag-effects/artifacts/workspace-tabs/release-drag-effects-0.5.15/live-ghost.png)、[重排后](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/.worktrees/feat-tab-drag-effects/artifacts/workspace-tabs/release-drag-effects-0.5.15/live-after-reorder.png)。140ms 过渡、Escape 回滚和取消清理仍由单元测试覆盖，未在截图中量化。
 
 2026-11-08 页签自定义名称与彩色标记：Shell `0.5.14` 新增 `test/p2/ui/shell-tab-appearance.test.mjs`、`test/p2/shell-workspace-preferences-store.test.mjs` 及页签条、Frame、Client、路由和 boot 用例；全量 **1027 项，1021 通过，0 失败，6 跳过**（`--test-concurrency=4`）。自定义信息只存身份、名称和颜色，不写 SSH 主机记录。
 

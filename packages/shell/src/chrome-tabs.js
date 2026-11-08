@@ -8,6 +8,7 @@ const DEFAULT_LABELS = Object.freeze({
   tablist: '工作区页签',
   newTab: '新建工作区',
   close: '关闭页签',
+  edit: '编辑页签名称与彩色标记',
   connected: '已连接',
   disconnected: '未连接',
   moved: '已移动：',
@@ -53,7 +54,7 @@ function isControlNode(start) {
     }
     try {
       marker = typeof node.hasAttribute === 'function'
-        && (node.hasAttribute('data-chrome-tab-close') || node.hasAttribute('data-chrome-tab-add'));
+        && (node.hasAttribute('data-chrome-tab-close') || node.hasAttribute('data-chrome-tab-add') || node.hasAttribute('data-chrome-tab-edit'));
     } catch {
       marker = false;
     }
@@ -80,9 +81,23 @@ function normalizedLabels(value) {
   return labels;
 }
 
-function tabTitle(tab) {
+function tabTitle(tab, appearance) {
+  if (appearance && typeof appearance.name === 'string' && appearance.name) return appearance.name;
   const title = tab?.title;
   return typeof title === 'string' && title.trim() ? title : String(tab?.id ?? '');
+}
+
+function appearanceOf(tab, resolver) {
+  if (typeof resolver !== 'function') return null;
+  let value;
+  try { value = resolver(tab); } catch { return null; }
+  return value && typeof value === 'object' ? value : null;
+}
+
+function canEditTab(tab, predicate, handler) {
+  if (typeof handler !== 'function') return false;
+  if (typeof predicate !== 'function') return true;
+  try { return predicate(tab) === true; } catch { return false; }
 }
 
 function isClosable(tab) {
@@ -112,7 +127,7 @@ export function createChromeTabs(React, deps = {}) {
   function ChromeTabStrip(props) {
     const options = props ?? {};
     const {
-      tabs, activeId, onSelect, onClose, onAdd, onMove, getStatus, ids,
+      tabs, activeId, onSelect, onClose, onAdd, onMove, getStatus, getAppearance, canEdit, onEdit, ids,
       idPrefix = 'chrome-tab', labels, dragRegion = true, className,
     } = options;
     const copy = normalizedLabels(labels);
@@ -130,7 +145,7 @@ export function createChromeTabs(React, deps = {}) {
     const dragRef = useRef(null);
     const suppressClick = useRef(false);
     const latest = useRef(null);
-    latest.current = { tabs: list, activeId, copy, onSelect, onClose, onAdd, onMove, getStatus, ids };
+    latest.current = { tabs: list, activeId, copy, onSelect, onClose, onAdd, onMove, getStatus, getAppearance, canEdit, onEdit, ids };
 
     useEffect(() => {
       mounted.current = true;
@@ -160,7 +175,7 @@ export function createChromeTabs(React, deps = {}) {
 
     function announceMove(id, index) {
       const tab = latest.current.tabs.find((item) => item.id === id);
-      const title = tabTitle(tab ?? { id });
+      const title = tabTitle(tab ?? { id }, appearanceOf(tab, latest.current.getAppearance));
       const label = latest.current.copy.moved;
       const message = typeof label === 'function' ? label(title, index + 1) : `${label}${title}（${index + 1}）`;
       if (mounted.current) setAnnouncement(String(message));
@@ -436,6 +451,11 @@ export function createChromeTabs(React, deps = {}) {
       // so a later Enter/Space on the close button is not swallowed.
       suppressClick.current = false;
       if (isControlNode(event.target)) return;
+      if (event.key === 'F2' && canEditTab(tab, latest.current.canEdit, latest.current.onEdit)) {
+        event.preventDefault?.();
+        latest.current.onEdit(tab.id);
+        return;
+      }
       const current = latest.current.tabs;
       const index = current.findIndex((item) => item.id === tab.id);
       if (index < 0) return;
@@ -515,13 +535,19 @@ export function createChromeTabs(React, deps = {}) {
       const selected = tab.id === activeId;
       const tabbable = tab.id === tabbableId;
       const closable = isClosable(tab);
+      const editable = canEditTab(tab, canEdit, onEdit);
+      const appearance = appearanceOf(tab, getAppearance);
       const status = statusFor(tab);
-      const title = tabTitle(tab);
+      const title = tabTitle(tab, appearance);
       const tooltip = status && status.alias ? `${status.alias} · ${title}` : title;
       const domIds = domIdsFor(tab);
-      const shortcuts = [closable ? 'Delete' : null, typeof onMove === 'function' ? 'Alt+ArrowLeft Alt+ArrowRight' : null]
+      const marker = appearance && typeof appearance.color === 'string' && appearance.color ? appearance.color : null;
+      const shortcuts = [closable ? 'Delete' : null, editable ? 'F2' : null, typeof onMove === 'function' ? 'Alt+ArrowLeft Alt+ArrowRight' : null]
         .filter(Boolean).join(' ');
       const content = [
+        marker ? h('span', {
+          key: 'marker', className: 'ct-marker', 'data-color': marker, 'aria-hidden': 'true',
+        }) : null,
         status ? h('span', {
           key: 'dot', className: 'ct-dot', 'data-connected': status.connected ? 'true' : 'false', 'aria-hidden': 'true',
         }) : null,
@@ -538,6 +564,9 @@ export function createChromeTabs(React, deps = {}) {
         'data-active': selected ? 'true' : undefined,
         'data-dragging': draggingId === tab.id ? 'true' : undefined,
         'data-closable': closable ? 'true' : undefined,
+        'data-editable': editable ? 'true' : undefined,
+        'data-custom-title': appearance && typeof appearance.name === 'string' && appearance.name ? 'true' : undefined,
+        'data-appearance-color': marker ?? undefined,
         'data-kind': typeof tab.kind === 'string' ? tab.kind : undefined,
         ref: (node) => {
           if (node) shells.current.set(tab.id, node);
@@ -546,6 +575,11 @@ export function createChromeTabs(React, deps = {}) {
         onPointerDown: (event) => onPointerDown(tab, event),
         onLostPointerCapture: (event) => onLostPointerCapture(event),
         onClick: (event) => onTabClick(tab, event),
+        onDoubleClick: (event) => {
+          if (!editable || suppressClick.current) return;
+          if (isControlNode(event?.target)) return;
+          latest.current.onEdit(tab.id);
+        },
         onKeyDown: (event) => onTabKeyDown(tab, event),
       },
       h('div', {
@@ -562,6 +596,26 @@ export function createChromeTabs(React, deps = {}) {
           else bodies.current.delete(tab.id);
         },
       }, content),
+      editable ? h('button', {
+        key: 'edit',
+        type: 'button',
+        className: 'ct-edit',
+        'data-chrome-tab-edit': String(tab.id),
+        'aria-label': `${copy.edit} ${title}`,
+        title: copy.edit,
+        onPointerDown: (event) => {
+          event?.stopPropagation?.();
+        },
+        onClick: (event) => {
+          event?.stopPropagation?.();
+          event?.preventDefault?.();
+          if (suppressClick.current) {
+            suppressClick.current = false;
+            return;
+          }
+          latest.current.onEdit(tab.id);
+        },
+      }, '✎') : null,
       closable ? h('button', {
         key: 'close',
         type: 'button',
@@ -672,8 +726,19 @@ export const css = [
   '.ct-tab-body:focus-visible{outline:var(--ct-focus-width) solid var(--ct-focus-ring);outline-offset:-2px}',
   '.ct-title{min-width:0;flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
   '.ct-alias{flex:0 1 auto;min-width:0;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ct-fg-faint);font-size:var(--ct-font-size-compact)}',
+  '.ct-marker{flex:none;width:3px;height:14px;border-radius:2px;background:var(--dsw-alias-state-idle-primary)}',
+  '.ct-marker[data-color=blue]{background:var(--dsw-alias-state-business-primary)}',
+  '.ct-marker[data-color=green]{background:var(--dsw-alias-state-success-primary)}',
+  '.ct-marker[data-color=amber]{background:var(--dsw-alias-state-warn-primary)}',
+  '.ct-marker[data-color=red]{background:var(--dsw-alias-state-error-primary)}',
+  '.ct-marker[data-color=gray]{background:var(--dsw-alias-state-idle-primary)}',
   '.ct-dot{flex:none;width:var(--ct-dot-size);height:var(--ct-dot-size);border-radius:50%;background:var(--ct-dot-off);box-shadow:0 0 0 1px var(--ct-veil)}',
   '.ct-dot[data-connected=true]{background:var(--ct-dot-on)}',
+  '.ct-edit{flex:none;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;margin-left:2px;padding:0;border:0;border-radius:50%;background:transparent;color:var(--ct-fg-faint);font-family:inherit;font-size:12px;line-height:1;cursor:pointer;opacity:0;pointer-events:none}',
+  '.ct-tab:hover .ct-edit,.ct-tab:focus-within .ct-edit,.ct-tab[data-active=true] .ct-edit{opacity:1;pointer-events:auto}',
+  '.ct-edit:hover{background:var(--ct-hover-bg);color:var(--ct-fg)}',
+  '.ct-edit:active{background:var(--ct-press-bg)}',
+  '.ct-edit:focus-visible{opacity:1;pointer-events:auto;outline:var(--ct-focus-width) solid var(--ct-focus-ring);outline-offset:0}',
   '.ct-close{flex:none;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;margin-left:2px;padding:0;border:0;border-radius:50%;background:transparent;color:var(--ct-fg-faint);font-family:inherit;font-size:14px;line-height:1;cursor:pointer;opacity:0;pointer-events:none}',
   '.ct-tab:hover .ct-close,.ct-tab:focus-within .ct-close,.ct-tab[data-active=true] .ct-close{opacity:1;pointer-events:auto}',
   '.ct-close:hover{background:var(--ct-hover-bg);color:var(--ct-fg)}',
@@ -685,7 +750,7 @@ export const css = [
   '.ct-add:focus-visible{outline:var(--ct-focus-width) solid var(--ct-focus-ring);outline-offset:0}',
   '.ct-blank{flex:1 1 auto;min-width:8px;align-self:stretch;-webkit-app-region:drag}',
   '.ct-sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}',
-  '@media(prefers-reduced-motion:no-preference){.ct-tab,.ct-close,.ct-add{transition:background-color 120ms ease,color 120ms ease,opacity 120ms ease}}',
-  '@media(prefers-reduced-motion:reduce){.ct-tab,.ct-close,.ct-add{transition:none!important;animation:none!important}}',
+  '@media(prefers-reduced-motion:no-preference){.ct-tab,.ct-close,.ct-edit,.ct-add{transition:background-color 120ms ease,color 120ms ease,opacity 120ms ease}}',
+  '@media(prefers-reduced-motion:reduce){.ct-tab,.ct-close,.ct-edit,.ct-add{transition:none!important;animation:none!important}}',
   '@media(max-width:640px){.ct-root{--ct-tab-min-width:56px;--ct-tab-max-width:160px;--ct-font-size:12px;--ct-font-size-compact:11px;--ct-inline-padding:6px}.ct-alias{max-width:32%}}',
 ].join('\n');

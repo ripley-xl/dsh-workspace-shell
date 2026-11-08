@@ -11,7 +11,7 @@ const outputRoot = outputFlag < 0 ? root : pathToFileURL(resolve(process.argv[ou
 // only declares functions/constants; cross-module calls happen at runtime, so this
 // order is declaration order, not an ES module graph.
 const names = [
-  'adapter', 'geometry', 'tab-state', 'tab-controller', 'tab-order', 'input-gate',
+  'adapter', 'geometry', 'tab-state', 'tab-controller', 'tab-order', 'tab-appearance', 'input-gate',
   'web-timing', 'desktop-guest', 'browser-guest', 'tui-provider',
   'chrome-tabs', 'workspace-client', 'launcher', 'styles', 'frame', 'entry',
   '../session-host/submissions', '../session-host/controller', '../session-host/ui',
@@ -46,7 +46,7 @@ if (/^\s*(import|export)\s/m.test(source)) throw new Error('Unsupported runtime 
 // as an unavailable optional panel instead of failing to load.
 const candidates = [
   'installFrameAdapter', 'createFrameViews', 'solveFrame', 'createPointerResize', 'shellCss',
-  'createTabState', 'createTabController', 'createTabOrderMemory', 'installInputGate', 'createWebTiming',
+  'createTabState', 'createTabController', 'createTabOrderMemory', 'createTabAppearanceMemory', 'installInputGate', 'createWebTiming',
   'createDesktopGuest', 'createBrowserGuest', 'createTuiProvider',
   'createChromeTabs', 'createWorkspaceClient', 'createLauncher',
   'createSessionHostPlugin', 'createSessionHostClient', 'observeSessionSubmissions',

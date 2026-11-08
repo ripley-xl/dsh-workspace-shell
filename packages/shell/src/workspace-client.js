@@ -6,7 +6,7 @@
 // calls controller.replace so the tab keeps its ID, position, and active state while
 // receiving a fresh identity object that invalidates every earlier callback.
 export function createWorkspaceClient(deps) {
-  const { window, document, ctx, createTabState, createTabController, installInputGate, createDesktopGuest, createTuiProvider, createTabOrderMemory } = deps;
+  const { window, document, ctx, createTabState, createTabController, installInputGate, createDesktopGuest, createTuiProvider, createTabOrderMemory, createTabAppearanceMemory } = deps;
   const createBrowserGuest = typeof deps.createBrowserGuest === 'function' ? deps.createBrowserGuest : null;
   const inertTiming = Object.freeze({
     getSnapshot: () => Object.freeze({ entries: Object.freeze([]) }),
@@ -151,28 +151,110 @@ export function createWorkspaceClient(deps) {
     return orderHydrating;
   };
   const adoptOrder = (id, spec) => {
-    if (!orderMemory) return;
     const identity = orderIdentity(spec);
     if (!identity) return;
     orderKeys.set(id, identity);
-    syncOrder();
+    if (orderMemory) syncOrder();
+    // The appearance resolver keys off the same identity; publish it now so a
+    // converted launcher shows its custom display before the provider is ready.
+    notifyAppearance();
   };
   // A freshly opened tab is appended; move it into its remembered slot before returning.
   const placeOrder = (id, spec) => {
-    if (!orderMemory) return;
     const identity = orderIdentity(spec);
     if (!identity) return;
-    const list = tabs.getSnapshot().tabs;
-    if (list.length > 1 && list[list.length - 1]?.id === id) {
-      const slots = orderSlots().slice(0, -1);
-      const index = orderMemory.insertionIndex(identity, slots);
-      if (index < slots.length) {
-        try { tabs.move(id, index); } catch { /* Keep the appended position. */ }
+    if (orderMemory) {
+      const list = tabs.getSnapshot().tabs;
+      if (list.length > 1 && list[list.length - 1]?.id === id) {
+        const slots = orderSlots().slice(0, -1);
+        const index = orderMemory.insertionIndex(identity, slots);
+        if (index < slots.length) {
+          try { tabs.move(id, index); } catch { /* Keep the appended position. */ }
+        }
       }
     }
     orderKeys.set(id, identity);
-    syncOrder();
+    if (orderMemory) syncOrder();
+    notifyAppearance();
   };
+  // Custom tab display is a per-identity preference like tab order. Editing is
+  // offered only after the first Host read succeeds, so a full-list save can
+  // never overwrite appearance records this Client never saw.
+  const appearanceMemory = typeof createTabAppearanceMemory === 'function' ? createTabAppearanceMemory({ limit: 64 }) : null;
+  const appearanceListeners = new Set();
+  let appearanceRevision = Object.freeze({ revision: 0 });
+  let appearanceReady = false;
+  let appearanceHydrated = false;
+  let appearanceHydrating = null;
+  const notifyAppearance = () => {
+    appearanceRevision = Object.freeze({ revision: appearanceRevision.revision + 1 });
+    for (const listener of [...appearanceListeners]) { try { listener(); } catch {} }
+  };
+  const appearance = Object.freeze({
+    getSnapshot: () => appearanceRevision,
+    subscribe(listener) { appearanceListeners.add(listener); return () => appearanceListeners.delete(listener); },
+  });
+  const appearanceColors = Object.freeze([...(appearanceMemory?.colors ?? [])]);
+  const hydrateAppearance = () => {
+    if (disposed) return Promise.resolve(false);
+    if (!appearanceMemory || appearanceHydrated) return Promise.resolve(appearanceReady);
+    if (!appearanceHydrating) {
+      appearanceHydrating = (async () => {
+        try {
+          const result = await api('/tab-appearance/get', {}, refreshAbort.signal);
+          if (disposed) return false;
+          if (result?.available === true) {
+            appearanceMemory.hydrate(result.entries);
+            appearanceReady = true;
+          }
+        } catch { /* Older or unavailable Host: keep the editor off. */ }
+        if (disposed) return false;
+        appearanceHydrated = true;
+        // A successful empty read still enables editing; notify unconditionally.
+        notifyAppearance();
+        return appearanceReady;
+      })().finally(() => { appearanceHydrating = null; });
+    }
+    return appearanceHydrating;
+  };
+  const appearanceIdentity = (tab) => {
+    if (!tab) return null;
+    if (tab.id === 'local') return 'local';
+    const known = orderKeys.get(tab.id);
+    if (known) return known;
+    const source = sshTabs.get(tab.id);
+    if (source) return 'ssh:' + source.hostId + ':' + (source.profileId || 'web');
+    const providerId = tabProviders.get(tab.id);
+    if (providerId === 'local-tui' && typeof tab.profileId === 'string' && identifier(tab.profileId)) return 'tui:' + tab.profileId;
+    if (providerId === 'local-web' && typeof tab.profileId === 'string' && identifier(tab.profileId)) return 'web:' + tab.profileId;
+    return null;
+  };
+  function getTabAppearance(tab) {
+    if (!appearanceMemory) return null;
+    const identity = appearanceIdentity(tab);
+    if (!identity) return null;
+    return appearanceMemory.get(identity) ?? null;
+  }
+  function canCustomizeTab(tab) {
+    return !!appearanceMemory && appearanceReady && appearanceIdentity(tab) !== null;
+  }
+  async function setTabAppearance(id, value) {
+    if (disposed) throw error('WORKSPACE_DISPOSED');
+    const tab = tabs.getSnapshot().tabs.find((item) => item.id === id);
+    const identity = appearanceIdentity(tab);
+    if (!appearanceMemory || !identity) throw error('TAB_APPEARANCE_UNAVAILABLE');
+    await hydrateAppearance();
+    if (disposed) throw error('WORKSPACE_DISPOSED');
+    if (!appearanceReady) throw error('TAB_APPEARANCE_UNAVAILABLE');
+    let plan;
+    try { plan = appearanceMemory.prepare(identity, value); } catch { throw error('TAB_APPEARANCE_INVALID'); }
+    if (!plan.changed) return true;
+    const result = await api('/tab-appearance/set', { entries: plan.entries });
+    if (result?.saved !== true) throw error('TAB_APPEARANCE_UNSAVED');
+    if (disposed) return true;
+    if (appearanceMemory.hydrate(plan.entries)) notifyAppearance();
+    return true;
+  }
   const gate = installInputGate(ctx.get?.('shortcuts') ?? ctx.shortcuts);
   const bridge = window.dshDesktop?.browser;
   const desktopUsable = ['acquire', 'release', 'onOpenRequested'].every((key) => typeof bridge?.[key] === 'function');
@@ -243,9 +325,10 @@ export function createWorkspaceClient(deps) {
     if (disposed) return false;
     const generation = ++refreshGeneration;
     try {
-      // Hydrate the remembered tab order before exposing the catalog, so opening a
-      // workspace after startup does not briefly append before moving.
-      const [result] = await Promise.all([api('/catalog', { ownerId }, refreshAbort.signal), hydrateOrder()]);
+      // Hydrate remembered tab order and display preferences before exposing the
+      // catalog, so opening a workspace does not briefly show the default slot or
+      // name. A failed preference read degrades to defaults.
+      const [result] = await Promise.all([api('/catalog', { ownerId }, refreshAbort.signal), hydrateOrder(), hydrateAppearance()]);
       if (disposed || generation !== refreshGeneration) return false;
       if (typeof result?.currentProfile !== 'string' || !Array.isArray(result.profiles) || !Array.isArray(result.runtimes)) throw error('WORKSPACE_INVALID_CATALOG');
       const profiles = result.profiles.slice(0, 256).filter((item) => typeof item?.id === 'string').map(mapProfile);
@@ -868,6 +951,7 @@ export function createWorkspaceClient(deps) {
     });
   };
   return Object.freeze({ tabs, info, connections, sshExtension, registerSshExtension, sessionNavigationExtension, registerSessionNavigation, sessionTabs, openSessionHost, timing, canWeb, canTui, refresh, registerProvider, open, activate, setOverlay, close, closeViews, readDefaultCwd,
+    appearance, appearanceColors, getTabAppearance, canCustomizeTab, setTabAppearance,
     openLauncher, launcherSource, readLauncherCwd, openLauncherWeb, openLauncherTui, moveTab,
     openWeb, openTui, getTabStatus, sshRequest, reportSsh, openSshWeb, closeSshViews, sshViewCounts,
     async retry(id) {
@@ -882,6 +966,8 @@ export function createWorkspaceClient(deps) {
       disposed = true; ++navigation; ++refreshGeneration; refreshAbort.abort();
       clearOrderTimer(); orderDirty = false; orderKeys.clear();
       try { orderMemory?.dispose(); } catch {}
+      appearanceReady = false; appearanceHydrated = true; appearanceListeners.clear();
+      try { appearanceMemory?.dispose(); } catch {}
       sessionTabTokens.clear(); sessionNavigation = null; sessionNavigationListeners.clear();
       sshRegistration?.unsubscribe?.(); sshRegistration?.abort.abort(); sshRegistration = null; extensionListeners.clear(); sshSpecs.clear();
       window.removeEventListener('pagehide', pagehide); offTabs(); listeners.clear(); connectionListeners.clear();

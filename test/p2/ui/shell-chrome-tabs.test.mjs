@@ -374,6 +374,13 @@ test('stylesheet uses only official tokens or its own variables, keeps 48px, the
   assert.match(css, /\.ct-tab:hover \.ct-close,\.ct-tab:focus-within \.ct-close,\.ct-tab\[data-active=true\] \.ct-close\{opacity:1;pointer-events:auto\}/);
   assert.match(css, /\.ct-close:active\{background:var\(--ct-press-bg\)\}/);
   assert.match(css, /\.ct-close:focus-visible\{[^}]*outline:var\(--ct-focus-width\) solid var\(--ct-focus-ring\)/);
+  assert.match(css, /\.ct-marker\{[^}]*width:3px[^}]*height:14px[^}]*background:var\(--dsw-alias-state-idle-primary\)/);
+  for (const [color, token] of [['blue', 'business'], ['green', 'success'], ['amber', 'warn'], ['red', 'error'], ['gray', 'idle']]) {
+    assert.match(css, new RegExp(`\\.ct-marker\\[data-color=${color}\\]\\{background:var\\(--dsw-alias-state-${token}-primary\\)\\}`));
+  }
+  assert.match(css, /\.ct-edit\{[^}]*opacity:0;pointer-events:none/);
+  assert.match(css, /\.ct-tab:hover \.ct-edit,\.ct-tab:focus-within \.ct-edit,\.ct-tab\[data-active=true\] \.ct-edit\{opacity:1;pointer-events:auto\}/);
+  assert.match(css, /\.ct-edit:focus-visible\{[^}]*outline:var\(--ct-focus-width\) solid var\(--ct-focus-ring\)/);
   // Round plus button.
   assert.match(css, /\.ct-add\{[^}]*border-radius:50%/);
   // Window drag reuse: blank strip area drags, controls do not.
@@ -490,6 +497,61 @@ test('a disconnected SSH tab shows a grey dot and an offline label', async (t) =
   assert.equal(kids[0].props['data-connected'], 'false');
   assert.equal(renderedText(kids[1]), '未连接');
   assert.equal(renderedText(kids[2]), 'dev-box');
+});
+
+test('custom display names and color markers replace only the visible label', async (t) => {
+  const edits = [];
+  const fixture = await setup(t, [localTab, sshTab, tuiTab], {
+    activeId: 'ssh:1',
+    statuses: { 'ssh:1': { source: 'ssh', alias: 'dev-box', connected: true } },
+    stripProps: {
+      getAppearance: (tab) => tab.id === 'ssh:1' ? { name: '生产', color: 'red' } : null,
+      canEdit: () => true,
+      onEdit: (id) => edits.push(id),
+    },
+  });
+  const kids = contentNodes(fixture.body('ssh:1'));
+  assert.deepEqual(kids.map((child) => child.props.className), ['ct-marker', 'ct-dot', 'ct-sr-only', 'ct-alias', 'ct-title']);
+  assert.equal(kids[0].props['data-color'], 'red');
+  assert.equal(renderedText(kids[4]), '生产');
+  assert.equal(fixture.shell('ssh:1').props.title, 'dev-box · 生产');
+  assert.equal(fixture.shell('ssh:1').props['data-custom-title'], 'true');
+  assert.equal(fixture.shell('ssh:1').props['data-appearance-color'], 'red');
+  assert.match(fixture.body('ssh:1').props['aria-keyshortcuts'], /F2/);
+  const close = fixture.root.findAll((node) => node.props['data-chrome-tab-close'] === 'ssh:1')[0];
+  assert.equal(close.props['aria-label'], '关闭页签 生产');
+  assert.equal(renderedText(fixture.body('tui:1')), 'TUI', 'tabs without appearance keep their original title');
+  assert.deepEqual(contentNodes(fixture.body('tui:1')).map((child) => child.props.className), ['ct-title']);
+
+  await fixture.fire(fixture.shell('ssh:1').props.onDoubleClick, pointerEvent({ target: { tagName: 'DIV' } }));
+  await fixture.keydown('ssh:1', { key: 'F2' });
+  assert.deepEqual(edits, ['ssh:1', 'ssh:1']);
+  const edit = fixture.root.findAll((node) => node.props['data-chrome-tab-edit'] === 'ssh:1')[0];
+  assert.equal(renderedText(edit), '✎');
+  assert.equal(edit.props['aria-label'], '编辑页签名称与彩色标记 生产');
+  await fixture.click(edit, { target: { tagName: 'BUTTON' } });
+  assert.deepEqual(edits, ['ssh:1', 'ssh:1', 'ssh:1']);
+  assert.deepEqual(fixture.log.select, [], 'the edit control never selects the tab');
+  assert.deepEqual(fixture.log.close, []);
+  assert.deepEqual(fixture.log.move, []);
+});
+
+test('an uneditable tab exposes no F2 or edit control and double-click is ignored', async (t) => {
+  const edits = [];
+  const fixture = await setup(t, [localTab, sshTab], {
+    activeId: 'local',
+    stripProps: {
+      canEdit: (tab) => tab.id !== 'local',
+      onEdit: (id) => edits.push(id),
+    },
+  });
+  assert.equal(fixture.root.findAll((node) => node.props['data-chrome-tab-edit'] === 'local').length, 0);
+  assert.equal(fixture.root.findAll((node) => node.props['data-chrome-tab-edit'] === 'ssh:1').length, 1);
+  await fixture.fire(fixture.shell('local').props.onDoubleClick, pointerEvent({ target: { tagName: 'DIV' } }));
+  await fixture.keydown('local', { key: 'F2' });
+  assert.deepEqual(edits, []);
+  await fixture.fire(fixture.shell('ssh:1').props.onDoubleClick, pointerEvent({ target: { tagName: 'BUTTON' } }));
+  assert.deepEqual(edits, [], 'double-clicking a control does not start editing');
 });
 
 test('non-SSH, throwing and missing status providers render no connection chrome', async (t) => {

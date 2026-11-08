@@ -2,7 +2,7 @@
 
 ## 当前版本
 
-- Workspace Shell：`0.5.12`，见[插件清单](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/packages/shell/package.json)。
+- Workspace Shell：`0.5.14`，见[插件清单](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/packages/shell/package.json)。
 - SSH Remote manager：`0.3.5`，见[manager 清单](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/packages/manager/package.json)。
 - 远程 controller：`0.2.2`，见[版本常量](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/controller/src/constants.js)。
 - 目标 DSH：远端运行包 `0.2.2-rc.1`（内置 pnpm `11.28.5`）；本机 CLI 页签仍按 `0.2.1-rc.5` 校验。终端资产为 xterm `6.0.0`、addon-fit `0.11.0`。
@@ -18,6 +18,9 @@
 - Chrome 风格页签支持实时拖拽、边缘滚动、键盘操作、关闭、Escape 回滚和窄窗口布局。
 - 页签重排只改变页签条和记录顺序；已挂载的远端 Surface 保持创建时的 DOM 顺序。Desktop 的 Web Guest 是 Electron `<webview>`，移动它的 DOM 节点会让原生视图脱离，内容显示为空白。
 - 拖拽和键盘排序结果按 profile 记在 Host 存储里；重建 Client 或重启 Desktop 后，重新打开的工作区按记忆位置插入，关闭过的页签保留原槽位。
+- 页签可设置自定义显示名和五色标记（蓝、绿、橙、红、灰，或无）。悬停页签上的铅笔按钮、双击页签或按 F2 打开编辑器；名称留空并选择“无”保存即恢复默认。
+- 自定义信息按与顺序相同的页签身份保存，同一身份的多个视图共享；Local 可编辑，launcher 和没有稳定身份的扩展页签不可编辑。自定义名称只替换页签文字、悬浮提示、无障碍名称和窗口标题，不修改原始 tab 标题，也不写 SSH 主机记录或连接别名。
+- 自定义信息落在 `<DSH_HOME>/storages/workspace_shell/tab_appearance/default.json`，最多 64 条，只含身份、名称和颜色。初次读取不可用时本次会话不显示编辑入口；保存失败时保留原显示并报安全错误码；损坏记录按无自定义处理，下一次保存覆盖。
 - 顺序只记页签身份（Local、`web:<profile>`、`tui:<profile>`、`session:<id>`、`ssh:<host>:<profile>`），落在 `<DSH_HOME>/storages/workspace_shell/tab_order/default.json`，最多 64 条，超限先淘汰已关闭的。
 - 身份 token 不含标题、URL、cwd、token 或会话正文；存储不可用或数据损坏时按追加处理，拖拽、打开页签和 launcher 不受影响，下一次拖拽覆盖坏记录。
 - 不恢复页签本身，不自动连接 SSH，不启动 Host 或 TUI；同一 profile 多开的页签共用身份，按打开顺序相邻插入。
@@ -101,6 +104,12 @@ node controller/scripts/build-runtime.mjs --platform linux --arch x64 --libc gli
 - [SSH Remote manager 0.2.0](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/artifacts/workspace-tabs/release-cwd/local-dsh-ssh-remote-0.2.0.tgz)
 
 ## 验证结果
+
+2026-11-08 页签自定义名称与彩色标记：Shell `0.5.14` 新增 `test/p2/ui/shell-tab-appearance.test.mjs`、`test/p2/shell-workspace-preferences-store.test.mjs` 及页签条、Frame、Client、路由和 boot 用例；全量 **1027 项，1021 通过，0 失败，6 跳过**（`--test-concurrency=4`）。自定义信息只存身份、名称和颜色，不写 SSH 主机记录。
+
+2026-11-08 真实 Web 验收：Shell `0.5.14` 安装到 `web` profile，启动并重启 Host 后在浏览器中验证 Local 与 `dsh-tui` 页签的自定义名和色条；重开 TUI 页签立即显示“验收 TUI”，Host 重启后仍生效；清空名称并选择“无”后恢复原名。外观记录只含 `local` 和 `tui:dsh-tui` 的 id/name/color，SSH 主机记录 `updatedAt` 未变。验收结束后已清空自定义记录并停止临时 Host。
+
+2026-11-08 Desktop 重启验收：Shell `0.5.14` 加载后，工作区页签条显示编辑按钮。通过原生 UI 将 Local 改为“桌面验收本机·红”并选红色，AX 树和截图确认名称与红色色条，外观记录为 `local`/red；保存前后 SSH 主机记录 SHA-256 相同。验收后清空记录并恢复“本地”。截图见 [桌面页签条](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/artifacts/workspace-tabs/acceptance/desktop-tab-appearance-red.png)。
 
 2026-11-08 页签重排与 Web Guest：连续拖拽排序后，`web · Web 4` 的 Guest 停在 `about:blank`，与空白页签的现象一致；根因是页签数组重排会移动已挂载的 `<webview>` DOM 节点。Shell `0.5.12` 让远端 Surface 按创建顺序挂载，页签条单独排序；新增 `test/p2/ui/shell-frame.test.mjs` 用例锁定 Surface 顺序。全量 **1003 项，997 通过，0 失败，6 跳过**。
 

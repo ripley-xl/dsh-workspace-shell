@@ -30,6 +30,8 @@ test('registration mounts through the real Cordis loader with the actual JSONL p
     assert.ok(routes.has('/api/workspace-shell/catalog'));
     assert.ok(routes.has('/api/workspace-shell/tab-order/get'), 'the remembered tab order has a Host route');
     assert.ok(routes.has('/api/workspace-shell/tab-order/set'));
+    assert.ok(routes.has('/api/workspace-shell/tab-appearance/get'), 'the tab display preferences have a Host route');
+    assert.ok(routes.has('/api/workspace-shell/tab-appearance/set'));
     assert.equal([...ctx.loader.entries()].some((entry) => entry.options.id === 'workspace-session-host'), false);
   } finally { await ctx?.fiber.dispose(); await rm(root, { recursive: true, force: true }); }
 });
@@ -109,11 +111,11 @@ test('real plugin inventory exposes only nested SSH; its persisted switch preser
   } finally { await ctx?.fiber.dispose(); await rm(root, { recursive: true, force: true }); }
 });
 
-test('the remembered tab order round-trips through the real Host route and storage domain', async () => {
+test('remembered tab order and appearance round-trip through the real Host routes and storage domain', async () => {
   const root = await mkdtemp('/tmp/wsh-order-boot-');
   let ctx;
   const routes = new Map();
-  const records = new Map();
+  const tables = new Map([['tab_order', new Map()], ['tab_appearance', new Map()]]);
   try {
     await mkdir(root + '/sessions');
     const config = [
@@ -133,7 +135,8 @@ test('the remembered tab order round-trips through the real Host route and stora
           assert.equal(spec.version, 1);
           return {
             table(name) {
-              assert.equal(name, 'tab_order');
+              assert.ok(tables.has(name), name);
+              const records = tables.get(name);
               return {
                 get(key) { return records.get(key); },
                 async put(key, value) { records.set(key, value); },
@@ -152,10 +155,28 @@ test('the remembered tab order round-trips through the real Host route and stora
     const write = await post('/tab-order/set', { order: ['local', 'web:alpha'] });
     assert.equal(write.status, 200);
     assert.deepEqual((await write.json()).result, { saved: true });
-    assert.deepEqual(records.get('default'), { version: 1, order: ['local', 'web:alpha'] });
+    assert.deepEqual(tables.get('tab_order').get('default'), { version: 1, order: ['local', 'web:alpha'] });
     assert.deepEqual((await (await post('/tab-order/get', {})).json()).result, { order: ['local', 'web:alpha'] });
     const invalid = await post('/tab-order/set', { order: ['bad token'] });
     assert.equal(invalid.status, 400);
+
+    const appearanceRead = await post('/tab-appearance/get', {});
+    assert.equal(appearanceRead.status, 200);
+    assert.deepEqual((await appearanceRead.json()).result, { entries: [], available: true });
+    const appearanceWrite = await post('/tab-appearance/set', {
+      entries: [{ id: 'ssh:c1:web', name: '生产', color: 'red' }],
+    });
+    assert.equal(appearanceWrite.status, 200);
+    assert.deepEqual((await appearanceWrite.json()).result, { saved: true });
+    assert.deepEqual(tables.get('tab_appearance').get('default'), {
+      version: 1,
+      entries: [{ id: 'ssh:c1:web', name: '生产', color: 'red' }],
+    });
+    assert.deepEqual((await (await post('/tab-appearance/get', {})).json()).result, {
+      entries: [{ id: 'ssh:c1:web', name: '生产', color: 'red' }],
+      available: true,
+    });
+    assert.equal((await post('/tab-appearance/set', { entries: [{ id: 'local', color: 'teal' }] })).status, 400);
   } finally {
     await ctx?.fiber.dispose();
     await rm(root, { recursive: true, force: true });

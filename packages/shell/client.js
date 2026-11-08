@@ -738,9 +738,9 @@ const m4 = (() => {
 // Remembered tab order: bounded identity tokens only, never titles, URLs, tokens,
 // working directories, or session content.
 //
-// The Host validator in src/host/tab-order-store.js uses the same limits; keep
-// both copies in sync. This module stays import-free because the Shell build
-// concatenates it with the rest of the Client.
+// The Host validator in src/host/workspace-preferences-store.js uses the same
+// limits; keep both copies in sync. This module stays import-free because the
+// Shell build concatenates it with the rest of the Client.
 const DEFAULT_LIMIT = 64;
 const DEFAULT_TOKEN_LENGTH = 160;
 const TOKEN = /^[A-Za-z0-9:._-]{1,160}$/u;
@@ -865,8 +865,159 @@ function createTabOrderMemory(options = {}) {
 return { createTabOrderMemory };
 })();
 const { createTabOrderMemory } = m4;
-// ---- module: input-gate ----
+// ---- module: tab-appearance ----
 const m5 = (() => {
+// Per-profile tab display preferences: a stable workspace identity maps to a
+// custom label and one palette color. Import-free because the Shell build
+// concatenates this module into the generated Client.
+//
+// The Host validator in src/host/workspace-preferences-store.js imports the
+// same palette and limits, so persisted records and the editor cannot drift.
+//
+// Nothing here knows about host records, URLs, working directories, or session
+// content: an appearance is identity, an optional name, and an optional color.
+const TAB_APPEARANCE_COLORS = Object.freeze(['blue', 'green', 'amber', 'red', 'gray']);
+const TAB_APPEARANCE_LIMIT = 64;
+const TAB_APPEARANCE_NAME_MAX = 64;
+
+const TOKEN = /^[A-Za-z0-9:._-]{1,160}$/u;
+const TOKEN_LENGTH = 160;
+const COLOR_IDS = new Set(TAB_APPEARANCE_COLORS);
+const EMPTY = Object.freeze([]);
+
+function validIdentity(identity) {
+  return typeof identity === 'string' && identity.length <= TOKEN_LENGTH && TOKEN.test(identity);
+}
+
+function normalizeName(value) {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string') throw new TypeError('Tab appearance name must be a string');
+  const name = value.trim();
+  if (!name) return undefined;
+  if (name.length > TAB_APPEARANCE_NAME_MAX || /[\0\r\n]/u.test(name)) {
+    throw new TypeError(`Tab appearance name must be a single line of at most ${TAB_APPEARANCE_NAME_MAX} characters`);
+  }
+  return name;
+}
+
+function normalizeColor(value) {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value !== 'string' || !COLOR_IDS.has(value)) throw new TypeError('Unsupported tab appearance color');
+  return value;
+}
+
+// Internal map values omit the identity; entries() re-adds it for the wire.
+function entryOf(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('Tab appearance entry must be an object');
+  const name = normalizeName(value.name);
+  const color = normalizeColor(value.color);
+  if (name === undefined && color === undefined) return null;
+  return Object.freeze({ ...(name === undefined ? {} : { name }), ...(color === undefined ? {} : { color }) });
+}
+
+function sameEntry(left, right) {
+  if (!left || !right) return left === right;
+  return left.name === right.name && left.color === right.color;
+}
+
+function listOf(entries) {
+  return Object.freeze(entries.map(([id, value]) => Object.freeze({ id, ...value })));
+}
+
+// Tolerant read path: malformed records are skipped instead of failing the
+// whole preference. Unknown fields are not copied into the result.
+function normalizedEntries(value, limit = TAB_APPEARANCE_LIMIT) {
+  const source = Array.isArray(value)
+    ? value
+    : value && typeof value === 'object' && Array.isArray(value.entries) ? value.entries : null;
+  if (!source) return [];
+  const records = new Map();
+  for (const item of source) {
+    if (records.size >= limit) break;
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    if (!validIdentity(item.id)) continue;
+    let entry;
+    try { entry = entryOf(item); } catch { continue; }
+    if (!entry) continue;
+    records.set(item.id, entry);
+  }
+  return [...records];
+}
+
+function createTabAppearanceMemory(options = {}) {
+  const input = options && typeof options === 'object' ? options : {};
+  const limit = Number.isInteger(input.limit) && input.limit > 0 && input.limit <= 512
+    ? Math.min(input.limit, TAB_APPEARANCE_LIMIT)
+    : TAB_APPEARANCE_LIMIT;
+  let records = new Map();
+  let snapshot = EMPTY;
+  let disposed = false;
+
+  function apply(next) {
+    records = next;
+    snapshot = listOf([...records]);
+    return true;
+  }
+
+  function sameRecords(next) {
+    if (next.size !== records.size) return false;
+    for (const [id, entry] of next) {
+      if (!sameEntry(records.get(id), entry)) return false;
+    }
+    return true;
+  }
+
+  return Object.freeze({
+    colors: TAB_APPEARANCE_COLORS,
+    limit,
+    // Load persisted entries. Invalid items are dropped and a malformed
+    // envelope reads as empty; this never throws on stored data.
+    hydrate(value) {
+      if (disposed) return false;
+      const next = new Map(normalizedEntries(value, limit));
+      if (sameRecords(next)) return false;
+      return apply(next);
+    },
+    get(identity) {
+      if (disposed || !validIdentity(identity)) return null;
+      return records.get(identity) ?? null;
+    },
+    // Compute the next persisted list without mutating the live memory. The
+    // caller writes this list first and commits only after the Host saved it.
+    prepare(identity, value) {
+      if (disposed || !validIdentity(identity)) return Object.freeze({ changed: false, entries: snapshot });
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('Tab appearance must be an object');
+      const entry = entryOf(value);
+      const previous = records.get(identity) ?? null;
+      if (sameEntry(previous, entry)) return Object.freeze({ changed: false, entries: snapshot });
+      const next = new Map(records);
+      // Re-insert so the least recently edited identity is evicted first.
+      if (next.has(identity)) next.delete(identity);
+      if (entry) next.set(identity, entry);
+      while (next.size > limit) {
+        const oldest = next.keys().next().value;
+        if (oldest === undefined) break;
+        next.delete(oldest);
+      }
+      return Object.freeze({ changed: true, entries: listOf([...next]) });
+    },
+    entries() {
+      return snapshot;
+    },
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      records = new Map();
+      snapshot = EMPTY;
+    },
+  });
+}
+
+return { TAB_APPEARANCE_COLORS, TAB_APPEARANCE_LIMIT, TAB_APPEARANCE_NAME_MAX, createTabAppearanceMemory };
+})();
+const { TAB_APPEARANCE_COLORS, TAB_APPEARANCE_LIMIT, TAB_APPEARANCE_NAME_MAX, createTabAppearanceMemory } = m5;
+// ---- module: input-gate ----
+const m6 = (() => {
 // Private ShortcutsService adapter; this module owns neither commands nor preferences.
 function installInputGate(service) {
   const unsupported = () => Object.freeze({
@@ -1066,9 +1217,9 @@ function installInputGate(service) {
 
 return { installInputGate };
 })();
-const { installInputGate } = m5;
+const { installInputGate } = m6;
 // ---- module: web-timing ----
-const m6 = (() => {
+const m7 = (() => {
 // Safe, numeric-only Web open measurements. No URLs, tokens, host names, or errors
 // beyond an allowlisted code ever enter the public snapshot.
 const TIMING_STAGES = Object.freeze(['input', 'connect', 'instance', 'forward', 'host', 'lease', 'load']);
@@ -1212,9 +1363,9 @@ const webTimingStages = TIMING_STAGES;
 
 return { createWebTiming, webTimingStages };
 })();
-const { createWebTiming, webTimingStages } = m6;
+const { createWebTiming, webTimingStages } = m7;
 // ---- module: desktop-guest ----
-const m7 = (() => {
+const m8 = (() => {
 // Origin-checked scalar channel shared by the Native and browser Guests. The guest
 // companion answers a random request id; the parent never evaluates guest script.
 const WORKSPACE_SHELL_CWD_REQUEST = 'workspace-shell-cwd-request';
@@ -1699,9 +1850,9 @@ function createDesktopGuest({
 
 return { createDesktopGuest };
 })();
-const { createDesktopGuest } = m7;
+const { createDesktopGuest } = m8;
 // ---- module: browser-guest ----
-const m8 = (() => {
+const m9 = (() => {
 // Browser Guest for dsh web. An iframe is the whole isolation boundary: no Native
 // bridge, no Desktop profile, and no Node, download, or popup surface.
 const ERROR_CODES = {
@@ -2044,9 +2195,9 @@ function createBrowserGuest({
 
 return { createBrowserGuest };
 })();
-const { createBrowserGuest } = m8;
+const { createBrowserGuest } = m9;
 // ---- module: tui-provider ----
-const m9 = (() => {
+const m10 = (() => {
 // Parent owns Host RPC and runtime identity; the iframe receives only terminal messages.
 function createTuiProvider({ document, window, api, ownerId, locale = 'zh' }) {
   if (typeof api !== 'function' || typeof ownerId !== 'string' || !ownerId) throw new TypeError('Invalid TUI provider options');
@@ -2303,9 +2454,9 @@ function createTuiProvider({ document, window, api, ownerId, locale = 'zh' }) {
 
 return { createTuiProvider };
 })();
-const { createTuiProvider } = m9;
+const { createTuiProvider } = m10;
 // ---- module: chrome-tabs ----
-const m10 = (() => {
+const m11 = (() => {
 // Reusable Chrome-style workspace tab strip.
 // React, document and window are injected so this module stays import-free and
 // can be concatenated by the Shell build without extra runtime dependencies.
@@ -2316,6 +2467,7 @@ const DEFAULT_LABELS = Object.freeze({
   tablist: '工作区页签',
   newTab: '新建工作区',
   close: '关闭页签',
+  edit: '编辑页签名称与彩色标记',
   connected: '已连接',
   disconnected: '未连接',
   moved: '已移动：',
@@ -2361,7 +2513,7 @@ function isControlNode(start) {
     }
     try {
       marker = typeof node.hasAttribute === 'function'
-        && (node.hasAttribute('data-chrome-tab-close') || node.hasAttribute('data-chrome-tab-add'));
+        && (node.hasAttribute('data-chrome-tab-close') || node.hasAttribute('data-chrome-tab-add') || node.hasAttribute('data-chrome-tab-edit'));
     } catch {
       marker = false;
     }
@@ -2388,9 +2540,23 @@ function normalizedLabels(value) {
   return labels;
 }
 
-function tabTitle(tab) {
+function tabTitle(tab, appearance) {
+  if (appearance && typeof appearance.name === 'string' && appearance.name) return appearance.name;
   const title = tab?.title;
   return typeof title === 'string' && title.trim() ? title : String(tab?.id ?? '');
+}
+
+function appearanceOf(tab, resolver) {
+  if (typeof resolver !== 'function') return null;
+  let value;
+  try { value = resolver(tab); } catch { return null; }
+  return value && typeof value === 'object' ? value : null;
+}
+
+function canEditTab(tab, predicate, handler) {
+  if (typeof handler !== 'function') return false;
+  if (typeof predicate !== 'function') return true;
+  try { return predicate(tab) === true; } catch { return false; }
 }
 
 function isClosable(tab) {
@@ -2420,7 +2586,7 @@ function createChromeTabs(React, deps = {}) {
   function ChromeTabStrip(props) {
     const options = props ?? {};
     const {
-      tabs, activeId, onSelect, onClose, onAdd, onMove, getStatus, ids,
+      tabs, activeId, onSelect, onClose, onAdd, onMove, getStatus, getAppearance, canEdit, onEdit, ids,
       idPrefix = 'chrome-tab', labels, dragRegion = true, className,
     } = options;
     const copy = normalizedLabels(labels);
@@ -2438,7 +2604,7 @@ function createChromeTabs(React, deps = {}) {
     const dragRef = useRef(null);
     const suppressClick = useRef(false);
     const latest = useRef(null);
-    latest.current = { tabs: list, activeId, copy, onSelect, onClose, onAdd, onMove, getStatus, ids };
+    latest.current = { tabs: list, activeId, copy, onSelect, onClose, onAdd, onMove, getStatus, getAppearance, canEdit, onEdit, ids };
 
     useEffect(() => {
       mounted.current = true;
@@ -2468,7 +2634,7 @@ function createChromeTabs(React, deps = {}) {
 
     function announceMove(id, index) {
       const tab = latest.current.tabs.find((item) => item.id === id);
-      const title = tabTitle(tab ?? { id });
+      const title = tabTitle(tab ?? { id }, appearanceOf(tab, latest.current.getAppearance));
       const label = latest.current.copy.moved;
       const message = typeof label === 'function' ? label(title, index + 1) : `${label}${title}（${index + 1}）`;
       if (mounted.current) setAnnouncement(String(message));
@@ -2744,6 +2910,11 @@ function createChromeTabs(React, deps = {}) {
       // so a later Enter/Space on the close button is not swallowed.
       suppressClick.current = false;
       if (isControlNode(event.target)) return;
+      if (event.key === 'F2' && canEditTab(tab, latest.current.canEdit, latest.current.onEdit)) {
+        event.preventDefault?.();
+        latest.current.onEdit(tab.id);
+        return;
+      }
       const current = latest.current.tabs;
       const index = current.findIndex((item) => item.id === tab.id);
       if (index < 0) return;
@@ -2823,13 +2994,19 @@ function createChromeTabs(React, deps = {}) {
       const selected = tab.id === activeId;
       const tabbable = tab.id === tabbableId;
       const closable = isClosable(tab);
+      const editable = canEditTab(tab, canEdit, onEdit);
+      const appearance = appearanceOf(tab, getAppearance);
       const status = statusFor(tab);
-      const title = tabTitle(tab);
+      const title = tabTitle(tab, appearance);
       const tooltip = status && status.alias ? `${status.alias} · ${title}` : title;
       const domIds = domIdsFor(tab);
-      const shortcuts = [closable ? 'Delete' : null, typeof onMove === 'function' ? 'Alt+ArrowLeft Alt+ArrowRight' : null]
+      const marker = appearance && typeof appearance.color === 'string' && appearance.color ? appearance.color : null;
+      const shortcuts = [closable ? 'Delete' : null, editable ? 'F2' : null, typeof onMove === 'function' ? 'Alt+ArrowLeft Alt+ArrowRight' : null]
         .filter(Boolean).join(' ');
       const content = [
+        marker ? h('span', {
+          key: 'marker', className: 'ct-marker', 'data-color': marker, 'aria-hidden': 'true',
+        }) : null,
         status ? h('span', {
           key: 'dot', className: 'ct-dot', 'data-connected': status.connected ? 'true' : 'false', 'aria-hidden': 'true',
         }) : null,
@@ -2846,6 +3023,9 @@ function createChromeTabs(React, deps = {}) {
         'data-active': selected ? 'true' : undefined,
         'data-dragging': draggingId === tab.id ? 'true' : undefined,
         'data-closable': closable ? 'true' : undefined,
+        'data-editable': editable ? 'true' : undefined,
+        'data-custom-title': appearance && typeof appearance.name === 'string' && appearance.name ? 'true' : undefined,
+        'data-appearance-color': marker ?? undefined,
         'data-kind': typeof tab.kind === 'string' ? tab.kind : undefined,
         ref: (node) => {
           if (node) shells.current.set(tab.id, node);
@@ -2854,6 +3034,11 @@ function createChromeTabs(React, deps = {}) {
         onPointerDown: (event) => onPointerDown(tab, event),
         onLostPointerCapture: (event) => onLostPointerCapture(event),
         onClick: (event) => onTabClick(tab, event),
+        onDoubleClick: (event) => {
+          if (!editable || suppressClick.current) return;
+          if (isControlNode(event?.target)) return;
+          latest.current.onEdit(tab.id);
+        },
         onKeyDown: (event) => onTabKeyDown(tab, event),
       },
       h('div', {
@@ -2870,6 +3055,26 @@ function createChromeTabs(React, deps = {}) {
           else bodies.current.delete(tab.id);
         },
       }, content),
+      editable ? h('button', {
+        key: 'edit',
+        type: 'button',
+        className: 'ct-edit',
+        'data-chrome-tab-edit': String(tab.id),
+        'aria-label': `${copy.edit} ${title}`,
+        title: copy.edit,
+        onPointerDown: (event) => {
+          event?.stopPropagation?.();
+        },
+        onClick: (event) => {
+          event?.stopPropagation?.();
+          event?.preventDefault?.();
+          if (suppressClick.current) {
+            suppressClick.current = false;
+            return;
+          }
+          latest.current.onEdit(tab.id);
+        },
+      }, '✎') : null,
       closable ? h('button', {
         key: 'close',
         type: 'button',
@@ -2980,8 +3185,19 @@ const css = [
   '.ct-tab-body:focus-visible{outline:var(--ct-focus-width) solid var(--ct-focus-ring);outline-offset:-2px}',
   '.ct-title{min-width:0;flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
   '.ct-alias{flex:0 1 auto;min-width:0;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ct-fg-faint);font-size:var(--ct-font-size-compact)}',
+  '.ct-marker{flex:none;width:3px;height:14px;border-radius:2px;background:var(--dsw-alias-state-idle-primary)}',
+  '.ct-marker[data-color=blue]{background:var(--dsw-alias-state-business-primary)}',
+  '.ct-marker[data-color=green]{background:var(--dsw-alias-state-success-primary)}',
+  '.ct-marker[data-color=amber]{background:var(--dsw-alias-state-warn-primary)}',
+  '.ct-marker[data-color=red]{background:var(--dsw-alias-state-error-primary)}',
+  '.ct-marker[data-color=gray]{background:var(--dsw-alias-state-idle-primary)}',
   '.ct-dot{flex:none;width:var(--ct-dot-size);height:var(--ct-dot-size);border-radius:50%;background:var(--ct-dot-off);box-shadow:0 0 0 1px var(--ct-veil)}',
   '.ct-dot[data-connected=true]{background:var(--ct-dot-on)}',
+  '.ct-edit{flex:none;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;margin-left:2px;padding:0;border:0;border-radius:50%;background:transparent;color:var(--ct-fg-faint);font-family:inherit;font-size:12px;line-height:1;cursor:pointer;opacity:0;pointer-events:none}',
+  '.ct-tab:hover .ct-edit,.ct-tab:focus-within .ct-edit,.ct-tab[data-active=true] .ct-edit{opacity:1;pointer-events:auto}',
+  '.ct-edit:hover{background:var(--ct-hover-bg);color:var(--ct-fg)}',
+  '.ct-edit:active{background:var(--ct-press-bg)}',
+  '.ct-edit:focus-visible{opacity:1;pointer-events:auto;outline:var(--ct-focus-width) solid var(--ct-focus-ring);outline-offset:0}',
   '.ct-close{flex:none;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;margin-left:2px;padding:0;border:0;border-radius:50%;background:transparent;color:var(--ct-fg-faint);font-family:inherit;font-size:14px;line-height:1;cursor:pointer;opacity:0;pointer-events:none}',
   '.ct-tab:hover .ct-close,.ct-tab:focus-within .ct-close,.ct-tab[data-active=true] .ct-close{opacity:1;pointer-events:auto}',
   '.ct-close:hover{background:var(--ct-hover-bg);color:var(--ct-fg)}',
@@ -2993,16 +3209,16 @@ const css = [
   '.ct-add:focus-visible{outline:var(--ct-focus-width) solid var(--ct-focus-ring);outline-offset:0}',
   '.ct-blank{flex:1 1 auto;min-width:8px;align-self:stretch;-webkit-app-region:drag}',
   '.ct-sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}',
-  '@media(prefers-reduced-motion:no-preference){.ct-tab,.ct-close,.ct-add{transition:background-color 120ms ease,color 120ms ease,opacity 120ms ease}}',
-  '@media(prefers-reduced-motion:reduce){.ct-tab,.ct-close,.ct-add{transition:none!important;animation:none!important}}',
+  '@media(prefers-reduced-motion:no-preference){.ct-tab,.ct-close,.ct-edit,.ct-add{transition:background-color 120ms ease,color 120ms ease,opacity 120ms ease}}',
+  '@media(prefers-reduced-motion:reduce){.ct-tab,.ct-close,.ct-edit,.ct-add{transition:none!important;animation:none!important}}',
   '@media(max-width:640px){.ct-root{--ct-tab-min-width:56px;--ct-tab-max-width:160px;--ct-font-size:12px;--ct-font-size-compact:11px;--ct-inline-padding:6px}.ct-alias{max-width:32%}}',
 ].join('\n');
 
 return { createChromeTabs, css };
 })();
-const { createChromeTabs, css } = m10;
+const { createChromeTabs, css } = m11;
 // ---- module: workspace-client ----
-const m11 = (() => {
+const m12 = (() => {
 // Window-owned composition. Public snapshots never contain view URLs or handles.
 //
 // The client owns several private maps: provider tabs (Guest/TUI resources), SSH tab
@@ -3011,7 +3227,7 @@ const m11 = (() => {
 // calls controller.replace so the tab keeps its ID, position, and active state while
 // receiving a fresh identity object that invalidates every earlier callback.
 function createWorkspaceClient(deps) {
-  const { window, document, ctx, createTabState, createTabController, installInputGate, createDesktopGuest, createTuiProvider, createTabOrderMemory } = deps;
+  const { window, document, ctx, createTabState, createTabController, installInputGate, createDesktopGuest, createTuiProvider, createTabOrderMemory, createTabAppearanceMemory } = deps;
   const createBrowserGuest = typeof deps.createBrowserGuest === 'function' ? deps.createBrowserGuest : null;
   const inertTiming = Object.freeze({
     getSnapshot: () => Object.freeze({ entries: Object.freeze([]) }),
@@ -3156,28 +3372,110 @@ function createWorkspaceClient(deps) {
     return orderHydrating;
   };
   const adoptOrder = (id, spec) => {
-    if (!orderMemory) return;
     const identity = orderIdentity(spec);
     if (!identity) return;
     orderKeys.set(id, identity);
-    syncOrder();
+    if (orderMemory) syncOrder();
+    // The appearance resolver keys off the same identity; publish it now so a
+    // converted launcher shows its custom display before the provider is ready.
+    notifyAppearance();
   };
   // A freshly opened tab is appended; move it into its remembered slot before returning.
   const placeOrder = (id, spec) => {
-    if (!orderMemory) return;
     const identity = orderIdentity(spec);
     if (!identity) return;
-    const list = tabs.getSnapshot().tabs;
-    if (list.length > 1 && list[list.length - 1]?.id === id) {
-      const slots = orderSlots().slice(0, -1);
-      const index = orderMemory.insertionIndex(identity, slots);
-      if (index < slots.length) {
-        try { tabs.move(id, index); } catch { /* Keep the appended position. */ }
+    if (orderMemory) {
+      const list = tabs.getSnapshot().tabs;
+      if (list.length > 1 && list[list.length - 1]?.id === id) {
+        const slots = orderSlots().slice(0, -1);
+        const index = orderMemory.insertionIndex(identity, slots);
+        if (index < slots.length) {
+          try { tabs.move(id, index); } catch { /* Keep the appended position. */ }
+        }
       }
     }
     orderKeys.set(id, identity);
-    syncOrder();
+    if (orderMemory) syncOrder();
+    notifyAppearance();
   };
+  // Custom tab display is a per-identity preference like tab order. Editing is
+  // offered only after the first Host read succeeds, so a full-list save can
+  // never overwrite appearance records this Client never saw.
+  const appearanceMemory = typeof createTabAppearanceMemory === 'function' ? createTabAppearanceMemory({ limit: 64 }) : null;
+  const appearanceListeners = new Set();
+  let appearanceRevision = Object.freeze({ revision: 0 });
+  let appearanceReady = false;
+  let appearanceHydrated = false;
+  let appearanceHydrating = null;
+  const notifyAppearance = () => {
+    appearanceRevision = Object.freeze({ revision: appearanceRevision.revision + 1 });
+    for (const listener of [...appearanceListeners]) { try { listener(); } catch {} }
+  };
+  const appearance = Object.freeze({
+    getSnapshot: () => appearanceRevision,
+    subscribe(listener) { appearanceListeners.add(listener); return () => appearanceListeners.delete(listener); },
+  });
+  const appearanceColors = Object.freeze([...(appearanceMemory?.colors ?? [])]);
+  const hydrateAppearance = () => {
+    if (disposed) return Promise.resolve(false);
+    if (!appearanceMemory || appearanceHydrated) return Promise.resolve(appearanceReady);
+    if (!appearanceHydrating) {
+      appearanceHydrating = (async () => {
+        try {
+          const result = await api('/tab-appearance/get', {}, refreshAbort.signal);
+          if (disposed) return false;
+          if (result?.available === true) {
+            appearanceMemory.hydrate(result.entries);
+            appearanceReady = true;
+          }
+        } catch { /* Older or unavailable Host: keep the editor off. */ }
+        if (disposed) return false;
+        appearanceHydrated = true;
+        // A successful empty read still enables editing; notify unconditionally.
+        notifyAppearance();
+        return appearanceReady;
+      })().finally(() => { appearanceHydrating = null; });
+    }
+    return appearanceHydrating;
+  };
+  const appearanceIdentity = (tab) => {
+    if (!tab) return null;
+    if (tab.id === 'local') return 'local';
+    const known = orderKeys.get(tab.id);
+    if (known) return known;
+    const source = sshTabs.get(tab.id);
+    if (source) return 'ssh:' + source.hostId + ':' + (source.profileId || 'web');
+    const providerId = tabProviders.get(tab.id);
+    if (providerId === 'local-tui' && typeof tab.profileId === 'string' && identifier(tab.profileId)) return 'tui:' + tab.profileId;
+    if (providerId === 'local-web' && typeof tab.profileId === 'string' && identifier(tab.profileId)) return 'web:' + tab.profileId;
+    return null;
+  };
+  function getTabAppearance(tab) {
+    if (!appearanceMemory) return null;
+    const identity = appearanceIdentity(tab);
+    if (!identity) return null;
+    return appearanceMemory.get(identity) ?? null;
+  }
+  function canCustomizeTab(tab) {
+    return !!appearanceMemory && appearanceReady && appearanceIdentity(tab) !== null;
+  }
+  async function setTabAppearance(id, value) {
+    if (disposed) throw error('WORKSPACE_DISPOSED');
+    const tab = tabs.getSnapshot().tabs.find((item) => item.id === id);
+    const identity = appearanceIdentity(tab);
+    if (!appearanceMemory || !identity) throw error('TAB_APPEARANCE_UNAVAILABLE');
+    await hydrateAppearance();
+    if (disposed) throw error('WORKSPACE_DISPOSED');
+    if (!appearanceReady) throw error('TAB_APPEARANCE_UNAVAILABLE');
+    let plan;
+    try { plan = appearanceMemory.prepare(identity, value); } catch { throw error('TAB_APPEARANCE_INVALID'); }
+    if (!plan.changed) return true;
+    const result = await api('/tab-appearance/set', { entries: plan.entries });
+    if (result?.saved !== true) throw error('TAB_APPEARANCE_UNSAVED');
+    if (disposed) return true;
+    if (appearanceMemory.hydrate(plan.entries)) notifyAppearance();
+    return true;
+  }
   const gate = installInputGate(ctx.get?.('shortcuts') ?? ctx.shortcuts);
   const bridge = window.dshDesktop?.browser;
   const desktopUsable = ['acquire', 'release', 'onOpenRequested'].every((key) => typeof bridge?.[key] === 'function');
@@ -3248,9 +3546,10 @@ function createWorkspaceClient(deps) {
     if (disposed) return false;
     const generation = ++refreshGeneration;
     try {
-      // Hydrate the remembered tab order before exposing the catalog, so opening a
-      // workspace after startup does not briefly append before moving.
-      const [result] = await Promise.all([api('/catalog', { ownerId }, refreshAbort.signal), hydrateOrder()]);
+      // Hydrate remembered tab order and display preferences before exposing the
+      // catalog, so opening a workspace does not briefly show the default slot or
+      // name. A failed preference read degrades to defaults.
+      const [result] = await Promise.all([api('/catalog', { ownerId }, refreshAbort.signal), hydrateOrder(), hydrateAppearance()]);
       if (disposed || generation !== refreshGeneration) return false;
       if (typeof result?.currentProfile !== 'string' || !Array.isArray(result.profiles) || !Array.isArray(result.runtimes)) throw error('WORKSPACE_INVALID_CATALOG');
       const profiles = result.profiles.slice(0, 256).filter((item) => typeof item?.id === 'string').map(mapProfile);
@@ -3873,6 +4172,7 @@ function createWorkspaceClient(deps) {
     });
   };
   return Object.freeze({ tabs, info, connections, sshExtension, registerSshExtension, sessionNavigationExtension, registerSessionNavigation, sessionTabs, openSessionHost, timing, canWeb, canTui, refresh, registerProvider, open, activate, setOverlay, close, closeViews, readDefaultCwd,
+    appearance, appearanceColors, getTabAppearance, canCustomizeTab, setTabAppearance,
     openLauncher, launcherSource, readLauncherCwd, openLauncherWeb, openLauncherTui, moveTab,
     openWeb, openTui, getTabStatus, sshRequest, reportSsh, openSshWeb, closeSshViews, sshViewCounts,
     async retry(id) {
@@ -3887,6 +4187,8 @@ function createWorkspaceClient(deps) {
       disposed = true; ++navigation; ++refreshGeneration; refreshAbort.abort();
       clearOrderTimer(); orderDirty = false; orderKeys.clear();
       try { orderMemory?.dispose(); } catch {}
+      appearanceReady = false; appearanceHydrated = true; appearanceListeners.clear();
+      try { appearanceMemory?.dispose(); } catch {}
       sessionTabTokens.clear(); sessionNavigation = null; sessionNavigationListeners.clear();
       sshRegistration?.unsubscribe?.(); sshRegistration?.abort.abort(); sshRegistration = null; extensionListeners.clear(); sshSpecs.clear();
       window.removeEventListener('pagehide', pagehide); offTabs(); listeners.clear(); connectionListeners.clear();
@@ -3901,9 +4203,9 @@ function createWorkspaceClient(deps) {
 
 return { createWorkspaceClient };
 })();
-const { createWorkspaceClient } = m11;
+const { createWorkspaceClient } = m12;
 // ---- module: launcher ----
-const m12 = (() => {
+const m13 = (() => {
 // Launcher page: a real workspace tab, not a modal. The component owns only UI
 // state; every effect goes through the injected workspace client, and every
 // conversion preserves the tab ID/position through `launcher.replace`.
@@ -4512,9 +4814,9 @@ function createLauncher(React, deps = {}) {
 
 return { parseTuiCommand, parseTuiCwd, launcherCss, createLauncher };
 })();
-const { parseTuiCommand, parseTuiCwd, launcherCss, createLauncher } = m12;
+const { parseTuiCommand, parseTuiCwd, launcherCss, createLauncher } = m13;
 // ---- module: styles ----
-const m13 = (() => {
+const m14 = (() => {
 const shellCss = [
 '.wsh-frame{--wsh-header-height:48px;grid-template-rows:var(--wsh-header-height) minmax(0,1fr)!important;min-height:0;min-width:0;isolation:isolate;position:relative}',
 '.wsh-header{grid-column:1/-1;grid-row:1;display:flex;align-items:center;gap:8px;padding:0 12px;background:var(--dsw-specific-sidebar-fill,var(--dsw-alias-bg-base));border-bottom:1px solid var(--dsw-alias-border-l3);min-width:0;z-index:2;user-select:none;-webkit-app-region:drag}',
@@ -4545,8 +4847,21 @@ const shellCss = [
 '.wsh-sheet{width:min(720px,100%);max-height:100%;overflow:auto;display:grid;gap:16px;padding:20px;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);box-shadow:0 16px 50px #0003}',
 '.wsh-sheet-title{display:flex;align-items:center;justify-content:space-between;gap:12px}.wsh-sheet-section{display:grid;gap:8px;min-width:0}',
 '.wsh-sheet-actions{display:flex;justify-content:flex-end;gap:8px}.wsh-choice{font:inherit;text-align:left;color:inherit;background:var(--dsw-alias-button-ghost-active-fill);border:1px solid var(--dsw-alias-border-l1);border-radius:7px;padding:9px 11px;cursor:pointer}',
+'.wsh-sheet-actions .wsh-primary{font-weight:600;border-color:var(--dsw-alias-brand-primary)}',
 '.wsh-choice[aria-checked=true]{border-color:var(--dsw-alias-brand-primary)}',
 '.wsh-field{display:grid;gap:6px;font-size:12px}.wsh-field input{font:inherit;color:inherit;background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);border-radius:6px;padding:8px}',
+'.wsh-tab-editor{width:min(380px,100%);gap:12px}.wsh-tab-editor .wsh-field input{width:100%}',
+'.wsh-tab-colors{display:flex;align-items:center;gap:8px;flex-wrap:wrap}',
+'.wsh-swatch{display:inline-flex;align-items:center;justify-content:center;min-width:30px;height:24px;padding:0 7px;border:1px solid var(--dsw-alias-border-l1);border-radius:999px;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:11px;line-height:1;cursor:pointer}',
+'.wsh-swatch[data-tab-color=blue]{background:var(--dsw-alias-state-business-primary);border-color:transparent}',
+'.wsh-swatch[data-tab-color=green]{background:var(--dsw-alias-state-success-primary);border-color:transparent}',
+'.wsh-swatch[data-tab-color=amber]{background:var(--dsw-alias-state-warn-primary);border-color:transparent}',
+'.wsh-swatch[data-tab-color=red]{background:var(--dsw-alias-state-error-primary);border-color:transparent}',
+'.wsh-swatch[data-tab-color=gray]{background:var(--dsw-alias-state-idle-primary);border-color:transparent}',
+'.wsh-swatch[data-tab-color=none]{background:var(--dsw-alias-bg-base)}',
+'.wsh-swatch[aria-checked=true]{outline:2px solid var(--dsw-alias-label-primary);outline-offset:2px}',
+'.wsh-swatch:disabled{opacity:.5;cursor:not-allowed}',
+'.wsh-swatch:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}',
 '.wsh-warning{color:var(--dsw-alias-state-error-primary);margin:0}.wsh-danger{color:var(--dsw-alias-state-error-primary)}.wsh-muted{color:var(--dsw-alias-label-secondary);font-size:12px;margin:0}',
 '.wsh-frame[data-dragging]{transition:none!important;user-select:none}',
 // The frame is the window: no plugin's stray body-level inline node may scroll the document.
@@ -4561,9 +4876,9 @@ const shellCss = [
 
 return { shellCss };
 })();
-const { shellCss } = m13;
+const { shellCss } = m14;
 // ---- module: frame ----
-const m14 = (() => {
+const m15 = (() => {
 // Window frame: the permanent Local surface, Chrome-style workspace tabs, and one
 // launcher page per `launcher` tab. Tab metadata is identity-based; the frame never
 // reads a numeric generation and never owns provider resources itself.
@@ -4587,12 +4902,26 @@ function createFrameViews(React, deps) {
   const EMPTY_CONNECTIONS = Object.freeze([]);
   const fallbackConnections = Object.freeze({ getSnapshot: () => EMPTY_CONNECTIONS, subscribe: () => () => {} });
   const fallbackWorkspaceSelection = Object.freeze({ getSnapshot: () => null, subscribe: () => () => {} });
+  const fallbackAppearanceSnapshot = Object.freeze({ revision: 0 });
+  const fallbackAppearance = Object.freeze({ getSnapshot: () => fallbackAppearanceSnapshot, subscribe: () => () => {} });
+  const EMPTY_COLORS = Object.freeze([]);
   const copy = {
     newWorkspace: '新建工作区', close: '关闭页签', retry: '重试', opening: '正在打开', failed: '打开失败',
     local: '本地', workspaceError: '工作区操作失败', settings: '工作区',
   };
   const activeLocale = ctx.locale?.getSnapshot?.().active || document.documentElement.lang || 'zh';
   const english = !String(activeLocale).toLowerCase().startsWith('zh');
+  const tabEditorCopy = english ? {
+    title: 'Customize tab', original: 'Original name', name: 'Display name',
+    hint: 'Leave the name empty and choose no marker to restore the default.', separator: ': ',
+    marker: 'Color marker', none: 'None', cancel: 'Cancel', save: 'Save',
+    colors: { blue: 'Blue', green: 'Green', amber: 'Amber', red: 'Red', gray: 'Gray' },
+  } : {
+    title: '自定义页签', original: '原名称', name: '显示名称',
+    hint: '名称留空并选择“无”即可恢复默认。', separator: '：',
+    marker: '彩色标记', none: '无', cancel: '取消', save: '保存',
+    colors: { blue: '蓝', green: '绿', amber: '橙', red: '红', gray: '灰' },
+  };
   function friendlyError(code) {
     const safe = safeCode(code);
     const messages = english ? {
@@ -4603,6 +4932,9 @@ function createFrameViews(React, deps) {
       TUI_CONFIRM_REQUIRED: 'Before opening a TUI, confirm the independent instance and the risk of sharing profile settings and related data.',
       WORKSPACE_LAUNCHER_STALE: 'This launcher tab was replaced. Retry or close it.',
       TUI_COMMAND_INVALID: 'The launch command is invalid. Check quotes, escapes, line breaks, and length.',
+      TAB_APPEARANCE_UNAVAILABLE: 'This tab has no stable identity, so its display cannot be customized.',
+      TAB_APPEARANCE_INVALID: 'The tab name or color is invalid.',
+      TAB_APPEARANCE_UNSAVED: 'The customization could not be saved.',
     } : {
       TUI_PROFILE_CONFLICT: '该 profile 同时声明了 DSH TUI 和 Pi TUI，请只保留一种终端实现。',
       PROFILE_HOST_CONFLICT: '该 profile 已有其它运行中的 Host，请先关闭或复用现有实例。',
@@ -4611,6 +4943,9 @@ function createFrameViews(React, deps) {
       TUI_CONFIRM_REQUIRED: '打开 TUI 前，请确认将启动独立实例，并了解共享 profile 设置与相关数据的风险。',
       WORKSPACE_LAUNCHER_STALE: '该 launcher 页签已被替换，请重试或关闭。',
       TUI_COMMAND_INVALID: '启动命令无效，请检查引号、转义、换行和长度。',
+      TAB_APPEARANCE_UNAVAILABLE: '该页签没有可保存的稳定身份，无法自定义显示。',
+      TAB_APPEARANCE_INVALID: '页签名称或颜色无效。',
+      TAB_APPEARANCE_UNSAVED: '自定义显示未能保存。',
     };
     return messages[safe] ? `${messages[safe]} [${safe}]` : safe;
   }
@@ -4625,13 +4960,14 @@ function createFrameViews(React, deps) {
     const panel = usePanelInfo((state) => state.activePanelId);
     return renderSlot('main', {}, { entryKey: panel ?? 'conversation' });
   });
-  function Title({ usePanelInfo, useSessions, activeTab }) {
+  function Title({ usePanelInfo, useSessions, activeTab, appearance }) {
     const panel = usePanelInfo((state) => state.activePanelId);
     const title = useSessions((state) => Object.values(state.byId).find((s) => (s.retainedBy?.mainView ?? 0) > 0)?.title);
+    const activeTitle = appearance?.name || activeTab?.title;
     React.useEffect(() => {
-      document.title = activeTab && activeTab.id !== 'local' ? `${activeTab.title} — DeepSeek Harness` : !panel && title ? title + ' — DeepSeek Harness' : 'DeepSeek Harness';
+      document.title = activeTab && activeTab.id !== 'local' && activeTitle ? `${activeTitle} — DeepSeek Harness` : !panel && title ? title + ' — DeepSeek Harness' : 'DeepSeek Harness';
       return () => { document.title = 'DeepSeek Harness'; };
-    }, [panel, title, activeTab]);
+    }, [panel, title, activeTab, activeTitle]);
     return null;
   }
   function Resize({ side, width, actions, onDragging, offset = 0 }) {
@@ -4653,7 +4989,12 @@ function createFrameViews(React, deps) {
 
   // Minimal accessible strip used only when the Chrome tab module is unavailable
   // (isolated tests and degraded startup). Production always injects the real one.
-  function FallbackStrip({ tabs, activeId, onSelect, onClose, onAdd, onMove }) {
+  function FallbackStrip({ tabs, activeId, onSelect, onClose, onAdd, onMove, getAppearance }) {
+    const displayTitle = (tab) => {
+      let appearance = null;
+      try { appearance = typeof getAppearance === 'function' ? getAppearance(tab) : null; } catch { /* Fall back to the stored title. */ }
+      return appearance && typeof appearance.name === 'string' && appearance.name ? appearance.name : tab.title;
+    };
     return h('div', { className: 'wsh-tabstrip', role: 'tablist', 'aria-label': copy.settings, 'data-fallback-strip': '' },
       tabs.map((tab, index) => h('div', { key: tab.id, className: 'wsh-tab', 'data-active': tab.id === activeId || undefined },
         h('button', { type: 'button', role: 'tab', id: domId('tab', tab.id), className: 'wsh-tab-button',
@@ -4662,8 +5003,8 @@ function createFrameViews(React, deps) {
             if (!onMove || !['Alt+ArrowLeft', 'Alt+ArrowRight'].includes((event.altKey ? 'Alt+' : '') + event.key)) return;
             event.preventDefault();
             onMove(tab.id, Math.max(0, Math.min(tabs.length - 1, index + (event.key === 'ArrowLeft' ? -1 : 1))));
-          } }, tab.title),
-        tab.closable ? h('button', { type: 'button', className: 'wsh-tab-close', 'aria-label': `${copy.close} ${tab.title}`, onClick: () => onClose(tab.id) }, '×') : null)),
+          } }, displayTitle(tab)),
+        tab.closable ? h('button', { type: 'button', className: 'wsh-tab-close', 'aria-label': `${copy.close} ${displayTitle(tab)}`, onClick: () => onClose(tab.id) }, '×') : null)),
       h('button', { type: 'button', className: 'wsh-button', 'aria-label': copy.newWorkspace, onClick: onAdd }, '+'));
   }
 
@@ -4765,6 +5106,63 @@ function createFrameViews(React, deps) {
           h('button', { type: 'button', className: 'wsh-button', onClick: () => onClose(tab) }, copy.close)) : null) : null);
   }
 
+  function TabAppearanceDialog({ tab, initial, colors, busy, error, onCancel, onSave }) {
+    const [name, setName] = React.useState(typeof initial?.name === 'string' ? initial.name : '');
+    const [color, setColor] = React.useState(typeof initial?.color === 'string' ? initial.color : '');
+    const input = React.useRef(null);
+    const section = React.useRef(null);
+    React.useEffect(() => {
+      try { input.current?.focus?.({ preventScroll: true }); } catch { /* Focus entry is best effort. */ }
+    }, []);
+    const submit = (event) => {
+      event?.preventDefault?.();
+      if (busy) return;
+      onSave({ name: name.trim(), color: color || null });
+    };
+    const onKeyDown = (event) => {
+      event.stopPropagation?.();
+      if (event.key === 'Escape') {
+        event.preventDefault?.();
+        if (!busy) onCancel();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const items = [...(section.current?.querySelectorAll?.('button:not([disabled]),input:not([disabled])') ?? [])];
+      if (!items.length) return;
+      const active = document?.activeElement;
+      const index = items.indexOf(active);
+      const next = event.shiftKey
+        ? (index <= 0 ? items.length - 1 : index - 1)
+        : (index === items.length - 1 || index < 0 ? 0 : index + 1);
+      event.preventDefault?.();
+      items[next]?.focus?.({ preventScroll: true });
+    };
+    const options = [['', 'none', tabEditorCopy.none], ...colors.map((id) => [id, id, tabEditorCopy.colors[id] ?? id])];
+    return h('div', { className: 'wsh-sheet-backdrop', 'data-tab-editor-backdrop': '' },
+      h('form', {
+        ref: section, className: 'wsh-sheet wsh-tab-editor', role: 'dialog', 'aria-modal': 'true',
+        'aria-labelledby': 'wsh-tab-editor-title', 'data-tab-editor': String(tab.id), onSubmit: submit, onKeyDown,
+      },
+      h('div', { className: 'wsh-sheet-title' }, h('strong', { id: 'wsh-tab-editor-title' }, tabEditorCopy.title)),
+      h('p', { className: 'wsh-muted' }, `${tabEditorCopy.original}${tabEditorCopy.separator}${tab.title ?? ''}`),
+      h('label', { className: 'wsh-field' }, tabEditorCopy.name,
+        h('input', {
+          ref: input, type: 'text', value: name, maxLength: 64, placeholder: tab.title ?? '', disabled: busy,
+          'data-tab-name': '', onChange: (event) => setName(event.target.value),
+        })),
+      h('p', { className: 'wsh-muted' }, tabEditorCopy.hint),
+      h('div', { className: 'wsh-tab-colors', role: 'radiogroup', 'aria-label': tabEditorCopy.marker },
+        options.map(([value, token, label]) => h('button', {
+          key: token, type: 'button', role: 'radio', className: 'wsh-swatch',
+          'aria-checked': (color || '') === value ? 'true' : 'false', 'aria-label': label, title: label,
+          'data-tab-color': token, disabled: busy, onClick: () => setColor(value),
+        }, value ? null : tabEditorCopy.none))),
+      error ? h('p', { className: 'wsh-warning', role: 'alert' }, friendlyError(error)) : null,
+      h('div', { className: 'wsh-sheet-actions' },
+        h('button', { type: 'button', className: 'wsh-button', disabled: busy, onClick: onCancel, 'data-tab-cancel': '' }, tabEditorCopy.cancel),
+        h('button', { type: 'submit', className: 'wsh-button wsh-primary', disabled: busy, 'data-tab-save': '' }, tabEditorCopy.save))));
+  }
+
   function Frame(props) {
     const { useStore, useSessions, usePanelInfo, renderSlot, actions } = props;
     const workspace = deps.workspace;
@@ -4778,9 +5176,19 @@ function createFrameViews(React, deps) {
     const tabState = React.useSyncExternalStore(tabStore.subscribe, tabStore.getSnapshot);
     const workspaceInfo = React.useSyncExternalStore(infoStore.subscribe, infoStore.getSnapshot);
     const connections = React.useSyncExternalStore(connectionStore.subscribe, connectionStore.getSnapshot);
+    const appearanceStore = workspace?.appearance ?? fallbackAppearance;
+    React.useSyncExternalStore(appearanceStore.subscribe, appearanceStore.getSnapshot);
+    const appearanceColors = Array.isArray(workspace?.appearanceColors) ? workspace.appearanceColors : EMPTY_COLORS;
+    const appearanceOf = React.useCallback((tab) => {
+      try { return workspace?.getTabAppearance?.(tab) ?? null; } catch { return null; }
+    }, [workspace]);
+    const canEditTab = React.useCallback((tab) => {
+      try { return workspace?.canCustomizeTab?.(tab) === true; } catch { return false; }
+    }, [workspace]);
     const tabs = tabState.tabs;
     const activeId = tabState.activeId ?? 'local';
     const activeTab = tabs.find((tab) => tab.id === activeId) ?? localTab;
+    const activeAppearance = appearanceOf(activeTab);
     const localActive = activeId === 'local';
     const selectionStore = deps.workspaceSelection ?? fallbackWorkspaceSelection;
     const selectedWorkspaceCwd = React.useSyncExternalStore(selectionStore.subscribe, selectionStore.getSnapshot);
@@ -4801,12 +5209,14 @@ function createFrameViews(React, deps) {
     const [modals, setModals] = React.useState({});
     const [busy, setBusy] = React.useState('');
     const [errorCode, setErrorCode] = React.useState(null);
+    const [editingTabId, setEditingTabId] = React.useState(null);
     const focusRequest = React.useRef(null);
     const localFocus = React.useRef(null);
     // A Surface may hold an Electron <webview>. Reordering the strip must not move that
     // node in the DOM, so every remote Surface keeps its creation slot for this mount.
     const surfaceSlots = React.useRef({ next: 0, slots: new Map() });
-    const overlayOpen = Object.keys(modals).some((key) => modals[key]);
+    const editingTab = editingTabId ? tabs.find((tab) => tab.id === editingTabId) ?? null : null;
+    const overlayOpen = Object.keys(modals).some((key) => modals[key]) || editingTab !== null;
     const native = document.documentElement.dataset.platform === 'darwin' || document.documentElement.hasAttribute('data-windows-titlebar');
     const g = solveFrame(info, native ? 0 : 56);
     const prior = React.useRef({ width: g.width, toggle: '' });
@@ -4831,6 +5241,29 @@ function createFrameViews(React, deps) {
       catch (error) { setErrorCode(safeCode(error)); return undefined; }
       finally { setBusy(''); }
     }, [busy]);
+    const editTab = React.useCallback((id) => {
+      if (!workspace) return;
+      const tab = tabStore.getSnapshot().tabs.find((item) => item.id === id);
+      if (!tab || !canEditTab(tab)) return;
+      setErrorCode(null);
+      setEditingTabId(id);
+    }, [workspace, tabStore, canEditTab]);
+    const cancelAppearance = React.useCallback(() => {
+      setEditingTabId(null);
+      setErrorCode(null);
+    }, []);
+    const saveAppearance = React.useCallback(async (value) => {
+      if (!workspace || !editingTabId) return;
+      const id = editingTabId;
+      const result = await run(`appearance:${id}`, () => workspace.setTabAppearance(id, value));
+      if (result === true) setEditingTabId(null);
+    }, [workspace, editingTabId, run]);
+    React.useEffect(() => {
+      if (editingTabId && !tabs.some((tab) => tab.id === editingTabId)) {
+        setEditingTabId(null);
+        setErrorCode(null);
+      }
+    }, [tabs, editingTabId]);
     const selectTab = React.useCallback(async (id) => {
       if (!workspace) return;
       const tab = tabStore.getSnapshot().tabs.find((item) => item.id === id);
@@ -4950,10 +5383,11 @@ function createFrameViews(React, deps) {
       try { return workspace?.getTabStatus?.(tab) ?? null; } catch { return null; }
     }, [workspace]);
     const stripProps = {
-      tabs, activeId, getStatus: statusOf,
+      tabs, activeId, getStatus: statusOf, getAppearance: appearanceOf,
+      labels: { edit: english ? 'Edit tab name and color' : '编辑页签名称与彩色标记' },
       onSelect: (id) => void selectTab(id),
       onClose: (id) => { const tab = tabs.find((item) => item.id === id); if (tab) void closeTab(tab); },
-      ...(workspace ? { onAdd: () => void addLauncher(), onMove: moveTab } : {}),
+      ...(workspace ? { onAdd: () => void addLauncher(), onMove: moveTab, onEdit: editTab, canEdit: canEditTab } : {}),
     };
     const tabsView = ChromeTabStrip
       ? h(ChromeTabStrip, stripProps)
@@ -4974,7 +5408,7 @@ function createFrameViews(React, deps) {
       onTransitionEnd: (event) => { if (event.target === root.current && event.propertyName === 'grid-template-columns') setAnimating(false); },
     },
       h('style', { 'data-workspace-shell-style': true }, [css, launcherCss, chromeCss, extension?.css].filter(Boolean).join('\n')),
-      h(Title, { useSessions, usePanelInfo, activeTab }),
+      h(Title, { useSessions, usePanelInfo, activeTab, appearance: activeAppearance }),
       h('header', { className: 'wsh-header', inert: overlayOpen, 'aria-hidden': overlayOpen },
         document.documentElement.dataset.platform === 'darwin' && g.sidebar === 0 && h('div', {
           className: 'wsh-leading', 'data-shell-leading': true, 'data-local-active': localActive,
@@ -5001,6 +5435,10 @@ function createFrameViews(React, deps) {
         onError: setErrorCode, onRetry: retryTab, onClose: closeTab,
         onModalChange: setModalFor,
       })),
+      editingTab ? h(TabAppearanceDialog, {
+        key: editingTab.id, tab: editingTab, initial: appearanceOf(editingTab), colors: appearanceColors,
+        busy: Boolean(busy), error: errorCode, onCancel: cancelAppearance, onSave: saveAppearance,
+      }) : null,
       extension?.Overlay ? h(extension.Overlay, { onModalChange: setExtensionModal, locale: activeLocale }) : null,
       sessionExtension?.Overlay ? h(sessionExtension.Overlay, { onModalChange: setSessionModal }) : null);
   }
@@ -5020,9 +5458,9 @@ function createFrameViews(React, deps) {
 
 return { createFrameViews };
 })();
-const { createFrameViews } = m14;
+const { createFrameViews } = m15;
 // ---- module: entry ----
-const m15 = (() => {
+const m16 = (() => {
 function createWorkspaceSelection(React, slots) {
   const key = 'conversation.hero.workspace';
   const core = slots?._core;
@@ -5180,9 +5618,9 @@ return {
 
 return { createWorkspaceSelection, createShellPlugin };
 })();
-const { createWorkspaceSelection, createShellPlugin } = m15;
+const { createWorkspaceSelection, createShellPlugin } = m16;
 // ---- module: ../session-host/submissions ----
-const m16 = (() => {
+const m17 = (() => {
 // Observe the public Session prompt boundary without changing admission or draft restoration.
 function observeSessionSubmissions(sessions, { failed, succeeded }) {
   const bindings = new Map();
@@ -5244,9 +5682,9 @@ function applyTransferredDraft(ctx, sessionId, draft, received) {
 
 return { observeSessionSubmissions, applyTransferredDraft };
 })();
-const { observeSessionSubmissions, applyTransferredDraft } = m16;
+const { observeSessionSubmissions, applyTransferredDraft } = m17;
 // ---- module: ../session-host/controller ----
-const m17 = (() => {
+const m18 = (() => {
 const validToken = (value) => typeof value === 'string' && /^[a-f0-9]{32}$/.test(value);
 const fail = (code) => Object.assign(new Error(code), { code });
 
@@ -5476,9 +5914,9 @@ function createSessionHostClient({ ctx, window, applyDraft }) {
 
 return { createSessionHostClient };
 })();
-const { createSessionHostClient } = m17;
+const { createSessionHostClient } = m18;
 // ---- module: ../session-host/ui ----
-const m18 = (() => {
+const m19 = (() => {
 const sessionHostCss = `
 .wsh-session-notice{display:flex;align-items:center;flex-wrap:wrap;gap:8px;width:calc(100% - var(--dsh-composer-side-clearance,16px) - var(--dsh-composer-side-clearance,16px));max-width:var(--dsh-composer-card-max-width,760px);margin:0 auto;box-sizing:border-box;padding:8px 0;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;letter-spacing:0}
 .wsh-session-notice>span{flex:1 1 180px;min-width:0;overflow-wrap:anywhere}
@@ -5546,6 +5984,6 @@ function createSessionHostPlugin(React, primitives, deps) {
 
 return { sessionHostCss, createSessionHostPlugin };
 })();
-const { sessionHostCss, createSessionHostPlugin } = m18;
-return createShellPlugin(React,{installFrameAdapter,createFrameViews,solveFrame,createPointerResize,shellCss,createTabState,createTabController,createTabOrderMemory,installInputGate,createWebTiming,createDesktopGuest,createBrowserGuest,createTuiProvider,createChromeTabs,createWorkspaceClient,createLauncher,createSessionHostPlugin,createSessionHostClient,observeSessionSubmissions,applyTransferredDraft,sessionHostCss,primitives,document,window});
+const { sessionHostCss, createSessionHostPlugin } = m19;
+return createShellPlugin(React,{installFrameAdapter,createFrameViews,solveFrame,createPointerResize,shellCss,createTabState,createTabController,createTabOrderMemory,createTabAppearanceMemory,installInputGate,createWebTiming,createDesktopGuest,createBrowserGuest,createTuiProvider,createChromeTabs,createWorkspaceClient,createLauncher,createSessionHostPlugin,createSessionHostClient,observeSessionSubmissions,applyTransferredDraft,sessionHostCss,primitives,document,window});
 }});

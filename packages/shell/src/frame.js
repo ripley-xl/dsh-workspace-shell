@@ -21,12 +21,26 @@ export function createFrameViews(React, deps) {
   const EMPTY_CONNECTIONS = Object.freeze([]);
   const fallbackConnections = Object.freeze({ getSnapshot: () => EMPTY_CONNECTIONS, subscribe: () => () => {} });
   const fallbackWorkspaceSelection = Object.freeze({ getSnapshot: () => null, subscribe: () => () => {} });
+  const fallbackAppearanceSnapshot = Object.freeze({ revision: 0 });
+  const fallbackAppearance = Object.freeze({ getSnapshot: () => fallbackAppearanceSnapshot, subscribe: () => () => {} });
+  const EMPTY_COLORS = Object.freeze([]);
   const copy = {
     newWorkspace: '新建工作区', close: '关闭页签', retry: '重试', opening: '正在打开', failed: '打开失败',
     local: '本地', workspaceError: '工作区操作失败', settings: '工作区',
   };
   const activeLocale = ctx.locale?.getSnapshot?.().active || document.documentElement.lang || 'zh';
   const english = !String(activeLocale).toLowerCase().startsWith('zh');
+  const tabEditorCopy = english ? {
+    title: 'Customize tab', original: 'Original name', name: 'Display name',
+    hint: 'Leave the name empty and choose no marker to restore the default.', separator: ': ',
+    marker: 'Color marker', none: 'None', cancel: 'Cancel', save: 'Save',
+    colors: { blue: 'Blue', green: 'Green', amber: 'Amber', red: 'Red', gray: 'Gray' },
+  } : {
+    title: '自定义页签', original: '原名称', name: '显示名称',
+    hint: '名称留空并选择“无”即可恢复默认。', separator: '：',
+    marker: '彩色标记', none: '无', cancel: '取消', save: '保存',
+    colors: { blue: '蓝', green: '绿', amber: '橙', red: '红', gray: '灰' },
+  };
   function friendlyError(code) {
     const safe = safeCode(code);
     const messages = english ? {
@@ -37,6 +51,9 @@ export function createFrameViews(React, deps) {
       TUI_CONFIRM_REQUIRED: 'Before opening a TUI, confirm the independent instance and the risk of sharing profile settings and related data.',
       WORKSPACE_LAUNCHER_STALE: 'This launcher tab was replaced. Retry or close it.',
       TUI_COMMAND_INVALID: 'The launch command is invalid. Check quotes, escapes, line breaks, and length.',
+      TAB_APPEARANCE_UNAVAILABLE: 'This tab has no stable identity, so its display cannot be customized.',
+      TAB_APPEARANCE_INVALID: 'The tab name or color is invalid.',
+      TAB_APPEARANCE_UNSAVED: 'The customization could not be saved.',
     } : {
       TUI_PROFILE_CONFLICT: '该 profile 同时声明了 DSH TUI 和 Pi TUI，请只保留一种终端实现。',
       PROFILE_HOST_CONFLICT: '该 profile 已有其它运行中的 Host，请先关闭或复用现有实例。',
@@ -45,6 +62,9 @@ export function createFrameViews(React, deps) {
       TUI_CONFIRM_REQUIRED: '打开 TUI 前，请确认将启动独立实例，并了解共享 profile 设置与相关数据的风险。',
       WORKSPACE_LAUNCHER_STALE: '该 launcher 页签已被替换，请重试或关闭。',
       TUI_COMMAND_INVALID: '启动命令无效，请检查引号、转义、换行和长度。',
+      TAB_APPEARANCE_UNAVAILABLE: '该页签没有可保存的稳定身份，无法自定义显示。',
+      TAB_APPEARANCE_INVALID: '页签名称或颜色无效。',
+      TAB_APPEARANCE_UNSAVED: '自定义显示未能保存。',
     };
     return messages[safe] ? `${messages[safe]} [${safe}]` : safe;
   }
@@ -59,13 +79,14 @@ export function createFrameViews(React, deps) {
     const panel = usePanelInfo((state) => state.activePanelId);
     return renderSlot('main', {}, { entryKey: panel ?? 'conversation' });
   });
-  function Title({ usePanelInfo, useSessions, activeTab }) {
+  function Title({ usePanelInfo, useSessions, activeTab, appearance }) {
     const panel = usePanelInfo((state) => state.activePanelId);
     const title = useSessions((state) => Object.values(state.byId).find((s) => (s.retainedBy?.mainView ?? 0) > 0)?.title);
+    const activeTitle = appearance?.name || activeTab?.title;
     React.useEffect(() => {
-      document.title = activeTab && activeTab.id !== 'local' ? `${activeTab.title} — DeepSeek Harness` : !panel && title ? title + ' — DeepSeek Harness' : 'DeepSeek Harness';
+      document.title = activeTab && activeTab.id !== 'local' && activeTitle ? `${activeTitle} — DeepSeek Harness` : !panel && title ? title + ' — DeepSeek Harness' : 'DeepSeek Harness';
       return () => { document.title = 'DeepSeek Harness'; };
-    }, [panel, title, activeTab]);
+    }, [panel, title, activeTab, activeTitle]);
     return null;
   }
   function Resize({ side, width, actions, onDragging, offset = 0 }) {
@@ -87,7 +108,12 @@ export function createFrameViews(React, deps) {
 
   // Minimal accessible strip used only when the Chrome tab module is unavailable
   // (isolated tests and degraded startup). Production always injects the real one.
-  function FallbackStrip({ tabs, activeId, onSelect, onClose, onAdd, onMove }) {
+  function FallbackStrip({ tabs, activeId, onSelect, onClose, onAdd, onMove, getAppearance }) {
+    const displayTitle = (tab) => {
+      let appearance = null;
+      try { appearance = typeof getAppearance === 'function' ? getAppearance(tab) : null; } catch { /* Fall back to the stored title. */ }
+      return appearance && typeof appearance.name === 'string' && appearance.name ? appearance.name : tab.title;
+    };
     return h('div', { className: 'wsh-tabstrip', role: 'tablist', 'aria-label': copy.settings, 'data-fallback-strip': '' },
       tabs.map((tab, index) => h('div', { key: tab.id, className: 'wsh-tab', 'data-active': tab.id === activeId || undefined },
         h('button', { type: 'button', role: 'tab', id: domId('tab', tab.id), className: 'wsh-tab-button',
@@ -96,8 +122,8 @@ export function createFrameViews(React, deps) {
             if (!onMove || !['Alt+ArrowLeft', 'Alt+ArrowRight'].includes((event.altKey ? 'Alt+' : '') + event.key)) return;
             event.preventDefault();
             onMove(tab.id, Math.max(0, Math.min(tabs.length - 1, index + (event.key === 'ArrowLeft' ? -1 : 1))));
-          } }, tab.title),
-        tab.closable ? h('button', { type: 'button', className: 'wsh-tab-close', 'aria-label': `${copy.close} ${tab.title}`, onClick: () => onClose(tab.id) }, '×') : null)),
+          } }, displayTitle(tab)),
+        tab.closable ? h('button', { type: 'button', className: 'wsh-tab-close', 'aria-label': `${copy.close} ${displayTitle(tab)}`, onClick: () => onClose(tab.id) }, '×') : null)),
       h('button', { type: 'button', className: 'wsh-button', 'aria-label': copy.newWorkspace, onClick: onAdd }, '+'));
   }
 
@@ -199,6 +225,63 @@ export function createFrameViews(React, deps) {
           h('button', { type: 'button', className: 'wsh-button', onClick: () => onClose(tab) }, copy.close)) : null) : null);
   }
 
+  function TabAppearanceDialog({ tab, initial, colors, busy, error, onCancel, onSave }) {
+    const [name, setName] = React.useState(typeof initial?.name === 'string' ? initial.name : '');
+    const [color, setColor] = React.useState(typeof initial?.color === 'string' ? initial.color : '');
+    const input = React.useRef(null);
+    const section = React.useRef(null);
+    React.useEffect(() => {
+      try { input.current?.focus?.({ preventScroll: true }); } catch { /* Focus entry is best effort. */ }
+    }, []);
+    const submit = (event) => {
+      event?.preventDefault?.();
+      if (busy) return;
+      onSave({ name: name.trim(), color: color || null });
+    };
+    const onKeyDown = (event) => {
+      event.stopPropagation?.();
+      if (event.key === 'Escape') {
+        event.preventDefault?.();
+        if (!busy) onCancel();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const items = [...(section.current?.querySelectorAll?.('button:not([disabled]),input:not([disabled])') ?? [])];
+      if (!items.length) return;
+      const active = document?.activeElement;
+      const index = items.indexOf(active);
+      const next = event.shiftKey
+        ? (index <= 0 ? items.length - 1 : index - 1)
+        : (index === items.length - 1 || index < 0 ? 0 : index + 1);
+      event.preventDefault?.();
+      items[next]?.focus?.({ preventScroll: true });
+    };
+    const options = [['', 'none', tabEditorCopy.none], ...colors.map((id) => [id, id, tabEditorCopy.colors[id] ?? id])];
+    return h('div', { className: 'wsh-sheet-backdrop', 'data-tab-editor-backdrop': '' },
+      h('form', {
+        ref: section, className: 'wsh-sheet wsh-tab-editor', role: 'dialog', 'aria-modal': 'true',
+        'aria-labelledby': 'wsh-tab-editor-title', 'data-tab-editor': String(tab.id), onSubmit: submit, onKeyDown,
+      },
+      h('div', { className: 'wsh-sheet-title' }, h('strong', { id: 'wsh-tab-editor-title' }, tabEditorCopy.title)),
+      h('p', { className: 'wsh-muted' }, `${tabEditorCopy.original}${tabEditorCopy.separator}${tab.title ?? ''}`),
+      h('label', { className: 'wsh-field' }, tabEditorCopy.name,
+        h('input', {
+          ref: input, type: 'text', value: name, maxLength: 64, placeholder: tab.title ?? '', disabled: busy,
+          'data-tab-name': '', onChange: (event) => setName(event.target.value),
+        })),
+      h('p', { className: 'wsh-muted' }, tabEditorCopy.hint),
+      h('div', { className: 'wsh-tab-colors', role: 'radiogroup', 'aria-label': tabEditorCopy.marker },
+        options.map(([value, token, label]) => h('button', {
+          key: token, type: 'button', role: 'radio', className: 'wsh-swatch',
+          'aria-checked': (color || '') === value ? 'true' : 'false', 'aria-label': label, title: label,
+          'data-tab-color': token, disabled: busy, onClick: () => setColor(value),
+        }, value ? null : tabEditorCopy.none))),
+      error ? h('p', { className: 'wsh-warning', role: 'alert' }, friendlyError(error)) : null,
+      h('div', { className: 'wsh-sheet-actions' },
+        h('button', { type: 'button', className: 'wsh-button', disabled: busy, onClick: onCancel, 'data-tab-cancel': '' }, tabEditorCopy.cancel),
+        h('button', { type: 'submit', className: 'wsh-button wsh-primary', disabled: busy, 'data-tab-save': '' }, tabEditorCopy.save))));
+  }
+
   function Frame(props) {
     const { useStore, useSessions, usePanelInfo, renderSlot, actions } = props;
     const workspace = deps.workspace;
@@ -212,9 +295,19 @@ export function createFrameViews(React, deps) {
     const tabState = React.useSyncExternalStore(tabStore.subscribe, tabStore.getSnapshot);
     const workspaceInfo = React.useSyncExternalStore(infoStore.subscribe, infoStore.getSnapshot);
     const connections = React.useSyncExternalStore(connectionStore.subscribe, connectionStore.getSnapshot);
+    const appearanceStore = workspace?.appearance ?? fallbackAppearance;
+    React.useSyncExternalStore(appearanceStore.subscribe, appearanceStore.getSnapshot);
+    const appearanceColors = Array.isArray(workspace?.appearanceColors) ? workspace.appearanceColors : EMPTY_COLORS;
+    const appearanceOf = React.useCallback((tab) => {
+      try { return workspace?.getTabAppearance?.(tab) ?? null; } catch { return null; }
+    }, [workspace]);
+    const canEditTab = React.useCallback((tab) => {
+      try { return workspace?.canCustomizeTab?.(tab) === true; } catch { return false; }
+    }, [workspace]);
     const tabs = tabState.tabs;
     const activeId = tabState.activeId ?? 'local';
     const activeTab = tabs.find((tab) => tab.id === activeId) ?? localTab;
+    const activeAppearance = appearanceOf(activeTab);
     const localActive = activeId === 'local';
     const selectionStore = deps.workspaceSelection ?? fallbackWorkspaceSelection;
     const selectedWorkspaceCwd = React.useSyncExternalStore(selectionStore.subscribe, selectionStore.getSnapshot);
@@ -235,12 +328,14 @@ export function createFrameViews(React, deps) {
     const [modals, setModals] = React.useState({});
     const [busy, setBusy] = React.useState('');
     const [errorCode, setErrorCode] = React.useState(null);
+    const [editingTabId, setEditingTabId] = React.useState(null);
     const focusRequest = React.useRef(null);
     const localFocus = React.useRef(null);
     // A Surface may hold an Electron <webview>. Reordering the strip must not move that
     // node in the DOM, so every remote Surface keeps its creation slot for this mount.
     const surfaceSlots = React.useRef({ next: 0, slots: new Map() });
-    const overlayOpen = Object.keys(modals).some((key) => modals[key]);
+    const editingTab = editingTabId ? tabs.find((tab) => tab.id === editingTabId) ?? null : null;
+    const overlayOpen = Object.keys(modals).some((key) => modals[key]) || editingTab !== null;
     const native = document.documentElement.dataset.platform === 'darwin' || document.documentElement.hasAttribute('data-windows-titlebar');
     const g = solveFrame(info, native ? 0 : 56);
     const prior = React.useRef({ width: g.width, toggle: '' });
@@ -265,6 +360,29 @@ export function createFrameViews(React, deps) {
       catch (error) { setErrorCode(safeCode(error)); return undefined; }
       finally { setBusy(''); }
     }, [busy]);
+    const editTab = React.useCallback((id) => {
+      if (!workspace) return;
+      const tab = tabStore.getSnapshot().tabs.find((item) => item.id === id);
+      if (!tab || !canEditTab(tab)) return;
+      setErrorCode(null);
+      setEditingTabId(id);
+    }, [workspace, tabStore, canEditTab]);
+    const cancelAppearance = React.useCallback(() => {
+      setEditingTabId(null);
+      setErrorCode(null);
+    }, []);
+    const saveAppearance = React.useCallback(async (value) => {
+      if (!workspace || !editingTabId) return;
+      const id = editingTabId;
+      const result = await run(`appearance:${id}`, () => workspace.setTabAppearance(id, value));
+      if (result === true) setEditingTabId(null);
+    }, [workspace, editingTabId, run]);
+    React.useEffect(() => {
+      if (editingTabId && !tabs.some((tab) => tab.id === editingTabId)) {
+        setEditingTabId(null);
+        setErrorCode(null);
+      }
+    }, [tabs, editingTabId]);
     const selectTab = React.useCallback(async (id) => {
       if (!workspace) return;
       const tab = tabStore.getSnapshot().tabs.find((item) => item.id === id);
@@ -384,10 +502,11 @@ export function createFrameViews(React, deps) {
       try { return workspace?.getTabStatus?.(tab) ?? null; } catch { return null; }
     }, [workspace]);
     const stripProps = {
-      tabs, activeId, getStatus: statusOf,
+      tabs, activeId, getStatus: statusOf, getAppearance: appearanceOf,
+      labels: { edit: english ? 'Edit tab name and color' : '编辑页签名称与彩色标记' },
       onSelect: (id) => void selectTab(id),
       onClose: (id) => { const tab = tabs.find((item) => item.id === id); if (tab) void closeTab(tab); },
-      ...(workspace ? { onAdd: () => void addLauncher(), onMove: moveTab } : {}),
+      ...(workspace ? { onAdd: () => void addLauncher(), onMove: moveTab, onEdit: editTab, canEdit: canEditTab } : {}),
     };
     const tabsView = ChromeTabStrip
       ? h(ChromeTabStrip, stripProps)
@@ -408,7 +527,7 @@ export function createFrameViews(React, deps) {
       onTransitionEnd: (event) => { if (event.target === root.current && event.propertyName === 'grid-template-columns') setAnimating(false); },
     },
       h('style', { 'data-workspace-shell-style': true }, [css, launcherCss, chromeCss, extension?.css].filter(Boolean).join('\n')),
-      h(Title, { useSessions, usePanelInfo, activeTab }),
+      h(Title, { useSessions, usePanelInfo, activeTab, appearance: activeAppearance }),
       h('header', { className: 'wsh-header', inert: overlayOpen, 'aria-hidden': overlayOpen },
         document.documentElement.dataset.platform === 'darwin' && g.sidebar === 0 && h('div', {
           className: 'wsh-leading', 'data-shell-leading': true, 'data-local-active': localActive,
@@ -435,6 +554,10 @@ export function createFrameViews(React, deps) {
         onError: setErrorCode, onRetry: retryTab, onClose: closeTab,
         onModalChange: setModalFor,
       })),
+      editingTab ? h(TabAppearanceDialog, {
+        key: editingTab.id, tab: editingTab, initial: appearanceOf(editingTab), colors: appearanceColors,
+        busy: Boolean(busy), error: errorCode, onCancel: cancelAppearance, onSave: saveAppearance,
+      }) : null,
       extension?.Overlay ? h(extension.Overlay, { onModalChange: setExtensionModal, locale: activeLocale }) : null,
       sessionExtension?.Overlay ? h(sessionExtension.Overlay, { onModalChange: setSessionModal }) : null);
   }

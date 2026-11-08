@@ -5,6 +5,7 @@ import { createLocalRuntimeService } from './src/host/local-runtimes.js';
 import { createWorkspacePreferencesStore } from './src/host/workspace-preferences-store.js';
 import { registerShellRoutes } from './src/host/routes.js';
 import { registerWorkspaceRuntimeTool } from './src/host/runtime-tool.js';
+import { removeContextAds } from './src/host/context-ads.js';
 import { apply as registerSessionHost, inject as sessionHostInject } from './session-host/index.js';
 
 export const inject = [...new Set(['connection', 'profileContext', 'subprocess', 'tools', ...sessionHostInject])];
@@ -20,6 +21,15 @@ const storageDomainOf = (ctx) => {
 };
 
 export async function apply(ctx) {
+  // dsh-context ships sponsor cards inside its own Client bundle. Remove them
+  // when that plugin is installed; an absent plugin is an ordinary no-op.
+  removeContextAds({
+    profileContext: ctx.profileContext,
+    logger: ctx.logger,
+    clientModules: (() => {
+      try { return ctx.get('clientModules', false); } catch { return undefined; }
+    })(),
+  });
   await registerSessionHost(ctx);
   const service = createLocalRuntimeService({ subprocess: ctx.subprocess, profileContext: ctx.profileContext, expectedVersion: '0.2.1-rc.5' });
   ctx.provide('workspaceLocalRuntimes', service);

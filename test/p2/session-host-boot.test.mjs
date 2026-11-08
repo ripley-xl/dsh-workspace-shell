@@ -41,6 +41,9 @@ test('real plugin inventory exposes only nested SSH; its persisted switch preser
   let ctx;
   const routes = new Map();
   let opens = 0, closes = 0;
+  // Routes this bundle registers through `connection.fetch`; the overlay's plugin-manager
+  // contributes its own route to the same map.
+  const ownedRoutes = () => [...routes.keys()].filter((path) => /^\/api\/(?:workspace-shell|workspace-session-hosts|ssh-remote)\//u.test(path));
   try {
     await mkdir(root + '/sessions');
     await mkdir(root + '/node_modules/@local', { recursive: true });
@@ -91,7 +94,10 @@ test('real plugin inventory exposes only nested SSH; its persisted switch preser
     }
     assert.equal(opens, 2); assert.equal(closes, 2);
     assert.equal((await ctx.pluginManager.setBundleEnabled('dsh-workspace-shell', false)).application, 'applied');
-    assert.equal(routes.size, 0, 'bundle deactivation removes core routes too');
+    // DSH 0.2.2's plugin-manager registers its own /api/plugin-manager route through the same
+    // `connection.fetch` map, so the map is not empty after this bundle leaves. Assert on the
+    // routes this bundle owns instead of the map size.
+    assert.deepEqual(ownedRoutes(), [], 'bundle deactivation removes core routes too');
     assert.equal(ctx.get('workspaceSessionHosts'), undefined);
     assert.equal((await ctx.pluginManager.setBundleEnabled('dsh-workspace-shell', true)).application, 'applied');
     assert.ok(ctx.get('workspaceSessionHosts'));
@@ -107,7 +113,7 @@ test('real plugin inventory exposes only nested SSH; its persisted switch preser
     assert.ok(routes.has('/api/ssh-remote/status'), 'legacy empty core config defaults to the SSH child');
     assert.equal(ctx.workspaceSessionHosts, renewedRegistry);
     await ctx.fiber.dispose(); ctx = null;
-    assert.equal(routes.size, 0, 'unloading the complete bundle releases its routes');
+    assert.deepEqual(ownedRoutes(), [], 'unloading the complete bundle releases its routes');
   } finally { await ctx?.fiber.dispose(); await rm(root, { recursive: true, force: true }); }
 });
 

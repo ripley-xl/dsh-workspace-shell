@@ -679,9 +679,22 @@ export function createLocalRuntimeService(options) {
     return { ready, drain };
   }
 
+  // A profile that installs the guest package already loads its own bridge; the
+  // boot patch is only the fallback for profiles that do not.
+  async function profileHasGuest(profileId) {
+    try {
+      const profile = await loadProfile(profileId, { allowCurrent: true });
+      const bundles = profile.manifest?.dsh?.profile?.bundles;
+      return Array.isArray(bundles) && bundles.includes('dsh-workspace-guest');
+    } catch {
+      return false;
+    }
+  }
+
   async function startWeb(record, executable, signal) {
+    const guestPatch = WEB_CWD_PATCH && !await profileHasGuest(record.profileId) ? ['--patch', WEB_CWD_PATCH] : [];
     record.handle = subprocess.spawn({
-      argv: [executable, '--profile', record.profileId, ...(WEB_CWD_PATCH ? ['--patch', WEB_CWD_PATCH] : []), '--no-open', '--host', '127.0.0.1', '--port', '0'],
+      argv: [executable, '--profile', record.profileId, ...guestPatch, '--no-open', '--host', '127.0.0.1', '--port', '0'],
       cwd: await verifiedCwd(),
       stdio: { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' },
       graceMs,

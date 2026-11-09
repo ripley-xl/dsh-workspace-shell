@@ -159,7 +159,7 @@ async function fixture(t, options = {}) {
   const cwd = path.join(root, 'work');
   await fs.mkdir(cwd, { recursive: true });
   await writeJson(path.join(current, 'package.json'), { name: 'current', dsh: { profile: { bundles: ['@deepseek-ai/dsh-web-app'] } } });
-  await writeJson(path.join(web, 'package.json'), { name: 'web', dsh: { profile: { bundles: ['@deepseek-ai/dsh-web-app'] } } });
+  await writeJson(path.join(web, 'package.json'), { name: 'web', dsh: { profile: { bundles: ['@deepseek-ai/dsh-web-app', ...(options.guestBundled ? ['dsh-workspace-guest'] : [])] } } });
   await writeJson(path.join(tui, 'package.json'), { name: 'tui', dsh: { profile: { bundles: ['@deepseek-harness-tui/dsh-tui'] } } });
   await writeJson(path.join(tui, 'node_modules', '@deepseek-harness-tui', 'dsh-tui', 'package.json'), { name: '@deepseek-harness-tui/dsh-tui', version: TUI_VERSION });
   const subprocess = options.subprocess ?? fakeSubprocess();
@@ -250,6 +250,14 @@ test('Web reuses only the same owner Host and rejects cross-owner URL access', a
   await service.stop({ runtimeId: first.runtimeId, ownerId: 'owner' });
   assert.equal((await service.catalog()).runtimes[0].phase, 'exited');
   await expectCode(() => service.attachWeb({ runtimeId: first.runtimeId, ownerId: 'owner' }), 'RUNTIME_NOT_ACTIVE');
+});
+
+test('a web profile that installs the guest bundle starts without the boot patch', async (t) => {
+  const { service, subprocess } = await fixture(t, { guestBundled: true });
+  const opened = await service.openWeb({ profileId: 'web', ownerId: 'owner', confirmIndependentHost: true });
+  const web = subprocess.calls.spawn.find((spec) => !spec.argv.includes('--version'));
+  assert.equal(web.argv.includes('--patch'), false);
+  await service.stop({ runtimeId: opened.runtimeId, ownerId: 'owner' });
 });
 
 test('CLI version is recorded on the runtime instead of gating startup', async (t) => {

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "工作区框架",
+    "description": "重绘页面框架，保留现有 DSH Slot、会话和插件服务。"
+  }
+}

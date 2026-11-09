@@ -1,0 +1,14 @@
+node_modules/
+artifacts/
+*.log
+.DS_Store
+coverage/
+.brainstorm/
+.cache/
+.build/
+dbg*.tmp.mjs
+tianshu-*.json
+reference-sources/
+desktop-web-migration/
+.dsh-update/
+工作记录-*.md

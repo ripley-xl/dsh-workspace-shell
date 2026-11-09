@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "SSH Remote",
+    "description": "SSH connections, remote tabs and port forwards in New workspace. Disabling preserves connection settings and remote Hosts."
+  }
+}

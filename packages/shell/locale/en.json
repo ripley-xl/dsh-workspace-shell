@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Workspace Shell",
+    "description": "Redraws the application frame while preserving existing DSH Slots and services."
+  }
+}

@@ -1,0 +1,7 @@
+- insert:
+    - id: ssh-remote-status
+      name: '@local/dsh-ssh-remote-status'
+      config:
+        hostAlias: p0-linux
+        localReturnUrl: http://127.0.0.1:54542
+        dshVersion: 0.2.1-rc.5

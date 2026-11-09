@@ -1,0 +1,7 @@
+- id: tui-runner
+  name: '@huiliyi37/dsh-tianshu-tui'
+  inject: ['profileContext']
+  config:
+    prefsPath: !!js "ctx.profileContext.cwd + '/tianshu-prefs.json'"
+    inputHistoryPath: !!js "ctx.profileContext.cwd + '/tianshu-input-history.json'"
+    autoRestartOnUpdate: false

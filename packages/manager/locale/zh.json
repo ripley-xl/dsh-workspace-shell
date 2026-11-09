@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "SSH Remote",
+    "description": "在新建工作区中管理 SSH 连接、远端页签和端口转发。停用后保留连接配置与远端 Host。"
+  }
+}

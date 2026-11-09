@@ -6846,7 +6846,7 @@ return {
 return { createWorkspaceSelection, createShellPlugin };
 })();
 const { createWorkspaceSelection, createShellPlugin } = m17;
-// ---- module: ../session-host/submissions ----
+// ---- module: ../../guest/session-host/submissions ----
 const m18 = (() => {
 // Observe the public Session prompt boundary without changing admission or draft restoration.
 function observeSessionSubmissions(sessions, { failed, succeeded }) {
@@ -6910,7 +6910,7 @@ function applyTransferredDraft(ctx, sessionId, draft, received) {
 return { observeSessionSubmissions, applyTransferredDraft };
 })();
 const { observeSessionSubmissions, applyTransferredDraft } = m18;
-// ---- module: ../session-host/controller ----
+// ---- module: ../../guest/session-host/controller ----
 const m19 = (() => {
 const validToken = (value) => typeof value === 'string' && /^[a-f0-9]{32}$/.test(value);
 const fail = (code) => Object.assign(new Error(code), { code });
@@ -7142,7 +7142,7 @@ function createSessionHostClient({ ctx, window, applyDraft }) {
 return { createSessionHostClient };
 })();
 const { createSessionHostClient } = m19;
-// ---- module: ../session-host/ui ----
+// ---- module: ../../guest/session-host/ui ----
 const m20 = (() => {
 const sessionHostCss = `
 .wsh-session-notice{display:flex;align-items:center;flex-wrap:wrap;gap:8px;width:calc(100% - var(--dsh-composer-side-clearance,16px) - var(--dsh-composer-side-clearance,16px));max-width:var(--dsh-composer-card-max-width,760px);margin:0 auto;box-sizing:border-box;padding:8px 0;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;letter-spacing:0}

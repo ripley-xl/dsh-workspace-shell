@@ -3,12 +3,24 @@ import { promises as nodeFs } from 'node:fs';
 import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { readTuiDeclaration, tuiAdapter, tuiEnvironment, tuiPackageName } from './tui-adapters.js';
 import { parseCommandLine } from './command-line.js';
 import { isNewerVersion } from './registry.js';
 
 const WEB_BUNDLE = '@deepseek-ai/dsh-web-app';
-const WEB_CWD_PATCH = fileURLToPath(new URL('../../guest-cwd/cordis.patch.yml', import.meta.url));
+const requireGuest = createRequire(import.meta.url);
+// The guest Host package provides the profile patch every Web Guest runs. A
+// profile that cannot resolve it still starts; its Guest pages simply lack the
+// guest Client.
+const WEB_CWD_PATCH = (() => {
+  try {
+    const manifest = requireGuest.resolve('dsh-workspace-guest/package.json');
+    return path.join(path.dirname(manifest), 'cordis.patch.yml');
+  } catch {
+    return null;
+  }
+})();
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 const MAX_PACKAGE_BYTES = 1024 * 1024;
 const MAX_VERSION_BYTES = 64 * 1024;
@@ -669,7 +681,7 @@ export function createLocalRuntimeService(options) {
 
   async function startWeb(record, executable, signal) {
     record.handle = subprocess.spawn({
-      argv: [executable, '--profile', record.profileId, '--patch', WEB_CWD_PATCH, '--no-open', '--host', '127.0.0.1', '--port', '0'],
+      argv: [executable, '--profile', record.profileId, ...(WEB_CWD_PATCH ? ['--patch', WEB_CWD_PATCH] : []), '--no-open', '--host', '127.0.0.1', '--port', '0'],
       cwd: await verifiedCwd(),
       stdio: { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' },
       graceMs,

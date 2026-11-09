@@ -1,4 +1,4 @@
 - insert:
-    - id: workspace-shell-guest-notify
+    - id: workspace-guest
       name: ./index.js
       config: {}

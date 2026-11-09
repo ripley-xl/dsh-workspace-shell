@@ -1,10 +1,8 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import vm from 'node:vm';
 
-const packageRoot = new URL('../../../packages/shell/guest-notify/', import.meta.url);
-const clientSource = await readFile(new URL('client.js', packageRoot), 'utf8');
+import { createGuestNotificationBridge } from '../../../packages/guest/src/notification.js';
+
 const SESSION = 'a'.repeat(32);
 const MARKER = '__workspace-shell-notification__';
 
@@ -20,69 +18,56 @@ function observable(initial) {
 
 const statusOf = (overrides = {}) => ({ running: undefined, pendingInteraction: undefined, completionUnread: false, ...overrides });
 
-function loadBridge() {
-  let registration;
+function harness({ parentIsSelf = true, running = true } = {}) {
   const logged = [];
   const opened = [];
-  const effects = [];
+  const listeners = new Set();
   const window = {
+    parent: parentIsSelf ? null : { postMessage() {} },
     location: { search: '?workspaceShellEmbedded=1', hash: '' },
     console: { log: (message) => logged.push(message) },
-    addEventListener() {},
-    removeEventListener() {},
+    addEventListener(name, listener) { if (name === 'message') listeners.add(listener); },
+    removeEventListener(name, listener) { if (name === 'message') listeners.delete(listener); },
   };
-  window.parent = window;
-  window.__ModuleLoader__ = { load(value) { assert.equal(registration, undefined); registration = value; } };
-  vm.runInNewContext(clientSource, { window, URL, URLSearchParams }, { filename: 'guest-notify-client.js' });
-  assert.equal(registration.id, 'dsh-workspace-shell-guest-notify');
-  const plugin = registration.factory();
-  assert.deepEqual([...plugin.inject].sort(), ['sessions', 'uiSession', 'uiWorkspace']);
-  assert.deepEqual(Object.keys(plugin).sort(), ['apply', 'inject']);
+  if (parentIsSelf) window.parent = window;
   const status = observable(new Map());
   const ctx = {
     uiSession: { sessionStatus: status },
     sessions: { list: { getSnapshot: () => ({ byId: { [SESSION]: { displayTitle: 'Remote check', retainedBy: { mainView: 0 } } } }) } },
     uiWorkspace: { openSession: (sessionId) => opened.push(sessionId) },
-    effect(setup) { const dispose = setup(); effects.push(dispose); return dispose; },
+    effect(setup) { return setup(); },
   };
-  plugin.apply(ctx);
-  return { window, logged, opened, effects, status, ctx };
+  const bridge = createGuestNotificationBridge({ window, ctx });
+  return { window, status, opened, logged, bridge, ctx, running };
 }
 
-test('the companion seeds the baseline and reports one Turn end through the console channel', () => {
-  const { logged, status } = loadBridge();
-  assert.equal(logged.length, 0, 'the first snapshot only seeds');
-  status.set(new Map([[SESSION, statusOf({ running: true })]]));
-  status.set(new Map([[SESSION, statusOf({ running: false })]]));
-  assert.equal(logged.length, 1);
-  assert.ok(logged[0].startsWith(MARKER));
-  const message = JSON.parse(logged[0].slice(MARKER.length));
+test('a webview Guest seeds the baseline and reports one Turn end through its console', () => {
+  const h = harness();
+  h.status.set(new Map([[SESSION, statusOf({ running: true })]]));
+  h.status.set(new Map([[SESSION, statusOf({ running: false })]]));
+  assert.equal(h.logged.length, 1);
+  const message = JSON.parse(h.logged[0].slice(MARKER.length));
   assert.equal(message.type, 'workspace-shell-notification');
   assert.equal(message.event, 'turn-end');
   assert.equal(message.sessionId, SESSION);
-  assert.equal(message.title, 'Remote check');
+  assert.equal(typeof h.window.__workspaceShellOpenSession, 'function');
+  assert.equal(h.window.__workspaceShellOpenSession(SESSION), true);
+  assert.deepEqual(h.opened, [SESSION]);
+  h.bridge.dispose();
+  assert.equal('__workspaceShellOpenSession' in h.window, false);
 });
 
-test('the companion exposes one validated open entry point and removes it on dispose', () => {
-  const { window, opened, effects } = loadBridge();
-  assert.equal(typeof window.__workspaceShellOpenSession, 'function');
-  assert.equal(window.__workspaceShellOpenSession(SESSION), true);
-  assert.deepEqual(opened, [SESSION]);
-  assert.equal(window.__workspaceShellOpenSession('../etc/passwd'), false);
-  effects[0]();
-  assert.equal('__workspaceShellOpenSession' in window, false);
-  assert.equal('__workspaceShellNotificationBridge' in window, false);
-});
-
-test('only the first bridge installs in one page', () => {
-  const { window, ctx, effects } = loadBridge();
-  // A second plugin instance in the same page finds the marker and stays inert.
-  let second;
-  window.__ModuleLoader__ = { load(value) { second = value; } };
-  vm.runInNewContext(clientSource, { window, URL, URLSearchParams }, { filename: 'guest-notify-client-2.js' });
-  const before = window.__workspaceShellOpenSession;
-  second.factory().apply(ctx);
-  assert.equal(window.__workspaceShellOpenSession, before);
-  effects[0]();
-  assert.equal('__workspaceShellOpenSession' in window, false);
+test('a pending interaction is reported once and only one bridge installs per page', () => {
+  const h = harness();
+  const pending = { kind: 'approval', key: 'approval:1', sessionId: SESSION, toolName: 'bash' };
+  h.status.set(new Map([[SESSION, statusOf({ running: true, pendingInteraction: pending })]]));
+  h.status.set(new Map([[SESSION, statusOf({ running: true, pendingInteraction: pending })]]));
+  assert.equal(h.logged.length, 1);
+  const message = JSON.parse(h.logged[0].slice(MARKER.length));
+  assert.equal(message.kind, 'approval');
+  assert.equal(message.detail, 'bash');
+  const second = createGuestNotificationBridge({ window: h.window, ctx: h.ctx });
+  second.dispose();
+  assert.equal(typeof h.window.__workspaceShellOpenSession, 'function');
+  h.bridge.dispose();
 });

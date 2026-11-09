@@ -14,11 +14,13 @@ const pack = async (name) => {
   const manifest = JSON.parse(await readFile(resolve(staging, 'package.json'), 'utf8'));
   if (name === 'shell') {
     manifest.dependencies['@local/dsh-ssh-remote'] = `file:${managerTar}`;
+    manifest.dependencies['dsh-workspace-guest'] = `file:${guestTar}`;
     await writeFile(resolve(staging, 'package.json'), JSON.stringify(manifest, null, 2) + '\n');
   }
   const result = JSON.parse(execFileSync('npm', ['pack', '--json', '--pack-destination', output], { cwd: staging, encoding: 'utf8' }));
   return resolve(output, result[0].filename);
 };
 const managerTar = await pack('manager');
+const guestTar = await pack('guest');
 const shellTar = await pack('shell');
-console.log(JSON.stringify({ managerTar, shellTar }, null, 2));
+console.log(JSON.stringify({ managerTar, guestTar, shellTar }, null, 2));

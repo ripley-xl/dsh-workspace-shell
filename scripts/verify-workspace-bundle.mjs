@@ -8,13 +8,18 @@ if (!process.argv[2]) throw new Error('Usage: node scripts/verify-workspace-bund
 const release = resolve(process.argv[2]);
 const home = await mkdtemp('/tmp/wsh-package-');
 try {
-  for (const name of ['shell', 'manager']) {
+  const expected = {
+    shell: ['index.js', 'client.js'],
+    manager: ['client.js'],
+    guest: ['index.js', 'client.js', 'session-host/index.js', 'session-host/controller.js', 'src/host/session-hosts.js'],
+  };
+  for (const name of ['shell', 'manager', 'guest']) {
     const manifest = JSON.parse(await readFile(join(release, name, 'package.json'), 'utf8'));
     const filename = manifest.name.replace('@', '').replace('/', '-') + '-' + manifest.version + '.tgz';
     const directory = join(home, name);
     await mkdir(directory);
     execFileSync('tar', ['-xzf', join(release, filename), '-C', directory, '--strip-components=1']);
-    for (const relative of name === 'shell' ? ['client.js', 'session-host/index.js', 'session-host/submissions.js', 'src/host/session-hosts.js', 'src/host/session-views.js'] : ['client.js']) {
+    for (const relative of expected[name]) {
       assert.deepEqual(await readFile(join(directory, relative)), await readFile(join(release, name, relative)), relative);
     }
   }
@@ -22,6 +27,7 @@ try {
   await mkdir(join(profile, 'node_modules/@local'), { recursive: true });
   await symlink(join(home, 'shell'), join(profile, 'node_modules/dsh-workspace-shell'));
   await symlink(join(home, 'manager'), join(profile, 'node_modules/@local/dsh-ssh-remote'));
+  await symlink(join(home, 'guest'), join(profile, 'node_modules/dsh-workspace-guest'));
   await writeFile(join(profile, 'package.json'), JSON.stringify({ dsh: { profile: { bundles: ['dsh-workspace-shell'] } } }));
   const loaded = loadProfileDirectory('workspace-test', profile, '/opt/homebrew/lib/node_modules/@deepseek-ai/dsh/package.json');
   assert.deepEqual(loaded.skippedBundles, []);

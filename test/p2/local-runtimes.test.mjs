@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { createLocalRuntimeService } from '../../packages/shell/src/host/local-runtimes.js';
 
 const VERSION = '0.2.1-rc.5';
-const WEB_CWD_PATCH = fileURLToPath(new URL('../../packages/shell/guest-cwd/cordis.patch.yml', import.meta.url));
+const WEB_CWD_PATCH = fileURLToPath(new URL('../../packages/guest/cordis.patch.yml', import.meta.url));
 const TUI_VERSION = '0.18.0';
 const TEMP_PREFIX = path.join(os.tmpdir(), 'dsh-local-runtimes-');
 const SECRET = 'private-token-never-report';

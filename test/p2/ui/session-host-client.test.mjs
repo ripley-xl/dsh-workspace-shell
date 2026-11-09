@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import React from 'react';
 import { create, act } from 'react-test-renderer';
-import { createSessionHostClient } from '../../../packages/shell/session-host/controller.js';
-import { observeSessionSubmissions, applyTransferredDraft } from '../../../packages/shell/session-host/submissions.js';
-import { createSessionHostPlugin, sessionHostCss } from '../../../packages/shell/session-host/ui.js';
+import { createSessionHostClient } from '../../../packages/guest/session-host/controller.js';
+import { observeSessionSubmissions, applyTransferredDraft } from '../../../packages/guest/session-host/submissions.js';
+import { createSessionHostPlugin, sessionHostCss } from '../../../packages/guest/session-host/ui.js';
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const a = 'a'.repeat(32), b = 'b'.repeat(32), v = 'c'.repeat(32), tab = 'd'.repeat(32);

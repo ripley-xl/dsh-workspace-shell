@@ -8,8 +8,18 @@ SSH Remote 在本地和远程 DSH Web 之间切换。Desktop 使用当前窗口�
 
 实现依据见[设计说明](<docs/ssh-remote-design.md>)，当前测试范围见[验证记录](<docs/ssh-remote-p2-validation.md>)。
 
+## 包结构
+
+| 包 | 安装位置 | 职责 |
+| --- | --- | --- |
+| `dsh-workspace-shell` | 仅 Desktop 的 `desktop` profile | 页签框架、launcher、SSH 管理、本机 Web/TUI 运行时、通知中心、Guest 通道 |
+| `dsh-workspace-guest` | 所有 guest Web profile（`web`、SSH 远端、以后新增的 profile） | 会话状态上报与通知桥、cwd 读取、跨 Host 会话登记/导航；不挂框架 |
+
+宿主端的本机 Web 运行时用 `--patch` 注入 guest 包作为兜底；远端运行包内置 `plugins/guest`，由连接补丁注入，远端 profile 无需安装插件。
+
 ## 已实现
 
+- `0.5.27` 拆出 `dsh-workspace-guest` 来宾端包：Desktop 只装宿主端，guest profile 只装来宾端；本机 Web 由宿主端注入兜底，远端运行包内置；
 - `0.5.26` 修复 SSH 远程页签的通知不上报：登录重定向会清掉查询参数，嵌入标记改为始终写在 URL fragment 里，远端伴生插件才能安装；
 - `0.5.25` 远程 Web 页签的通知改用运行包内置伴生插件：远端 profile 不必安装 Shell，连接补丁自动加载 `guest-notify`；本地页签与本机 Web Guest 的行为不变；
 - `0.5.24` 本地与远程 Web 页签的回合结束、等待批准、等待回答、计划待确认透传为 Desktop 原生通知；标题为会话名，正文带场景、细节和页签名，同一会话只保留一条；点击切到对应页签并打开会话。窗口聚焦且正看着该会话时不打扰。设计见[通知透传说明](docs/desktop-notifications-design.md)，验证结果见[通知验证记录](docs/desktop-notifications-validation.md)；

@@ -11,6 +11,7 @@ export function createGuestPlugin(React, deps) {
     apply(ctx) {
       sessions?.apply(ctx);
       installGuestCwd(ctx, deps.window);
+      installClipboardFallback(deps.window, deps.document);
       const bridge = createGuestNotificationBridge({ window: deps.window, ctx });
       try {
         ctx.effect(() => () => bridge.dispose(), 'workspace guest notifications');

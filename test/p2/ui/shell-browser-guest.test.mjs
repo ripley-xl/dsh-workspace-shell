@@ -132,6 +132,7 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
 function loadedFrameAttributes(element) {
   return {
     sandbox: 'allow-scripts allow-same-origin allow-forms allow-modals',
+    allow: 'clipboard-write; clipboard-read',
     referrerpolicy: 'no-referrer',
   };
 }

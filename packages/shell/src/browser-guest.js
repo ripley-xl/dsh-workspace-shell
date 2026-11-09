@@ -264,6 +264,9 @@ export function createBrowserGuest({
     try {
       const current = document.createElement('iframe');
       current.setAttribute('sandbox', SANDBOX);
+      // Cross-origin frames need an explicit Permissions Policy delegation for
+      // the Clipboard API; without it every copy action in the Guest fails.
+      current.setAttribute('allow', 'clipboard-write; clipboard-read');
       current.setAttribute('referrerpolicy', 'no-referrer');
       Object.assign(current.style, {
         border: '0',

@@ -455,8 +455,60 @@ function installGuestCwd(ctx, window) {
 return { installGuestCwd };
 })();
 const { installGuestCwd } = m1;
-// ---- module: ../session-host/submissions ----
+// ---- module: clipboard ----
 const m2 = (() => {
+// Copy actions inside a Guest run in a cross-origin frame or a webview, where
+// navigator.clipboard.writeText can reject on a Permissions Policy or focus
+// check. DSH's copy path returns false on that rejection instead of falling
+// back, so the Guest installs the fallback itself: try the modern API first and
+// use a select+copy textarea only when it fails.
+function installClipboardFallback(window, document) {
+  let clipboard;
+  try {
+    clipboard = window.navigator?.clipboard;
+  } catch {
+    clipboard = null;
+  }
+  if (!clipboard || typeof clipboard.writeText !== 'function') return false;
+  const original = clipboard.writeText.bind(clipboard);
+  const fallback = (text) => {
+    let area;
+    try {
+      area = document.createElement('textarea');
+      area.value = text;
+      area.setAttribute('readonly', '');
+      area.style.position = 'fixed';
+      area.style.top = '0';
+      area.style.left = '0';
+      area.style.opacity = '0';
+      document.body.appendChild(area);
+      area.select();
+      const copied = document.execCommand('copy');
+      if (!copied) throw new Error('copy denied');
+    } finally {
+      try { area?.remove(); } catch { /* The detached area is already gone. */ }
+    }
+  };
+  const writeText = async (text) => {
+    try {
+      return await original(text);
+    } catch {
+      fallback(typeof text === 'string' ? text : String(text));
+    }
+  };
+  try {
+    Object.defineProperty(clipboard, 'writeText', { configurable: true, value: writeText });
+    return clipboard.writeText === writeText;
+  } catch {
+    return false;
+  }
+}
+
+return { installClipboardFallback };
+})();
+const { installClipboardFallback } = m2;
+// ---- module: ../session-host/submissions ----
+const m3 = (() => {
 // Observe the public Session prompt boundary without changing admission or draft restoration.
 function observeSessionSubmissions(sessions, { failed, succeeded }) {
   const bindings = new Map();
@@ -518,9 +570,9 @@ function applyTransferredDraft(ctx, sessionId, draft, received) {
 
 return { observeSessionSubmissions, applyTransferredDraft };
 })();
-const { observeSessionSubmissions, applyTransferredDraft } = m2;
+const { observeSessionSubmissions, applyTransferredDraft } = m3;
 // ---- module: ../session-host/controller ----
-const m3 = (() => {
+const m4 = (() => {
 const validToken = (value) => typeof value === 'string' && /^[a-f0-9]{32}$/.test(value);
 const fail = (code) => Object.assign(new Error(code), { code });
 
@@ -750,9 +802,9 @@ function createSessionHostClient({ ctx, window, applyDraft }) {
 
 return { createSessionHostClient };
 })();
-const { createSessionHostClient } = m3;
+const { createSessionHostClient } = m4;
 // ---- module: ../session-host/ui ----
-const m4 = (() => {
+const m5 = (() => {
 const sessionHostCss = `
 .wsh-session-notice{display:flex;align-items:center;flex-wrap:wrap;gap:8px;width:calc(100% - var(--dsh-composer-side-clearance,16px) - var(--dsh-composer-side-clearance,16px));max-width:var(--dsh-composer-card-max-width,760px);margin:0 auto;box-sizing:border-box;padding:8px 0;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;letter-spacing:0}
 .wsh-session-notice>span{flex:1 1 180px;min-width:0;overflow-wrap:anywhere}
@@ -820,9 +872,9 @@ function createSessionHostPlugin(React, primitives, deps) {
 
 return { sessionHostCss, createSessionHostPlugin };
 })();
-const { sessionHostCss, createSessionHostPlugin } = m4;
+const { sessionHostCss, createSessionHostPlugin } = m5;
 // ---- module: entry ----
-const m5 = (() => {
+const m6 = (() => {
 // Guest-side Client entry. A guest Web Host runs only this plugin: it registers
 // its Session view for cross-Host navigation, answers the cwd question, and
 // reports notification transitions to the framing Shell. It never mounts a
@@ -836,6 +888,7 @@ function createGuestPlugin(React, deps) {
     apply(ctx) {
       sessions?.apply(ctx);
       installGuestCwd(ctx, deps.window);
+      installClipboardFallback(deps.window, deps.document);
       const bridge = createGuestNotificationBridge({ window: deps.window, ctx });
       try {
         ctx.effect(() => () => bridge.dispose(), 'workspace guest notifications');
@@ -848,6 +901,6 @@ function createGuestPlugin(React, deps) {
 
 return { createGuestPlugin };
 })();
-const { createGuestPlugin } = m5;
+const { createGuestPlugin } = m6;
 return createGuestPlugin(React,{createSessionHostPlugin,createSessionHostClient,observeSessionSubmissions,applyTransferredDraft,sessionHostCss,installGuestCwd,createGuestNotificationBridge,primitives,document,window});
 }});

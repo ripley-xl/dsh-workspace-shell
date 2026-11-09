@@ -4839,7 +4839,8 @@ function createSessionNotificationMonitor({ status, list, report }) {
     } catch {
       return;
     }
-    if (!(snapshot instanceof Map)) return;
+    // Duck-typed so a page whose Map constructor differs from the Shell's still reports.
+    if (!snapshot || typeof snapshot.forEach !== 'function') return;
     const next = new Map();
     for (const [sessionId, value] of snapshot) {
       if (typeof sessionId !== 'string' || !NOTIFICATION_ID.test(sessionId)) continue;
@@ -4946,6 +4947,15 @@ function createGuestNotificationBridge({ window, ctx }) {
   };
   const useConsole = !embeddedWindow(window);
   if (!useConsole && !parentOrigin) return Object.freeze({ dispose() {} });
+  // The Shell Client and the remote companion may both load in one page; only the
+  // first one installs a bridge, so one transition is never reported twice.
+  const marker = '__workspaceShellNotificationBridge';
+  try {
+    if (window[marker] === true) return Object.freeze({ dispose() {} });
+    window[marker] = true;
+  } catch {
+    // A window that refuses the marker still gets a working bridge.
+  }
   let disposed = false;
   const monitor = createSessionNotificationMonitor({
     status: ctx?.uiSession?.sessionStatus,
@@ -5032,6 +5042,11 @@ function createGuestNotificationBridge({ window, ctx }) {
       monitor.dispose();
       remove();
       seen.clear();
+      try {
+        if (window[marker] === true) Reflect.deleteProperty(window, marker);
+      } catch {
+        // The page is going away with the bridge.
+      }
     },
   });
 }

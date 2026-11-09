@@ -11,6 +11,7 @@ Desktop 窗口里的本地 Web 页签和远程 Web 页签，在回合结束或�
 - 普通浏览器打开的 Web 不弹系统通知；
 - TUI 页签没有可采集的前端状态；
 - 页签关闭后不再产生事件；
+- 远程通知要求远端运行包含 `guest-notify` 伴生插件；旧运行包没有该插件，页签本身仍可正常使用；
 - webview 通道依赖页内 `console.log`，guest 页面的控制台会多出带前缀的日志行；DSH 自身的日志采集不读这些行。
 
 ## 方案
@@ -82,6 +83,12 @@ Desktop 窗口里的本地 Web 页签和远程 Web 页签，在回合结束或�
 3. 页签为 `local`：直接调用 `ctx.uiWorkspace.openSession(sessionId)`。
 4. 其他页签：先 `workspace.activate(tabId)`；激活成功后向该页签发 `workspace-shell-open-session`，页内收到后调用 `ctx.uiWorkspace.openSession(sessionId)`。
 5. 页签已关闭、激活失败或页内没有响应时不报错，通知点击只完成已完成的步骤。
+
+## 远程运行包伴生插件
+
+远端 DSH profile 不装 Shell，页面里也就没有采集器。为此运行包内置 `plugins/guest-notify`：Host 侧空实现，Client 侧复用同一份采集器和 webview 通道。每次连接时由状态补丁把它和状态、guest-cwd 一起注入远端 Host，因此远程页签不需要安装任何插件就能上报通知。
+
+Shell 和伴生插件可能同时出现在一个页面（例如以后的远端 profile 也装了 Shell）。两者用 `window.__workspaceShellNotificationBridge` 标记保证只有一个安装，卸载时释放标记。
 
 ## 通道协议
 

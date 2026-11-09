@@ -7,7 +7,7 @@ DeepSeek Harness 的工作区插件：在同一个窗口里开多个页签，本
 - **工作区页签**：Local 常驻，`+` 打开 launcher，可选本机 profile 的 Web/TUI 或 SSH 主机；页签支持拖拽排序、自定义名称和五色标记，顺序与外观按 profile 保存。
 - **本机 Web/TUI 运行时**：同一窗口内 start/attach 本机 Web Host，关闭页签只释放 Guest；TUI 使用固定同源 iframe，支持多开与独立停止。
 - **跨 Host 会话导航**：会话被其它 Host 使用时给出提示，一键前往对应页签并带入未发送的文字。
-- **Desktop 原生通知**：本地与远程 Web 页签的回合结束、等待批准、等待回答、计划确认透传为系统通知；同一会话只保留一条，点击切到对应页签并打开会话。
+- **Desktop 原生通知**：本地与远程 Web 页签的回合结束、等待批准、等待回答、计划确认透传为系统通知；同一会话只保留一条，点击切到对应页签并打开会话。远程页签由运行包内置的 `guest-notify` 伴生插件上报，远端 profile 不必安装 Shell。
 - **SSH Remote**：OpenSSH 配置导入、严格主机密钥检查、ProxyJump/ProxyCommand、远端运行包安装与复用、插件快照与一键安装、配置同步与备份。
 
 ## 目录

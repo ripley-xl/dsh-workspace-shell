@@ -5,6 +5,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
 import { readTuiDeclaration, tuiAdapter, tuiEnvironment, tuiPackageName } from './tui-adapters.js';
 import { parseCommandLine } from './command-line.js';
+import { isNewerVersion } from './registry.js';
 
 const WEB_BUNDLE = '@deepseek-ai/dsh-web-app';
 const WEB_CWD_PATCH = fileURLToPath(new URL('../../guest-cwd/cordis.patch.yml', import.meta.url));
@@ -27,7 +28,6 @@ const ERRORS = {
   RUNTIME_NOT_FOUND: 'The requested runtime does not exist.',
   RUNTIME_OWNER_MISMATCH: 'Only the runtime owner may perform this operation.',
   RUNTIME_NOT_ACTIVE: 'The runtime is not active.',
-  VERSION_MISMATCH: 'The CLI version does not match the required version.',
   CLI_VERSION_CHECK_FAILED: 'The CLI version check failed.',
   WEB_STARTUP_FAILED: 'The Web Host did not provide a valid loopback URL.',
   TUI_NOT_INSTALLED: 'The TUI package is not installed for this profile.',
@@ -39,7 +39,21 @@ const ERRORS = {
   RUNTIME_ID_CONFLICT: 'The runtime identifier is already in use.',
   RUNTIME_LIMIT_REACHED: 'Too many active runtimes.',
   PROFILE_CANDIDATE_INVALID: 'An invalid profile candidate was ignored.',
+  UPGRADE_BUSY: 'Another upgrade is already running for this Host.',
+  UPGRADE_UNSUPPORTED_PROFILE: 'This profile is not supported for the local upgrade.',
+  UPGRADE_PROFILE_UNAVAILABLE: 'The profile directory is unavailable.',
+  UPGRADE_REGISTRY_UNAVAILABLE: 'The npm registry is unavailable.',
+  UPGRADE_NPM_FAILED: 'The global DSH installation failed.',
+  UPGRADE_INSTALL_FAILED: 'The plugin install failed.',
+  UPGRADE_VALIDATION_FAILED: 'The profile configuration could not be validated.',
+  UPGRADE_BACKUP_FAILED: 'The profile files could not be backed up.',
+  UPGRADE_RESTORE_FAILED: 'The profile files could not be restored.',
+  UPGRADE_RUNTIME_UNAVAILABLE: 'The running Host could not be stopped.',
+  UPGRADE_PLUGIN_FAILED: 'A plugin could not be installed.',
 };
+
+const CLI_VERSION_OUTPUT = /^[vV]?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u;
+const DEFAULT_VERSION_CHECK_TTL_MS = 10 * 60 * 1000;
 
 function failure(code) {
   const error = new Error(ERRORS[code] ?? ERRORS.INVALID_INPUT);
@@ -240,7 +254,9 @@ async function consumeTerminal(record, stream) {
 export function createLocalRuntimeService(options) {
   const subprocess = options?.subprocess;
   const profileContext = options?.profileContext;
-  const expectedVersion = options?.expectedVersion;
+  const currentDshVersion = options?.currentDshVersion;
+  const upgrades = options?.upgrades;
+  const versionCheckTtlMs = options?.versionCheckTtlMs ?? DEFAULT_VERSION_CHECK_TTL_MS;
   const expectedTuiVersion = options?.expectedTuiVersion ?? '0.18.0';
   const expectedPiTuiVersion = options?.expectedPiTuiVersion ?? '0.5.5';
   const cliCommand = options?.cliCommand ?? 'dsh';
@@ -259,14 +275,19 @@ export function createLocalRuntimeService(options) {
     clearTimeout: options?.timers?.clearTimeout ?? clearTimeout,
   };
   const makeId = options?.idFactory ?? randomUUID;
-  if (!subprocess || !profileContext || typeof expectedVersion !== 'string' || !expectedVersion
-    || typeof expectedTuiVersion !== 'string' || !expectedTuiVersion
+  if (!subprocess || !profileContext || typeof expectedTuiVersion !== 'string' || !expectedTuiVersion
     || typeof expectedPiTuiVersion !== 'string' || !expectedPiTuiVersion) throw failure('INVALID_INPUT');
+  if (currentDshVersion !== undefined && typeof currentDshVersion !== 'string' && typeof currentDshVersion !== 'function') {
+    throw failure('INVALID_INPUT');
+  }
+  if (upgrades !== undefined && (typeof upgrades?.check !== 'function' || typeof upgrades?.start !== 'function'
+    || typeof upgrades?.state !== 'function')) throw failure('INVALID_INPUT');
   absolute(profileContext.dir);
   absolute(profileContext.home);
   absolute(profileContext.cwd);
   if (!Number.isInteger(startupTimeoutMs) || startupTimeoutMs < 1 || !Number.isInteger(graceMs) || graceMs < 1
-    || !Number.isInteger(terminalBytes) || terminalBytes < 1) throw failure('INVALID_INPUT');
+    || !Number.isInteger(terminalBytes) || terminalBytes < 1
+    || !Number.isInteger(versionCheckTtlMs) || versionCheckTtlMs < 0) throw failure('INVALID_INPUT');
 
   const profilesHome = path.resolve(profileContext.home);
   const currentDirectory = path.resolve(profileContext.dir);
@@ -277,6 +298,9 @@ export function createLocalRuntimeService(options) {
   let versionPromise = null;
   let versionController = null;
   let cwdPromise = null;
+  const checks = new Map();
+  let currentVersionCache = { at: 0, value: null };
+  const suppressedUpgrades = new Set();
 
   async function realDirectory(value) {
     const directory = await fs.realpath(value);
@@ -348,7 +372,15 @@ export function createLocalRuntimeService(options) {
     }
   }
 
-  async function verifyVersion() {
+  function parseCliVersion(stdout) {
+    const first = String(stdout ?? '').trim().split(/\r?\n/u)[0]?.trim() ?? '';
+    return CLI_VERSION_OUTPUT.test(first) ? first : null;
+  }
+
+  // The CLI version is recorded for the Host row; it is no longer a startup
+  // gate, because the profile-based CLI may legitimately differ from the
+  // version this plugin was authored against.
+  async function probeVersion() {
     if (!versionPromise) {
       versionController = new AbortController();
       const signal = versionController.signal;
@@ -358,28 +390,33 @@ export function createLocalRuntimeService(options) {
           timer = timers.setTimeout(() => versionController?.abort(), startupTimeoutMs);
           timer.unref?.();
           const executable = await subprocess.resolveExecutable(cliCommand, undefined, signal);
-          const handle = subprocess.spawn({
-            argv: [executable, '--version'],
-            cwd: await verifiedCwd(),
-            stdio: { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' },
-            graceMs,
-            env: { DSH_HOME: profilesHome },
-            signal,
-          });
+          let version = null;
           try {
-            const [stdout, outcome] = await Promise.all([
-              collectText(handle.stdout, MAX_VERSION_BYTES, 'CLI_VERSION_CHECK_FAILED'),
-              handle.done,
-              ignoreStream(handle.stderr),
-            ]);
-            if (outcome?.exitCode !== 0) throw failure('CLI_VERSION_CHECK_FAILED');
-            if (stdout.trim() !== expectedVersion) throw failure('VERSION_MISMATCH');
-            return executable;
-          } catch (error) {
-            handle.terminate();
-            await handle.waitForExit().catch(() => false);
-            throw safe(error, 'CLI_VERSION_CHECK_FAILED');
+            const handle = subprocess.spawn({
+              argv: [executable, '--version'],
+              cwd: await verifiedCwd(),
+              stdio: { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' },
+              graceMs,
+              env: { DSH_HOME: profilesHome },
+              signal,
+            });
+            try {
+              const [stdout, outcome] = await Promise.all([
+                collectText(handle.stdout, MAX_VERSION_BYTES, 'CLI_VERSION_CHECK_FAILED'),
+                handle.done,
+                ignoreStream(handle.stderr),
+              ]);
+              if (outcome?.exitCode === 0) version = parseCliVersion(stdout);
+            } catch {
+              try { handle.terminate(); } catch { /* already gone */ }
+              await Promise.resolve(handle.waitForExit?.()).catch(() => false);
+            }
+          } catch {
+            // A failed version probe only hides the version; spawning the Host
+            // reports its own error if the executable cannot run at all.
+            version = null;
           }
+          return { executable, version };
         } finally {
           timers.clearTimeout(timer);
         }
@@ -398,10 +435,100 @@ export function createLocalRuntimeService(options) {
     signal?.addEventListener('abort', onAbort, { once: true });
     try {
       throwIfAborted(signal);
-      return await Promise.race([verifyVersion(), cancelled]);
+      return await Promise.race([probeVersion(), cancelled]);
     } finally {
       signal?.removeEventListener('abort', onAbort);
     }
+  }
+
+  function upgradeCode(error, fallback = 'UPGRADE_PROFILE_UNAVAILABLE') {
+    return error?.safe === true && typeof error.code === 'string' && Object.hasOwn(ERRORS, error.code) ? error.code : fallback;
+  }
+
+  async function currentVersion() {
+    if (typeof currentDshVersion === 'string') return currentDshVersion || null;
+    if (typeof currentDshVersion !== 'function') return null;
+    const nowMs = Date.now();
+    if (currentVersionCache.at && nowMs - currentVersionCache.at < 60_000) return currentVersionCache.value;
+    let value = null;
+    try {
+      const result = await currentDshVersion();
+      if (typeof result === 'string' && result) value = result;
+    } catch {
+      value = null;
+    }
+    currentVersionCache = { at: nowMs, value };
+    return value;
+  }
+
+  // Version and alignment probes are Host-side and cached; `catalog` only
+  // reads them and triggers one refresh when the cache is empty or stale.
+  function checkEntry(profileId, version) {
+    if (!upgrades) return null;
+    const key = `${profileId}\u0000${version ?? ''}`;
+    const cached = checks.get(key);
+    const nowMs = Date.now();
+    if (cached && (cached.checking || nowMs - cached.at < versionCheckTtlMs)) return cached;
+    const entry = {
+      at: nowMs,
+      checking: true,
+      latestDshVersion: cached?.latestDshVersion ?? null,
+      alignPending: cached?.alignPending ?? null,
+      dshUpgradeAllowed: cached?.dshUpgradeAllowed !== false,
+      error: null,
+      pending: null,
+    };
+    checks.set(key, entry);
+    entry.pending = (async () => {
+      try {
+        const result = await upgrades.check({ profileId, dshVersion: version });
+        entry.latestDshVersion = typeof result?.latestDshVersion === 'string' ? result.latestDshVersion : null;
+        entry.alignPending = typeof result?.alignPending === 'boolean' ? result.alignPending : null;
+        entry.dshUpgradeAllowed = result?.dshUpgradeAllowed !== false;
+        entry.error = typeof result?.error === 'string' ? result.error : null;
+      } catch (error) {
+        entry.error = upgradeCode(error);
+      } finally {
+        entry.at = Date.now();
+        entry.checking = false;
+        entry.pending = null;
+      }
+    })();
+    return entry;
+  }
+
+  function invalidateChecks(profileId) {
+    for (const key of [...checks.keys()]) {
+      if (key.startsWith(`${profileId}\u0000`)) checks.delete(key);
+    }
+  }
+
+  function upgradeFields(profileId, version, runtimeId, { probe = true } = {}) {
+    const entry = upgrades && probe ? checkEntry(profileId, version) : null;
+    const upgrade = upgrades ? upgrades.state({ profileId, runtimeId: runtimeId ?? null }) : null;
+    if (upgrade?.phase === 'done' && (runtimeId === null || runtimeId === undefined)) {
+      // The current Host keeps running the code it booted with; other profiles
+      // are not running yet, so a fresh CLI probe is enough to clear the row.
+      if (profileId === profileContext.name) suppressedUpgrades.add(profileId);
+      else versionPromise = null;
+    }
+    if (upgrade?.phase === 'done' || upgrade?.phase === 'failed') invalidateChecks(profileId);
+    const known = typeof version === 'string' && version !== '';
+    const checking = entry?.checking === true;
+    const newer = known && entry?.dshUpgradeAllowed !== false && isNewerVersion(entry?.latestDshVersion, version);
+    const alignPending = profileId === 'web' && entry?.alignPending === true;
+    const running = upgrade?.phase === 'running';
+    const upgradeAvailable = Boolean(upgrades) && known && !checking && !running
+      && !(runtimeId === null || runtimeId === undefined ? suppressedUpgrades.has(profileId) : false)
+      && (newer || alignPending);
+    return {
+      dshVersion: known ? version : null,
+      latestDshVersion: typeof entry?.latestDshVersion === 'string' ? entry.latestDshVersion : null,
+      checking,
+      ...(profileId === 'web' ? { alignPending: typeof entry?.alignPending === 'boolean' ? entry.alignPending : null } : {}),
+      upgradeAvailable,
+      ...(upgrade ? { upgrade } : {}),
+    };
   }
 
   function runtimeById(runtimeId, ownerId, { active = false, kind } = {}) {
@@ -629,6 +756,7 @@ export function createLocalRuntimeService(options) {
       tuiFlavor: null,
       profileId,
       ownerId,
+      dshVersion: null,
       phase: 'starting',
       owned: true,
       handle: null,
@@ -666,8 +794,9 @@ export function createLocalRuntimeService(options) {
         }, startupTimeoutMs);
         timer.unref?.();
         throwIfAborted(callerSignal);
-        const [profile, executable] = await Promise.all([loadProfile(profileId), waitForVersion(signal)]);
+        const [profile, probe] = await Promise.all([loadProfile(profileId), waitForVersion(signal)]);
         throwIfAborted(signal);
+        record.dshVersion = probe.version ?? null;
         if (kind === 'web' && !profile.web) throw failure('PROFILE_NOT_FOUND');
         if (kind === 'tui' && profile.tuiConflict) throw failure('TUI_PROFILE_CONFLICT');
         if (kind === 'tui' && !profile.tui) throw failure('TUI_NOT_INSTALLED');
@@ -677,8 +806,8 @@ export function createLocalRuntimeService(options) {
         }
         throwIfAborted(signal);
         const result = kind === 'web'
-          ? await startWeb(record, executable, signal)
-          : await startTui(record, executable, extra.cwd, signal, extra.command);
+          ? await startWeb(record, probe.executable, signal)
+          : await startTui(record, probe.executable, extra.cwd, signal, extra.command);
         throwIfAborted(signal);
         if (record.phase === 'starting' && !record.doneObserved) record.phase = 'running';
         notify(record);
@@ -698,44 +827,102 @@ export function createLocalRuntimeService(options) {
     return kind === 'web' ? waitForWeb(record, extra.signal) : record.startPromise;
   }
 
-  async function catalog({ ownerId } = {}) {
-    if (ownerId !== undefined) identifier(ownerId, 'owner');
+  /** Lists the readable profiles under `<home>/profiles`, sorted by id. */
+  async function catalogProfiles() {
     const profiles = [];
     const warnings = [];
-    let entries = [];
+    let entries;
     try {
       const root = await realDirectory(profilesRoot);
       entries = await fs.readdir(root, { withFileTypes: true });
-      for (const entry of entries.slice(0, 256)) {
-        if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-        try {
-          const profile = await loadProfile(entry.name, { allowCurrent: true });
-          profiles.push({ id: profile.id, isCurrent: profile.dir === await realDirectory(currentDirectory), web: profile.web, tui: profile.tui, tuiFlavor: profile.tuiFlavor });
-        } catch {
-          warnings.push({ code: 'PROFILE_CANDIDATE_INVALID', message: ERRORS.PROFILE_CANDIDATE_INVALID });
-        }
-      }
     } catch (error) {
-      if (error?.code === 'ENOENT') {
-        return { currentProfile: profileContext.name, defaultCwd: profileContext.cwd, profiles: [], runtimes: publicRuntimes(ownerId), warnings };
-      }
+      if (error?.code === 'ENOENT') return { profiles, warnings, missing: true };
       throw safe(error, 'PROFILE_NOT_FOUND');
     }
+    for (const entry of entries.slice(0, 256)) {
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+      try {
+        const profile = await loadProfile(entry.name, { allowCurrent: true });
+        profiles.push({ id: profile.id, isCurrent: profile.dir === await realDirectory(currentDirectory), web: profile.web, tui: profile.tui, tuiFlavor: profile.tuiFlavor });
+      } catch {
+        warnings.push({ code: 'PROFILE_CANDIDATE_INVALID', message: ERRORS.PROFILE_CANDIDATE_INVALID });
+      }
+    }
     profiles.sort((left, right) => left.id.localeCompare(right.id));
-    return { currentProfile: profileContext.name, defaultCwd: profileContext.cwd, profiles, runtimes: publicRuntimes(ownerId), warnings };
+    return { profiles, warnings, missing: false };
+  }
+
+  async function catalog({ ownerId } = {}) {
+    if (ownerId !== undefined) identifier(ownerId, 'owner');
+    const listed = await catalogProfiles();
+    const profiles = listed.profiles;
+    const warnings = listed.warnings;
+    if (listed.missing) {
+      return { currentProfile: profileContext.name, defaultCwd: profileContext.cwd, profiles: [], currentHost: null, runtimes: publicRuntimes(ownerId), warnings };
+    }
+    const current = profiles.find((profile) => profile.isCurrent) ?? null;
+    let currentHost = null;
+    if (current?.web) {
+      const version = await currentVersion();
+      currentHost = { current: true, profileId: current.id, ...upgradeFields(current.id, version, null) };
+    }
+    const stopped = await stoppedProfileRows(profiles);
+    return {
+      currentProfile: profileContext.name,
+      defaultCwd: profileContext.cwd,
+      profiles,
+      currentHost,
+      runtimes: [...publicRuntimes(ownerId), ...stopped],
+      warnings,
+    };
+  }
+
+  /**
+   * Web profiles that are not running still own an upgrade slot: the launcher
+   * shows them as stopped rows so a pending desktop alignment is visible
+   * without starting the old plugin set first.
+   */
+  async function stoppedProfileRows(profiles) {
+    if (!upgrades) return [];
+    const active = new Set([...records.values()]
+      .filter((record) => record.kind === 'web' && ACTIVE_PHASES.has(record.phase))
+      .map((record) => record.profileId));
+    const ids = [];
+    for (const profile of profiles) {
+      if (!profile.web || profile.isCurrent || active.has(profile.id)) continue;
+      if (profile.id === 'desktop' || profile.id === 'headless') continue;
+      ids.push(profile.id);
+    }
+    if (!ids.length) return [];
+    const probe = await probeVersion().catch(() => null);
+    const version = typeof probe?.version === 'string' ? probe.version : null;
+    return ids.map((profileId) => ({
+      id: `profile:${profileId}`,
+      kind: 'web',
+      profileId,
+      source: 'local',
+      phase: 'stopped',
+      owned: true,
+      canStop: false,
+      ...upgradeFields(profileId, version, null),
+    }));
   }
 
   function publicRuntimes(ownerId) {
-    return [...records.values()].map((record) => ({
-      id: record.id,
-      kind: record.kind,
-      profileId: record.profileId,
-      source: 'local',
-      phase: record.phase,
-      owned: true,
-      ...ownerId !== undefined ? { canStop: record.ownerId === ownerId && ACTIVE_PHASES.has(record.phase) } : {},
-      ...record.exit ? { exit: record.exit } : {},
-    }));
+    return [...records.values()].map((record) => {
+      const base = {
+        id: record.id,
+        kind: record.kind,
+        profileId: record.profileId,
+        source: 'local',
+        phase: record.phase,
+        owned: true,
+        ...ownerId !== undefined ? { canStop: record.ownerId === ownerId && ACTIVE_PHASES.has(record.phase) } : {},
+        ...record.exit ? { exit: record.exit } : {},
+      };
+      if (record.kind !== 'web') return { ...base, dshVersion: typeof record.dshVersion === 'string' ? record.dshVersion : null };
+      return { ...base, ...upgradeFields(record.profileId, record.dshVersion, record.id, { probe: ACTIVE_PHASES.has(record.phase) }) };
+    });
   }
 
   return {
@@ -799,6 +986,36 @@ export function createLocalRuntimeService(options) {
       } catch (error) {
         throw safe(error, 'RUNTIME_STOP_FAILED');
       }
+    },
+    async upgrade({ runtimeId, ownerId, profileId } = {}) {
+      if (!upgrades) throw failure('UPGRADE_RUNTIME_UNAVAILABLE');
+      if (runtimeId !== undefined && runtimeId !== null) {
+        const record = runtimeById(runtimeId, ownerId, { active: true, kind: 'web' });
+        const version = typeof record.dshVersion === 'string' ? record.dshVersion : null;
+        return upgrades.start({
+          profileId: record.profileId,
+          runtimeId: record.id,
+          dshVersion: version,
+          stopHost: async () => { await stopRecord(record); },
+        });
+      }
+      identifier(ownerId, 'owner');
+      // A stopped Web profile has no Host to stop; the probe supplies the CLI
+      // version and the executor's own validation rejects non-Web profiles.
+      if (typeof profileId === 'string' && profileId && profileId !== profileContext.name) {
+        identifier(profileId, 'profile');
+        const profile = await loadProfile(profileId);
+        if (!profile.web) throw failure('PROFILE_NOT_FOUND');
+        const probe = await probeVersion().catch(() => null);
+        return upgrades.start({
+          profileId,
+          runtimeId: null,
+          dshVersion: typeof probe?.version === 'string' ? probe.version : null,
+          stopHost: null,
+        });
+      }
+      const version = await currentVersion();
+      return upgrades.start({ profileId: profileContext.name, runtimeId: null, dshVersion: version, stopHost: null });
     },
     dispose() {
       if (disposePromise) return disposePromise;

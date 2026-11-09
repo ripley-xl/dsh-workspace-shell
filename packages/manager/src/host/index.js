@@ -16,8 +16,10 @@ function json(value, status = 200) {
 function httpStatus(code) {
   if (code === 'HOST_NOT_FOUND') return 404;
   if (code === 'SERVICE_DISPOSED') return 503;
-  if (code === 'LOCAL_DSH_OUTDATED' || code === 'SYNC_CONFIRMATION_REQUIRED' || code === 'HOST_BUSY'
-    || code === 'HOST_NOT_CONNECTED' || code === 'PROFILE_NOT_WEB' || code === 'REMOTE_INSTANCE_UNAVAILABLE') return 409;
+  if (code === 'SYNC_CONFIRMATION_REQUIRED' || code === 'HOST_BUSY'
+    || code === 'HOST_NOT_CONNECTED' || code === 'PROFILE_NOT_WEB' || code === 'REMOTE_INSTANCE_UNAVAILABLE'
+    || code === 'UPGRADE_BUSY' || code === 'UPGRADE_RUNTIME_UNAVAILABLE'
+    || code === 'UPGRADE_UNSUPPORTED_PROFILE' || code === 'UPGRADE_PROFILE_UNAVAILABLE') return 409;
   if (code === 'OPERATION_TIMEOUT') return 504;
   if (code?.startsWith('SSH_') || code?.startsWith('REMOTE_') || code === 'CREDENTIAL_UNAVAILABLE') return 502;
   return 400;
@@ -208,6 +210,22 @@ export async function apply(ctx) {
   route('/api/ssh-remote/connect', ['POST'], async (request) => {
     const input = await body(request);
     return service.connect(hostId(input));
+  });
+  route('/api/ssh-remote/upgrade', ['POST'], async (request) => {
+    const input = await body(request);
+    const result = await service.upgradeHost({
+      hostId: hostId(input),
+      profileId: input.profileId ?? input.profile,
+    });
+    return { ok: true, result };
+  });
+  route('/api/ssh-remote/upgrade/approve', ['POST'], async (request) => {
+    const input = await body(request);
+    const result = await service.approveUpgrades({
+      hostId: hostId(input),
+      profileId: input.profileId ?? input.profile,
+    });
+    return { ok: true, result };
   });
   route('/api/ssh-remote/disconnect', ['POST'], async (request) => service.disconnect(hostId(await body(request))));
   route('/api/ssh-remote/sync/preview', ['POST'], async (request) => {

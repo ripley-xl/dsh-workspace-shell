@@ -40,6 +40,7 @@ export function registerShellRoutes(ctx, service, { assetRoot = new URL('../../a
     '/terminal/write': (input) => service.writeTerminal({ runtimeId: input.runtimeId, ownerId: input.ownerId, data: input.data }),
     '/terminal/resize': (input) => service.resizeTerminal({ runtimeId: input.runtimeId, ownerId: input.ownerId, cols: input.cols, rows: input.rows }),
     '/runtime/stop': (input) => service.stop({ runtimeId: input.runtimeId, ownerId: input.ownerId }),
+    '/hosts/upgrade': (input) => service.upgrade({ runtimeId: input.runtimeId, ownerId: input.ownerId, profileId: input.profileId }),
     '/runtime/close-owner': async (input) => {
       if (typeof input.ownerId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(input.ownerId)) throw invalid();
       if (!Array.isArray(input.runtimeIds) || input.runtimeIds.length > 1024 || input.runtimeIds.some((id) => typeof id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id))) throw invalid();

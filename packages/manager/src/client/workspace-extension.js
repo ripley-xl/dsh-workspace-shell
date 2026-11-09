@@ -74,8 +74,8 @@ export function createSshWorkspaceExtension(React, { window, document, createSsh
   };
   const request = async (path, options = {}) => {
     const signal = options.signal ? AbortSignal.any([options.signal, lifetime.signal]) : lifetime.signal;
-    // Remote Host upgrades are automatic; failures such as LOCAL_DSH_OUTDATED
-    // surface unchanged instead of opening a confirmation prompt.
+    // Each DSH version keeps its own remote Host instances; failures surface
+    // unchanged instead of opening a confirmation prompt.
     const result = await rawRequest(path, { ...options, signal });
     if (path === '/connect' && result.sync && (result.sync.ok === false || result.sync.requiresMerge)) {
       const path = result.sync.requiresMerge && typeof result.sync.backup?.path === 'string' ? result.sync.backup.path.slice(0, 4096) : '';

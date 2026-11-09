@@ -458,7 +458,7 @@ test('dispose removes the frame and the message listener, and no late reply can 
   await guest.start();
   const element = mock.elements[0];
   element.emit('load');
-  assert.equal(mock.window.listenerCount(), 0);
+  assert.equal(mock.window.listenerCount(), 1);
   const reading = guest.getWorkingDirectory();
   await flush();
   assert.equal(mock.window.listenerCount(), 1);
@@ -538,4 +538,45 @@ test('consumer callback failures never break the guest lifecycle', async () => {
   assert.doesNotThrow(() => element.emit('error'));
   await flush();
   await guest.dispose();
+});
+
+test('guest notification frames reach the parent callback only from the assigned origin', async () => {
+  const mock = harness();
+  const events = [];
+  const guest = createBrowserGuest(options(mock, { onGuestEvent: (data) => events.push(data) }));
+  await guest.start();
+  const element = mock.elements[0];
+  element.emit('load');
+  const data = {
+    type: 'workspace-shell-notification', version: 1, event: 'turn-end', kind: 'turn-end',
+    sessionId: 'a'.repeat(32), title: 'Release check', detail: '', viewing: false,
+  };
+  mock.window.deliver({ data, origin: 'https://evil.example', source: element.contentWindow });
+  mock.window.deliver({ data, origin: 'http://127.0.0.1:4567', source: {} });
+  mock.window.deliver({ data: { ...data, version: 2 }, origin: 'http://127.0.0.1:4567', source: element.contentWindow });
+  assert.deepEqual(events, []);
+  mock.window.deliver({ data, origin: 'http://127.0.0.1:4567', source: element.contentWindow });
+  assert.deepEqual(events, [data]);
+  await guest.dispose();
+});
+
+test('openSession posts one origin-targeted request and rejects unusable Session ids', async () => {
+  const mock = harness();
+  const guest = createBrowserGuest(options(mock));
+  assert.equal(guest.openSession('a'.repeat(32)), false, 'a Guest that has not loaded cannot receive the request');
+  await guest.start();
+  const element = mock.elements[0];
+  element.emit('load');
+  const sessionId = 'a'.repeat(32);
+  assert.equal(guest.openSession(sessionId), true);
+  const posted = element.posts.at(-1);
+  assert.equal(posted.message.type, 'workspace-shell-open-session');
+  assert.equal(posted.message.version, 1);
+  assert.equal(posted.message.sessionId, sessionId);
+  assert.match(posted.message.requestId, /^[A-Za-z0-9_-]{16,128}$/);
+  assert.equal(posted.targetOrigin, 'http://127.0.0.1:4567');
+  assert.equal(guest.openSession('../etc/passwd'), false);
+  assert.equal(guest.openSession(''), false);
+  await guest.dispose();
+  assert.equal(guest.openSession(sessionId), false);
 });

@@ -13,7 +13,7 @@ const outputRoot = outputFlag < 0 ? root : pathToFileURL(resolve(process.argv[ou
 const names = [
   'adapter', 'geometry', 'tab-state', 'tab-controller', 'tab-order', 'tab-appearance', 'input-gate',
   'web-timing', 'desktop-guest', 'browser-guest', 'tui-provider',
-  'chrome-tabs', 'workspace-client', 'launcher', 'styles', 'frame', 'entry',
+  'chrome-tabs', 'workspace-client', 'notifications', 'launcher', 'styles', 'frame', 'entry',
   '../session-host/submissions', '../session-host/controller', '../session-host/ui',
 ];
 const modules = [];
@@ -49,6 +49,7 @@ const candidates = [
   'createTabState', 'createTabController', 'createTabOrderMemory', 'createTabAppearanceMemory', 'installInputGate', 'createWebTiming',
   'createDesktopGuest', 'createBrowserGuest', 'createTuiProvider',
   'createChromeTabs', 'createWorkspaceClient', 'createLauncher',
+  'createSessionNotificationMonitor', 'createGuestNotificationBridge', 'createNotificationCenter',
   'createSessionHostPlugin', 'createSessionHostClient', 'observeSessionSubmissions',
   'applyTransferredDraft', 'sessionHostCss',
 ];

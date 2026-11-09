@@ -167,7 +167,9 @@ async function fixture(t, options = {}) {
   const service = createLocalRuntimeService({
     subprocess,
     profileContext: { name: 'current', dir: current, home, cwd },
-    expectedVersion: VERSION,
+    ...(options.currentDshVersion !== undefined ? { currentDshVersion: options.currentDshVersion } : {}),
+    ...(options.upgrades !== undefined ? { upgrades: options.upgrades } : {}),
+    ...(options.versionCheckTtlMs !== undefined ? { versionCheckTtlMs: options.versionCheckTtlMs } : {}),
     startupTimeoutMs: options.startupTimeoutMs ?? 50,
     graceMs: 5,
     terminalBytes: options.terminalBytes,
@@ -250,12 +252,33 @@ test('Web reuses only the same owner Host and rejects cross-owner URL access', a
   await expectCode(() => service.attachWeb({ runtimeId: first.runtimeId, ownerId: 'owner' }), 'RUNTIME_NOT_ACTIVE');
 });
 
-test('CLI version mismatch fails closed before starting Web', async (t) => {
+test('CLI version is recorded on the runtime instead of gating startup', async (t) => {
   const subprocess = fakeSubprocess();
-  subprocess.version = '0.0.0';
+  subprocess.version = '0.2.2-rc.1';
   const { service, subprocess: calls } = await fixture(t, { subprocess });
-  await expectCode(() => service.openWeb({ profileId: 'web', ownerId: 'owner', confirmIndependentHost: true }), 'VERSION_MISMATCH');
-  assert.equal(calls.calls.spawn.filter((spec) => !spec.argv.includes('--version')).length, 0);
+  const opened = await service.openWeb({ profileId: 'web', ownerId: 'owner', confirmIndependentHost: true });
+  assert.equal(calls.calls.spawn.filter((spec) => !spec.argv.includes('--version')).length, 1);
+  const catalog = await service.catalog();
+  assert.equal(catalog.runtimes[0].dshVersion, '0.2.2-rc.1');
+  assert.equal(catalog.runtimes[0].upgradeAvailable, false, 'no upgrade service means no button');
+  await service.stop({ runtimeId: opened.runtimeId, ownerId: 'owner' });
+});
+
+test('a failed or malformed version probe only hides the version', async (t) => {
+  const subprocess = fakeSubprocess();
+  const originalSpawn = subprocess.spawn;
+  subprocess.spawn = (spec) => {
+    if (spec.argv.includes('--version')) {
+      const handle = processHandle({ stdout: Readable.from(['not a version\n']) });
+      queueMicrotask(() => handle.terminate());
+      return handle;
+    }
+    return originalSpawn(spec);
+  };
+  const { service } = await fixture(t, { subprocess });
+  const opened = await service.openWeb({ profileId: 'web', ownerId: 'owner', confirmIndependentHost: true });
+  assert.equal((await service.catalog()).runtimes[0].dshVersion, null);
+  await service.stop({ runtimeId: opened.runtimeId, ownerId: 'owner' });
 });
 
 test('TUI requires both a declared candidate and an exact installed manifest', async (t) => {
@@ -483,12 +506,14 @@ test('startup timeout terminates a late terminal handle', async (t) => {
   const subprocess = fakeSubprocess();
   subprocess.spawnTerminal = async (spec) => {
     subprocess.calls.terminal.push(spec);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await new Promise((resolve) => setTimeout(resolve, 100));
     const handle = terminalHandle();
     subprocess.terminalHandles.push(handle);
     return handle;
   };
-  const { service, subprocess: calls } = await fixture(t, { subprocess, startupTimeoutMs: 5 });
+  // The timeout must clear the version probe even on a loaded machine, then
+  // catch the terminal handle that arrives afterwards.
+  const { service, subprocess: calls } = await fixture(t, { subprocess, startupTimeoutMs: 40 });
   await expectCode(() => service.openTui({ profileId: 'tui', ownerId: 'owner', cwd: '/tmp', cols: 80, rows: 24, confirmIndependentHost: true }), 'STARTUP_TIMEOUT');
   assert.equal(calls.terminalHandles[0].terminateCalls, 1);
 });
@@ -840,4 +865,147 @@ test('active runtime count is bounded', async (t) => {
     await service.openWeb({ profileId: `web-${index}`, ownerId: 'owner', confirmIndependentHost: true });
   }
   await expectCode(() => service.openWeb({ profileId: 'web-16', ownerId: 'owner', confirmIndependentHost: true }), 'RUNTIME_LIMIT_REACHED');
+});
+
+function fakeUpgrades({ latestDshVersion = '0.2.2-rc.1', alignPending = null, dshUpgradeAllowed = true, failCheck = false } = {}) {
+  const calls = [];
+  const states = new Map();
+  return {
+    calls,
+    states,
+    async check(input) {
+      calls.push({ method: 'check', input });
+      if (failCheck) throw Object.assign(new Error('private registry failure'), { code: 'UPGRADE_PROFILE_UNAVAILABLE', safe: true });
+      return { latestDshVersion, alignPending, dshUpgradeAllowed };
+    },
+    start(input) {
+      calls.push({ method: 'start', input });
+      const key = input.runtimeId ? `runtime:${input.runtimeId}` : `current:${input.profileId}`;
+      if (states.has(key)) throw Object.assign(new Error('private busy detail'), { code: 'UPGRADE_BUSY', safe: true });
+      states.set(key, { phase: 'running', step: 'backup' });
+      return { started: true, upgrade: { phase: 'running', step: 'backup' } };
+    },
+    state({ profileId, runtimeId }) {
+      return states.get(runtimeId ? `runtime:${runtimeId}` : `current:${profileId}`) ?? null;
+    },
+  };
+}
+
+test('catalog exposes the current Host version and probes upgrades once per version', async (t) => {
+  const upgrades = fakeUpgrades();
+  const { service } = await fixture(t, { currentDshVersion: '0.2.1-rc.5', upgrades });
+  const first = await service.catalog();
+  assert.equal(first.currentHost.current, true);
+  assert.equal(first.currentHost.profileId, 'current');
+  assert.equal(first.currentHost.dshVersion, '0.2.1-rc.5');
+  assert.equal(first.currentHost.checking, true);
+  assert.equal(first.currentHost.upgradeAvailable, false, 'no button while the probe is pending');
+  await waitFor(async () => (await service.catalog()).currentHost.checking === false);
+  const ready = await service.catalog();
+  assert.equal(ready.currentHost.latestDshVersion, '0.2.2-rc.1');
+  assert.equal(ready.currentHost.upgradeAvailable, true);
+  assert.equal(upgrades.calls.filter((call) => call.method === 'check' && call.input.profileId === 'current').length, 1, 'the version probe is cached');
+
+  const started = await service.upgrade({ ownerId: 'owner' });
+  assert.deepEqual(started, { started: true, upgrade: { phase: 'running', step: 'backup' } });
+  const start = upgrades.calls.find((call) => call.method === 'start');
+  assert.equal(start.input.profileId, 'current');
+  assert.equal(start.input.runtimeId, null);
+  assert.equal(start.input.dshVersion, '0.2.1-rc.5');
+  assert.equal(start.input.stopHost, null);
+  assert.deepEqual((await service.catalog()).currentHost.upgrade, { phase: 'running', step: 'backup' });
+  await expectCode(() => service.upgrade({ ownerId: 'bad owner' }), 'INVALID_INPUT');
+});
+
+test('a failed version probe hides the button without failing the catalog', async (t) => {
+  const upgrades = fakeUpgrades({ failCheck: true });
+  const { service } = await fixture(t, { currentDshVersion: '0.2.1-rc.5', upgrades });
+  await waitFor(async () => (await service.catalog()).currentHost.checking === false);
+  const value = await service.catalog();
+  assert.equal(value.currentHost.upgradeAvailable, false);
+  assert.equal(JSON.stringify(value).includes('private registry failure'), false);
+});
+
+test('upgrade targets a managed Web runtime with its recorded version and stop callback', async (t) => {
+  const upgrades = fakeUpgrades({ latestDshVersion: null, alignPending: false });
+  const { service } = await fixture(t, { upgrades });
+  const opened = await service.openWeb({ profileId: 'web', ownerId: 'owner', confirmIndependentHost: true });
+  const catalog = await service.catalog();
+  assert.equal(catalog.runtimes[0].dshVersion, VERSION);
+  await waitFor(async () => (await service.catalog()).runtimes[0].checking === false);
+  assert.equal((await service.catalog()).runtimes[0].upgradeAvailable, false, 'no newer version means no button');
+  await expectCode(() => service.upgrade({ runtimeId: opened.runtimeId, ownerId: 'other-owner' }), 'RUNTIME_OWNER_MISMATCH');
+  const started = await service.upgrade({ runtimeId: opened.runtimeId, ownerId: 'owner' });
+  assert.equal(started.started, true);
+  const start = upgrades.calls.find((call) => call.method === 'start');
+  assert.equal(start.input.profileId, 'web');
+  assert.equal(start.input.runtimeId, opened.runtimeId);
+  assert.equal(start.input.dshVersion, VERSION);
+  assert.equal(typeof start.input.stopHost, 'function');
+  await expectCode(() => service.upgrade({ runtimeId: opened.runtimeId, ownerId: 'owner' }), 'UPGRADE_BUSY');
+  assert.deepEqual((await service.catalog()).runtimes[0].upgrade, { phase: 'running', step: 'backup' });
+  await start.input.stopHost();
+  assert.equal((await service.catalog()).runtimes[0].phase, 'exited');
+});
+
+test('upgrade is unavailable when no upgrade service is configured', async (t) => {
+  const { service } = await fixture(t);
+  await expectCode(() => service.upgrade({ ownerId: 'owner' }), 'UPGRADE_RUNTIME_UNAVAILABLE');
+  const value = await service.catalog();
+  assert.equal(value.currentHost.current, true, 'the version row still renders');
+  assert.equal(value.currentHost.dshVersion, null);
+  assert.equal(value.currentHost.upgradeAvailable, false);
+});
+
+test('desktop alignment alone offers the sync action on the web row', async (t) => {
+  const upgrades = fakeUpgrades({ latestDshVersion: '0.2.1-rc.5', alignPending: true });
+  const { service } = await fixture(t, { upgrades });
+  await service.openWeb({ profileId: 'web', ownerId: 'owner', confirmIndependentHost: true });
+  await waitFor(async () => (await service.catalog()).runtimes[0].checking === false);
+  const value = await service.catalog();
+  assert.equal(value.runtimes[0].alignPending, true);
+  assert.equal(value.runtimes[0].latestDshVersion, '0.2.1-rc.5');
+  assert.equal(value.runtimes[0].upgradeAvailable, true, 'alignment alone shows the button');
+});
+
+test('a Desktop app CLI never offers the DSH upgrade action', async (t) => {
+  const upgrades = fakeUpgrades({ dshUpgradeAllowed: false, alignPending: false });
+  const { service } = await fixture(t, { upgrades, currentDshVersion: '0.2.1-rc.5' });
+  await waitFor(async () => (await service.catalog()).currentHost.checking === false);
+  const value = await service.catalog();
+  assert.equal(value.currentHost.latestDshVersion, '0.2.2-rc.1');
+  assert.equal(value.currentHost.upgradeAvailable, false, 'a newer npm release does not apply to the app CLI');
+  const aligned = fakeUpgrades({ dshUpgradeAllowed: false, alignPending: true });
+  const second = await fixture(t, { upgrades: aligned });
+  await second.service.openWeb({ profileId: 'web', ownerId: 'owner', confirmIndependentHost: true });
+  await waitFor(async () => (await second.service.catalog()).runtimes[0].checking === false);
+  assert.equal((await second.service.catalog()).runtimes[0].upgradeAvailable, true, 'plugin alignment stays available');
+});
+
+test('a stopped Web profile is listed with its alignment state and upgrades without a Host', async (t) => {
+  const upgrades = fakeUpgrades({ latestDshVersion: VERSION, alignPending: true });
+  const { service } = await fixture(t, { currentDshVersion: VERSION, upgrades });
+  await waitFor(async () => {
+    const catalog = await service.catalog();
+    const row = catalog.runtimes.find((item) => item.profileId === 'web' && item.phase === 'stopped');
+    return Boolean(row) && row.checking === false;
+  });
+  const catalog = await service.catalog();
+  const row = catalog.runtimes.find((item) => item.profileId === 'web' && item.phase === 'stopped');
+  assert.equal(row.id, 'profile:web');
+  assert.equal(row.canStop, false);
+  assert.equal(row.dshVersion, VERSION);
+  assert.equal(row.alignPending, true);
+  assert.equal(row.upgradeAvailable, true, 'a pending desktop alignment offers the sync action');
+
+  const started = await service.upgrade({ ownerId: 'owner', profileId: 'web' });
+  assert.deepEqual(started, { started: true, upgrade: { phase: 'running', step: 'backup' } });
+  const start = upgrades.calls.find((call) => call.method === 'start');
+  assert.equal(start.input.profileId, 'web');
+  assert.equal(start.input.runtimeId, null);
+  assert.equal(start.input.dshVersion, VERSION);
+  assert.equal(start.input.stopHost, null, 'a stopped profile has no Host to stop');
+
+  await expectCode(() => service.upgrade({ ownerId: 'owner', profileId: 'tui' }), 'PROFILE_NOT_FOUND');
+  await expectCode(() => service.upgrade({ ownerId: 'owner', profileId: '../web' }), 'PROFILE_NOT_FOUND');
 });

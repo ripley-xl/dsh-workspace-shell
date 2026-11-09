@@ -115,7 +115,22 @@ return {
   apply(ctx) {
     // Embedded views still register sessions and accept navigation without mounting another frame.
     sessions?.apply(ctx);
-    if ([window.location.search, (window.location.hash ?? '').slice(1)].some((value) => new URLSearchParams(value).get('workspaceShellEmbedded') === '1')) return;
+    const embedded = [window.location.search, (window.location.hash ?? '').slice(1)].some((value) => new URLSearchParams(value).get('workspaceShellEmbedded') === '1');
+    // Session status arrives from a service other plugins provide; waiting for it
+    // keeps a profile without that UI domain from holding the whole Shell back.
+    const withUiSession = (callback) => {
+      if (typeof ctx.inject === 'function') ctx.inject(['uiSession'], callback);
+      else callback(ctx);
+    };
+    if (embedded) {
+      // The framing Shell owns the notification surface; the guest only reports
+      // transitions and answers its open-Session request.
+      if (typeof deps.createGuestNotificationBridge === 'function') withUiSession((scope) => {
+        const bridge = safeFactory(deps.createGuestNotificationBridge, { window, ctx: scope });
+        if (bridge) scope.effect(() => () => bridge.dispose(), 'workspace guest notifications');
+      });
+      return;
+    }
     ctx.effect(() => ctx.locale.register('workspace-shell', shellMessages), 'workspace locale dictionaries');
     const activeLocale = ctx.locale?.getSnapshot?.().active || document?.documentElement?.lang || 'zh';
     const launcherModule = typeof deps.createLauncher === 'function'
@@ -123,10 +138,38 @@ return {
       : null;
     const classes = {};
     let controller;
-    const workspace = createWorkspaceClient({ ...deps, ctx, isFrameActive: () => controller?.getSnapshot().phase === 'active' });
+    let notifications = null;
+    const workspace = createWorkspaceClient({ ...deps, ctx, isFrameActive: () => controller?.getSnapshot().phase === 'active',
+      onGuestNotification: (key, data) => notifications?.reportGuest(key, data) });
     ctx.effect(() => () => workspace.dispose(), 'workspace view ownership');
     const workspaceSelection = createWorkspaceSelection(React, ctx.slots);
     ctx.effect(() => () => workspaceSelection.dispose(), 'workspace selection observation');
+    // Native notifications belong to Desktop: a plain browser page keeps its own
+    // notification permission model and is deliberately left alone.
+    const desktopNotification = typeof window.dshDesktop === 'object'
+      && window.dshDesktop !== null
+      && typeof window.dshDesktop.browser === 'object'
+      && window.dshDesktop.browser !== null;
+    if (desktopNotification && typeof deps.createNotificationCenter === 'function') {
+      notifications = safeFactory(deps.createNotificationCenter, {
+        window,
+        document,
+        workspace,
+        localeOf: () => ctx.locale?.getSnapshot?.(),
+        openLocalSession: (sessionId) => { ctx.uiWorkspace.openSession(sessionId); },
+      });
+      if (notifications) {
+        ctx.effect(() => () => notifications.dispose(), 'workspace notifications');
+        if (typeof deps.createSessionNotificationMonitor === 'function') withUiSession((scope) => {
+          const monitor = safeFactory(deps.createSessionNotificationMonitor, {
+            status: scope.uiSession?.sessionStatus,
+            list: scope.sessions?.list,
+            report: (payload) => notifications.reportHost(payload),
+          });
+          if (monitor) scope.effect(() => () => monitor.dispose(), 'workspace notification monitor');
+        });
+      }
+    }
     ctx.provide('workspaceShell', Object.freeze({
       getSnapshot: workspace.tabs.getSnapshot, subscribe: workspace.tabs.subscribe,
       registerProvider: workspace.registerProvider, open: workspace.open, activate: workspace.activate,

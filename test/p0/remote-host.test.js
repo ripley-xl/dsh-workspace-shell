@@ -79,3 +79,57 @@ test('remote host attaches, exposes a local browser URL, and releases its lease'
   assert.equal(calls.some((call) => Array.isArray(call) && call[0] === 'release'), true);
   assert.equal(calls.includes('gateway.close'), true);
 });
+
+test('remote host starts its own instance instead of attaching to another runtime package', async () => {
+  const calls = [];
+  const gateway = new EventEmitter();
+  gateway.url = 'http://127.0.0.1:52000';
+  gateway.listen = async () => {};
+  gateway.close = async () => {};
+  const channel = new EventEmitter();
+  channel.closed = false;
+  channel.createLoopbackGateway = () => gateway;
+  const other = {
+    instanceId: 'other-runtime-instance',
+    createdBy: '0.2.1-rc.5-controller-0.2.1-linux-x64-glibc',
+    endpoint: { host: '127.0.0.1', port: 41000 },
+  };
+  const own = {
+    instanceId: 'own-runtime-instance',
+    createdBy: '0.2.1-rc.5-controller-0.2.2-linux-x64-glibc',
+    endpoint: { host: '127.0.0.1', port: 41001 },
+  };
+  const controller = {
+    async list() { return { instances: [{ instance: other, health: { healthy: true } }] }; },
+    async start(input) { calls.push(['start', input]); return { instance: own }; },
+    async attach(input) {
+      calls.push(['attach', input]);
+      return {
+        instance: own,
+        authenticatedUrl: 'http://127.0.0.1:41001/?tkn=secret-token',
+        clientLeaseId: 'lease-1',
+      };
+    },
+    async release() {},
+  };
+  let requestCount = 0;
+  const host = new RemoteHostConnection({
+    channel,
+    controller,
+    version: '0.2.1-rc.5',
+    buildId: 'build-1',
+    runtimeId: '0.2.1-rc.5-controller-0.2.2-linux-x64-glibc',
+    workspace: '/home/test',
+    async fetchImpl(_url, options) {
+      requestCount += 1;
+      if (requestCount === 1) return new Response(null, { status: 302, headers: { 'set-cookie': 'browser-credential=secret; Path=/' } });
+      assert.equal(options.headers.cookie, 'browser-credential=secret');
+      return Response.json({ ok: true, role: 'remote' });
+    },
+  });
+  await host.open();
+  assert.equal(host.instanceId, 'own-runtime-instance');
+  assert.equal(calls.filter((call) => call[0] === 'start').length, 1);
+  assert.equal(calls.some((call) => call[0] === 'attach' && call[1].instanceId === 'other-runtime-instance'), false);
+  await host.close();
+});

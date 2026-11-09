@@ -38,6 +38,12 @@ class MockWebview {
     for (const listener of [...(this.listeners.get(name) ?? [])]) listener(event);
   }
 
+  executeJavaScript(code) {
+    this.scripts ??= [];
+    this.scripts.push(code);
+    return Promise.resolve(true);
+  }
+
   loadURL(url) {
     this.loadCalls.push(url);
     this.currentURL = url;
@@ -451,7 +457,7 @@ test('responses must match the pending request id, the guest window, the origin,
   await guest.dispose();
 });
 
-test('the message listener is installed lazily, removed on dispose, and stops publishing', async () => {
+test('the message listener is installed with the Guest, removed on dispose, and stops publishing', async () => {
   const mock = harness();
   const guest = createDesktopGuest(options(mock));
   assert.equal(mock.window.listenerCount(), 0);
@@ -814,7 +820,7 @@ test('throwing onError, unsubscribe, listener removal and DOM removal still rele
   await guest.dispose();
   assert.equal(errorCalls, 1);
   assert.equal(element.removeCalls, 1);
-  assert.deepEqual(element.removeListenerCalls, ['dom-ready', 'did-fail-load', 'render-process-gone', 'did-navigate', 'did-navigate-in-page']);
+  assert.deepEqual(element.removeListenerCalls, ['dom-ready', 'console-message', 'did-fail-load', 'render-process-gone', 'did-navigate', 'did-navigate-in-page']);
   assert.deepEqual(mock.calls.release, ['lease-1']);
   assert.equal(mock.openListeners.size, 0);
 });
@@ -876,4 +882,66 @@ test('release rejection is contained, reported safely, and never retried', async
   assert.deepEqual(mock.calls.acquire, ['workspace-profile:profile-1']);
   assert.deepEqual(mock.calls.release, ['lease-1']);
   assert.deepEqual(errors, [{ code: 'DESKTOP_GUEST_RELEASE_FAILED' }]);
+});
+
+test('guest notification frames reach the parent callback only from the leased document', async () => {
+  const mock = harness();
+  const events = [];
+  const guest = createDesktopGuest(options(mock, { onGuestEvent: (data) => events.push(data) }));
+  await guest.start();
+  const element = mock.elements[0];
+  element.emit('dom-ready');
+  await flush();
+  const data = {
+    type: 'workspace-shell-notification', version: 1, event: 'attention', kind: 'approval',
+    sessionId: 'a'.repeat(32), title: 'Remote check', detail: 'bash', viewing: false,
+  };
+  mock.window.deliver({ data, origin: 'https://evil.example', source: element.contentWindow });
+  mock.window.deliver({ data, origin: 'https://example.com', source: {} });
+  mock.window.deliver({ data: { ...data, version: 2 }, origin: 'https://example.com', source: element.contentWindow });
+  assert.deepEqual(events, []);
+  mock.window.deliver({ data, origin: 'https://example.com', source: element.contentWindow });
+  assert.deepEqual(events, [data]);
+  await guest.dispose();
+});
+
+test('openSession calls the Guest entry point with an encoded, validated Session id', async () => {
+  const mock = harness();
+  const guest = createDesktopGuest(options(mock));
+  assert.equal(guest.openSession('a'.repeat(32)), false, 'a Guest that is not ready cannot receive the request');
+  await guest.start();
+  const element = mock.elements[0];
+  element.emit('dom-ready');
+  await flush();
+  const sessionId = 'a'.repeat(32);
+  assert.equal(guest.openSession(sessionId), true);
+  assert.deepEqual(element.scripts, ['__workspaceShellOpenSession("' + sessionId + '")']);
+  assert.equal(guest.openSession('../etc/passwd'), false);
+  assert.equal(guest.openSession('a"b'), false);
+  assert.equal(element.scripts.length, 1, 'invalid ids never reach the page');
+  await guest.dispose();
+  assert.equal(guest.openSession(sessionId), false);
+});
+
+test('console output from the leased Guest page carries notification events', async () => {
+  const mock = harness();
+  const events = [];
+  const guest = createDesktopGuest(options(mock, { onGuestEvent: (data) => events.push(data) }));
+  await guest.start();
+  const element = mock.elements[0];
+  element.emit('dom-ready');
+  await flush();
+  const data = {
+    type: 'workspace-shell-notification', version: 1, event: 'turn-end', kind: 'turn-end',
+    sessionId: 'a'.repeat(32), title: 'Remote check', detail: '', viewing: false,
+  };
+  element.emit('console-message', { message: 'ordinary page log' });
+  element.emit('console-message', { message: '__workspace-shell-notification__{broken' });
+  element.emit('console-message', { message: '__workspace-shell-notification__' + JSON.stringify({ ...data, version: 2 }) });
+  assert.deepEqual(events, []);
+  element.emit('console-message', { message: '__workspace-shell-notification__' + JSON.stringify(data) });
+  assert.deepEqual(events, [data]);
+  await guest.dispose();
+  element.emit('console-message', { message: '__workspace-shell-notification__' + JSON.stringify(data) });
+  assert.equal(events.length, 1, 'a disposed Guest delivers nothing');
 });

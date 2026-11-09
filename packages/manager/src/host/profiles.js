@@ -28,6 +28,14 @@ export function matchesProfile(entry, profileId) {
   return instanceProfileId(entry?.instance ?? entry) === profileId;
 }
 
+/** A legacy instance without a creator identity belongs to any runtime. */
+export function instanceRuntimeMatches(instance, runtimeId) {
+  if (typeof runtimeId !== 'string' || runtimeId.length === 0) return true;
+  const createdBy = instance?.createdBy;
+  if (typeof createdBy !== 'string' || createdBy.length === 0) return true;
+  return createdBy === runtimeId;
+}
+
 /**
  * Normalizes a controller profiles response. The controller lists Web profile
  * ids as `{ profiles: ["web", "work"] }`; the agreed UI shape is

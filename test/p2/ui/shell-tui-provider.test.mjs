@@ -174,7 +174,7 @@ async function hostBackedProvider(t) {
       return terminal;
     },
   };
-  const service = createLocalRuntimeService({ subprocess, profileContext: { name: 'current', dir: current, home, cwd }, expectedVersion: '0.2.1-rc.5', graceMs: 5, idFactory: () => 'runtime-host-exit' });
+  const service = createLocalRuntimeService({ subprocess, profileContext: { name: 'current', dir: current, home, cwd }, graceMs: 5, idFactory: () => 'runtime-host-exit' });
   let startupError;
   let startupResult;
   const h = await boot({ profileId: 'tui', cwd, api: {

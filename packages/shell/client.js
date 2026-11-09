@@ -1556,6 +1556,13 @@ const WORKSPACE_SHELL_CWD_VERSION = 1;
 const WORKSPACE_SHELL_CWD_TIMEOUT = 1000;
 const WORKSPACE_SHELL_CWD_PARENT_ORIGIN = 'workspaceShellParentOrigin';
 const WORKSPACE_SHELL_CWD_REQUEST_ID = /^[A-Za-z0-9_-]{16,128}$/;
+const WORKSPACE_SHELL_NOTIFICATION_EVENT = 'workspace-shell-notification';
+const WORKSPACE_SHELL_NOTIFICATION_VERSION = 1;
+// A Desktop Guest is a <webview> and has no parent frame, so it reports through
+// console output; the embedder pulls navigation commands in with executeJavaScript.
+const WORKSPACE_SHELL_NOTIFICATION_MARKER = '__workspace-shell-notification__';
+const WORKSPACE_SHELL_OPEN_SESSION_GLOBAL = '__workspaceShellOpenSession';
+const WORKSPACE_SHELL_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 // A serialized origin: scheme://host[:port] with no credentials, path, query or fragment.
 const WORKSPACE_SHELL_ORIGIN = /^[a-z][a-z0-9+.-]{1,31}:\/\/[^\s/?#@]{1,255}$/;
 
@@ -1654,6 +1661,7 @@ function createDesktopGuest({
   onReady,
   onError,
   openExternal,
+  onGuestEvent,
   parentOrigin,
 }) {
   const timers = window ?? globalThis;
@@ -1719,26 +1727,48 @@ function createDesktopGuest({
     }
   };
 
-  const onCwdMessage = (event) => {
-    const pending = pendingCwd;
-    if (!pending) return;
+  // One channel carries both replies and unsolicited guest events. A frame counts only
+  // while it comes from this guest's contentWindow, from the guest's own origin, and
+  // while the guest is still current.
+  const currentGuest = (event) => {
+    if (closed || invalidated || !ready || !webview?.isConnected) return false;
+    if (event.source !== webview.contentWindow) return false;
+    if (event.origin !== channelOrigin) return false;
+    return guestOriginNow() === channelOrigin;
+  };
+
+  const onChannelMessage = (event) => {
     try {
+      if (!currentGuest(event)) return;
       const data = event?.data;
       if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+      if (data.type === WORKSPACE_SHELL_NOTIFICATION_EVENT) {
+        if (data.version !== WORKSPACE_SHELL_NOTIFICATION_VERSION) return;
+        callSafely(onGuestEvent, data);
+        return;
+      }
+      const pending = pendingCwd;
+      if (!pending) return;
       if (data.type !== WORKSPACE_SHELL_CWD_RESPONSE) return;
       if (data.version !== WORKSPACE_SHELL_CWD_VERSION) return;
       if (data.requestId !== pending.requestId) return;
-      if (closed || invalidated || !ready || !webview?.isConnected) return;
-      if (event.source !== webview.contentWindow) return;
-      if (event.origin !== channelOrigin) return;
-      if (guestOriginNow() !== channelOrigin) return;
       settleCwd(validCwd(data.cwd));
     } catch {
       // Malformed events and revoked cross-origin access stay indistinguishable.
     }
   };
 
-  const removeCwdListener = () => {
+  const attachChannel = () => {
+    if (channelDetach) return;
+    try {
+      window?.addEventListener?.('message', onChannelMessage);
+      channelDetach = () => window?.removeEventListener?.('message', onChannelMessage);
+    } catch {
+      channelDetach = null;
+    }
+  };
+
+  const removeChannel = () => {
     abandonCwd();
     const detach = channelDetach;
     channelDetach = null;
@@ -1751,7 +1781,7 @@ function createDesktopGuest({
   };
 
   const removeContained = () => {
-    removeCwdListener();
+    removeChannel();
     if (signal) {
       try {
         signal.removeEventListener?.('abort', onAbort);
@@ -1867,9 +1897,27 @@ function createDesktopGuest({
     if (!closed && !invalidated) abandonCwd();
   };
 
+  // Webview DOM events pass one object; older signatures pass the message as a
+  // separate argument. Accept both without depending on the Electron version.
+  const onConsoleMessage = (event, _level, argument) => {
+    try {
+      const message = typeof event?.message === 'string' ? event.message : (typeof argument === 'string' ? argument : '');
+      if (!message.startsWith(WORKSPACE_SHELL_NOTIFICATION_MARKER)) return;
+      if (closed || invalidated || !ready || !webview?.isConnected) return;
+      let data;
+      try { data = JSON.parse(message.slice(WORKSPACE_SHELL_NOTIFICATION_MARKER.length)); } catch { return; }
+      if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+      if (data.type !== WORKSPACE_SHELL_NOTIFICATION_EVENT || data.version !== WORKSPACE_SHELL_NOTIFICATION_VERSION) return;
+      callSafely(onGuestEvent, data);
+    } catch {
+      // Malformed console output and a torn-down Guest both mean "no event".
+    }
+  };
+
   const attachListeners = (current, lease) => {
     listeners = [
       ['dom-ready', onDomReady],
+      ['console-message', onConsoleMessage],
       ['did-fail-load', (event) => {
         if (event?.isMainFrame !== true) return;
         if (event.errorCode === -3) {
@@ -1881,6 +1929,7 @@ function createDesktopGuest({
       ['did-navigate-in-page', onNavigated],
     ];
     for (const [name, listener] of listeners) current.addEventListener(name, listener);
+    attachChannel();
     unsubscribeOpen = bridge.onOpenRequested(lease, onExternalRequest) ?? null;
     if (parentTarget) loadTarget = withParentOrigin(url, parentTarget) ?? url;
   };
@@ -1986,14 +2035,6 @@ function createDesktopGuest({
       abandonCwd();
       return;
     }
-    if (!channelDetach) {
-      try {
-        window?.addEventListener?.('message', onCwdMessage);
-        channelDetach = () => window?.removeEventListener?.('message', onCwdMessage);
-      } catch {
-        channelDetach = null;
-      }
-    }
     try {
       target.postMessage({
         type: WORKSPACE_SHELL_CWD_REQUEST,
@@ -2027,7 +2068,24 @@ function createDesktopGuest({
     return validCwd(value);
   };
 
-  return { start, setVisible, focus, resize, getWorkingDirectory, dispose };
+  // Ask the guest to show one Session. The identifier is checked here and the
+  // value is JSON-encoded into the call, so the Guest receives exactly one string.
+  // The request is one-way: a stale request after navigation does nothing.
+  const openSession = (sessionId) => {
+    const current = webview;
+    if (closed || invalidated || !ready || !current?.isConnected) return false;
+    if (typeof sessionId !== 'string' || !WORKSPACE_SHELL_SESSION_ID.test(sessionId)) return false;
+    let executing;
+    try {
+      executing = current.executeJavaScript(WORKSPACE_SHELL_OPEN_SESSION_GLOBAL + '(' + JSON.stringify(sessionId) + ')', false);
+    } catch {
+      return false;
+    }
+    if (executing && typeof executing.catch === 'function') executing.catch(() => {});
+    return true;
+  };
+
+  return { start, setVisible, focus, resize, getWorkingDirectory, openSession, dispose };
 }
 
 return { createDesktopGuest };
@@ -2050,6 +2108,10 @@ const CWD_VERSION = 1;
 const CWD_TIMEOUT = 1000;
 const CWD_PARENT_ORIGIN = 'workspaceShellParentOrigin';
 const CWD_REQUEST_ID = /^[A-Za-z0-9_-]{16,128}$/;
+const NOTIFY_EVENT = 'workspace-shell-notification';
+const OPEN_SESSION_EVENT = 'workspace-shell-open-session';
+const NOTIFY_VERSION = 1;
+const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const ORIGIN_PATTERN = /^[a-z][a-z0-9+.-]{1,31}:\/\/[^\s/?#@]{1,255}$/;
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
 const SANDBOX = 'allow-scripts allow-same-origin allow-forms allow-modals';
@@ -2091,6 +2153,7 @@ function createBrowserGuest({
   signal,
   onReady,
   onError,
+  onGuestEvent,
   parentOrigin,
 }) {
   const timers = window ?? globalThis;
@@ -2162,21 +2225,38 @@ function createBrowserGuest({
     return true;
   };
 
-  const onCwdMessage = (event) => {
-    const current = pending;
-    if (!current) return;
+  // One channel carries cwd replies and unsolicited guest events. The framed document
+  // must still be the assigned URL; a later navigation is caught by the origin gate.
+  const onChannelMessage = (event) => {
     try {
-      const data = event?.data;
-      if (!data || typeof data !== 'object' || Array.isArray(data)) return;
-      if (data.type !== CWD_RESPONSE || data.version !== CWD_VERSION) return;
-      if (data.requestId !== current.requestId) return;
       if (!sameOrigin()) return;
       const source = frame?.contentWindow;
       if (!source || event.source !== source) return;
       if (event.origin !== target.origin) return;
+      const data = event?.data;
+      if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+      if (data.type === NOTIFY_EVENT) {
+        if (data.version !== NOTIFY_VERSION) return;
+        callSafely(() => onGuestEvent?.(data));
+        return;
+      }
+      const current = pending;
+      if (!current) return;
+      if (data.type !== CWD_RESPONSE || data.version !== CWD_VERSION) return;
+      if (data.requestId !== current.requestId) return;
       settle(validCwd(data.cwd));
     } catch {
       // Cross-origin access revocation and malformed events both mean "no value".
+    }
+  };
+
+  const attachChannel = () => {
+    if (messageAttached) return;
+    try {
+      window?.addEventListener?.('message', onChannelMessage);
+      messageAttached = true;
+    } catch {
+      messageAttached = false;
     }
   };
 
@@ -2185,7 +2265,7 @@ function createBrowserGuest({
     if (!messageAttached) return;
     messageAttached = false;
     try {
-      window?.removeEventListener?.('message', onCwdMessage);
+      window?.removeEventListener?.('message', onChannelMessage);
     } catch {
       // Cleanup continues with the iframe.
     }
@@ -2296,6 +2376,7 @@ function createBrowserGuest({
       current.addEventListener('error', errorListener);
       frame = current;
       container.appendChild(current);
+      attachChannel();
       current.src = frameUrl;
       signal?.addEventListener?.('abort', onAbort, { once: true });
     } catch {
@@ -2349,14 +2430,7 @@ function createBrowserGuest({
         settle(null);
         return;
       }
-      if (!messageAttached) {
-        try {
-          window?.addEventListener?.('message', onCwdMessage);
-          messageAttached = true;
-        } catch {
-          messageAttached = false;
-        }
-      }
+      attachChannel();
       try {
         source.postMessage({
           type: CWD_REQUEST,
@@ -2372,7 +2446,34 @@ function createBrowserGuest({
     return validCwd(value);
   };
 
-  return { start, setVisible, focus, resize, getWorkingDirectory, dispose };
+  // Ask the guest to show one Session; the receiving page verifies the parent origin.
+  const openSession = (sessionId) => {
+    const current = frame;
+    if (!sameOrigin() || !target) return false;
+    if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return false;
+    const id = requestId(window);
+    if (!id) return false;
+    let source;
+    try {
+      source = current.contentWindow;
+    } catch {
+      return false;
+    }
+    if (!source || typeof source.postMessage !== 'function') return false;
+    try {
+      source.postMessage({
+        type: OPEN_SESSION_EVENT,
+        version: NOTIFY_VERSION,
+        requestId: id,
+        sessionId,
+      }, target.origin);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  return { start, setVisible, focus, resize, getWorkingDirectory, openSession, dispose };
 }
 
 return { createBrowserGuest };
@@ -3605,7 +3706,7 @@ function createWorkspaceClient(deps) {
     getSnapshot: () => sshRegistration?.extension ?? null,
     subscribe(listener) { extensionListeners.add(listener); return () => extensionListeners.delete(listener); },
   });
-  let infoValue = Object.freeze({ phase: 'loading', currentProfile: '', defaultCwd: '', profiles: [], runtimes: [] });
+  let infoValue = Object.freeze({ phase: 'loading', currentProfile: '', defaultCwd: '', profiles: [], currentHost: null, runtimes: [] });
   let sshConnections = Object.freeze([]);
   let disposed = false, disposal, navigation = 0, refreshGeneration = 0, wantedLocal = true;
   let overlayOpen = false;
@@ -3615,6 +3716,7 @@ function createWorkspaceClient(deps) {
   const terminalCwds = new Map();
   const webCwdReaders = new Map();
   const webRuntimeIds = new Map();
+  const guestOpeners = new Map();
   const sessionTabTokens = new Map();
   let sessionNavigation = null;
   const sessionNavigationListeners = new Set();
@@ -3833,7 +3935,7 @@ function createWorkspaceClient(deps) {
     try { window.sessionStorage.setItem('workspace-shell.owner.v1', ownerId); } catch {}
   }
   const publish = (value) => {
-    infoValue = Object.freeze(value);
+    infoValue = Object.freeze({ currentHost: null, ...value });
     for (const listener of [...listeners]) { try { listener(); } catch {} }
   };
   const publishConnections = (value) => {
@@ -3882,9 +3984,41 @@ function createWorkspaceClient(deps) {
     id: item.id, isCurrent: item.isCurrent === true, web: item.web === true, tui: item.tui === true,
     ...['dsh-tui', 'pi-tui', 'generic-tui'].includes(item.tuiFlavor) ? { tuiFlavor: item.tuiFlavor } : {},
   });
+  const UPGRADE_PHASES = new Set(['running', 'done', 'failed']);
+  const UPGRADE_STEPS = new Set(['backup', 'dsh', 'stop', 'write', 'install', 'validate']);
+  const mapUpgrade = (value) => {
+    if (!value || typeof value !== 'object' || !UPGRADE_PHASES.has(value.phase)) return null;
+    const step = UPGRADE_STEPS.has(value.step) ? value.step : null;
+    const errorCode = typeof value.error === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(value.error) ? value.error : null;
+    const ignoredBuilds = Array.isArray(value.ignoredBuilds)
+      ? value.ignoredBuilds.filter((name) => typeof name === 'string' && /^[A-Za-z0-9@/._#+-]{1,160}$/.test(name)).slice(0, 32)
+      : [];
+    return Object.freeze({
+      phase: value.phase,
+      ...(step ? { step } : {}),
+      ...(errorCode ? { error: errorCode } : {}),
+      ...(ignoredBuilds.length ? { ignoredBuilds: Object.freeze(ignoredBuilds) } : {}),
+    });
+  };
+  const mapVersionState = (item) => {
+    const upgrade = mapUpgrade(item.upgrade);
+    return {
+      ...(typeof item.dshVersion === 'string' && item.dshVersion ? { dshVersion: item.dshVersion } : { dshVersion: null }),
+      ...(typeof item.latestDshVersion === 'string' && item.latestDshVersion ? { latestDshVersion: item.latestDshVersion } : { latestDshVersion: null }),
+      checking: item.checking === true,
+      upgradeAvailable: item.upgradeAvailable === true,
+      ...(typeof item.alignPending === 'boolean' ? { alignPending: item.alignPending } : {}),
+      ...(upgrade ? { upgrade } : {}),
+    };
+  };
+  const mapCurrentHost = (value) => {
+    if (!value || typeof value !== 'object' || typeof value.profileId !== 'string') return null;
+    return Object.freeze({ profileId: value.profileId, ...mapVersionState(value) });
+  };
   const mapRuntime = (item) => Object.freeze({
     id: item.id, kind: item.kind, profileId: item.profileId, phase: item.phase, canStop: item.canStop === true,
     ...(item.source === 'ssh' ? { source: 'ssh' } : {}),
+    ...mapVersionState(item),
   });
   async function refresh() {
     if (disposed) return false;
@@ -3898,7 +4032,7 @@ function createWorkspaceClient(deps) {
       if (typeof result?.currentProfile !== 'string' || !Array.isArray(result.profiles) || !Array.isArray(result.runtimes)) throw error('WORKSPACE_INVALID_CATALOG');
       const profiles = result.profiles.slice(0, 256).filter((item) => typeof item?.id === 'string').map(mapProfile);
       const runtimes = withViews(result.runtimes.slice(0, 128).filter((item) => typeof item?.id === 'string').map(mapRuntime));
-      publish({ phase: 'ready', currentProfile: result.currentProfile, defaultCwd: typeof result.defaultCwd === 'string' ? result.defaultCwd : '', profiles: Object.freeze(profiles), runtimes });
+      publish({ phase: 'ready', currentProfile: result.currentProfile, defaultCwd: typeof result.defaultCwd === 'string' ? result.defaultCwd : '', profiles: Object.freeze(profiles), currentHost: mapCurrentHost(result.currentHost), runtimes });
       return true;
     } catch (cause) {
       // Keep the previous list and mark it possibly stale instead of pretending it is empty.
@@ -4099,9 +4233,20 @@ function createWorkspaceClient(deps) {
       if (typeof result?.runtimeId === 'string') { webRuntimeIds.set(spec.key, result.runtimeId); syncViews(); }
       return webUrl(result?.url);
     };
+    const guestNotice = (data) => {
+      try {
+        deps.onGuestNotification?.(spec.key, data);
+      } catch {
+        // A notification consumer cannot interrupt the Guest.
+      }
+    };
     const task = resolveUrl().then(async (url) => {
       if (closed) return;
       if (spec.ssh && sshRegistration !== registration) throw error('SSH_COMPONENT_DISABLED');
+      // Connection's login redirect removes the query but preserves the fragment,
+      // so the embedded flag must travel in the hash for every Guest. SSH views have
+      // no session-navigation identity but still need it for the notification bridge.
+      const bootstrap = new URLSearchParams({ workspaceShellEmbedded: '1', ...(parentOrigin ? { workspaceShellParentOrigin: parentOrigin } : {}) });
       if (!spec.ssh && sessionNavigation?.context) {
         const parent = await sessionNavigation.context();
         if (closed) return;
@@ -4110,12 +4255,14 @@ function createWorkspaceClient(deps) {
         url.searchParams.set('workspaceSessionWindow', parent.windowId);
         url.searchParams.set('workspaceSessionParent', parent.instanceId);
         url.searchParams.set('workspaceSessionTab', token);
-        // Connection's login redirect removes the query but preserves the fragment.
-        const bootstrap = new URLSearchParams({ workspaceShellEmbedded: '1', workspaceSessionWindow: parent.windowId, workspaceSessionParent: parent.instanceId, workspaceSessionTab: token });
-        url.hash = url.hash.slice(1) + (url.hash ? '&' : '') + bootstrap.toString();
+        bootstrap.set('workspaceSessionWindow', parent.windowId);
+        bootstrap.set('workspaceSessionParent', parent.instanceId);
+        bootstrap.set('workspaceSessionTab', token);
       }
+      url.hash = url.hash.slice(1) + (url.hash ? '&' : '') + bootstrap.toString();
       token?.mark('host');
       guest = createGuest({ document, window, container: options.container, workspaceKey: 'workspace-profile:' + spec.key, url: url.href, signal: abort.signal,
+        onGuestEvent: guestNotice,
         onReady() {
           window.clearTimeout(readyTimer);
           if (closed) return;
@@ -4126,6 +4273,7 @@ function createWorkspaceClient(deps) {
         },
         onError: report, openExternal: (target) => { if (!closed) window.open(target, '_blank', 'noopener,noreferrer'); } });
       guest.setVisible(shown);
+      guestOpeners.set(spec.key, (sessionId) => guest?.openSession?.(sessionId) === true);
       readyTimer = window.setTimeout(() => report(error('WORKSPACE_VIEW_TIMEOUT')), 30000);
       await guest.start();
       token?.mark('lease');
@@ -4133,7 +4281,7 @@ function createWorkspaceClient(deps) {
     const dispose = () => {
       if (closing) return closing;
       closed = true; abort.abort(); window.clearTimeout(readyTimer);
-      sessionTabTokens.delete(spec.key);
+      sessionTabTokens.delete(spec.key); guestOpeners.delete(spec.key);
       // A cancelled open is not a measurement: retire it without publishing.
       timings.delete(spec.key);
       if (token) { try { timing.invalidate(spec.key); } catch { /* Timing cleanup never blocks the view. */ } }
@@ -4474,6 +4622,16 @@ function createWorkspaceClient(deps) {
       await refresh();
     }
   }
+  async function upgradeHost(runtimeId, profileId) {
+    if (disposed) throw error('WORKSPACE_DISPOSED');
+    const input = {
+      ownerId,
+      ...(typeof runtimeId === 'string' && runtimeId ? { runtimeId } : {}),
+      ...(typeof profileId === 'string' && profileId ? { profileId } : {}),
+    };
+    const result = await api('/hosts/upgrade', input);
+    return result ?? null;
+  }
   async function readDefaultCwd(tabId, localCwd) {
     const snapshot = tabs.getSnapshot();
     const source = snapshot.tabs.find((tab) => tab.id === tabId);
@@ -4515,7 +4673,14 @@ function createWorkspaceClient(deps) {
       return id;
     });
   };
-  return Object.freeze({ tabs, info, connections, sshExtension, registerSshExtension, sessionNavigationExtension, registerSessionNavigation, sessionTabs, openSessionHost, timing, canWeb, canTui, refresh, registerProvider, open, activate, setOverlay, close, closeViews, readDefaultCwd,
+  // The Guest owns the only navigation primitive; the Shell asks the exact view that
+  // produced a notification to show one Session.
+  function openSessionInTab(key, sessionId) {
+    if (disposed || typeof key !== 'string') return false;
+    const open = guestOpeners.get(key);
+    return typeof open === 'function' ? open(sessionId) === true : false;
+  }
+  return Object.freeze({ tabs, info, connections, sshExtension, registerSshExtension, sessionNavigationExtension, registerSessionNavigation, sessionTabs, openSessionHost, openSessionInTab, timing, canWeb, canTui, refresh, registerProvider, open, activate, setOverlay, close, closeViews, readDefaultCwd,
     appearance, appearanceColors, getTabAppearance, canCustomizeTab, setTabAppearance,
     openLauncher, launcherSource, readLauncherCwd, openLauncherWeb, openLauncherTui, moveTab,
     openWeb, openTui, getTabStatus, sshRequest, reportSsh, openSshWeb, closeSshViews, sshViewCounts,
@@ -4526,6 +4691,7 @@ function createWorkspaceClient(deps) {
       return tabs.retry(id);
     },
     stopRuntime,
+    upgradeHost,
     dispose() {
       if (disposal) return disposal;
       disposed = true; ++navigation; ++refreshGeneration; refreshAbort.abort();
@@ -4533,7 +4699,7 @@ function createWorkspaceClient(deps) {
       try { orderMemory?.dispose(); } catch {}
       appearanceReady = false; appearanceHydrated = true; appearanceListeners.clear();
       try { appearanceMemory?.dispose(); } catch {}
-      sessionTabTokens.clear(); sessionNavigation = null; sessionNavigationListeners.clear();
+      sessionTabTokens.clear(); guestOpeners.clear(); sessionNavigation = null; sessionNavigationListeners.clear();
       sshRegistration?.unsubscribe?.(); sshRegistration?.abort.abort(); sshRegistration = null; extensionListeners.clear(); sshSpecs.clear();
       window.removeEventListener('pagehide', pagehide); offTabs(); listeners.clear(); connectionListeners.clear();
       for (const [key] of timings) { try { timing.invalidate(key); } catch {} }
@@ -4548,8 +4714,548 @@ function createWorkspaceClient(deps) {
 return { createWorkspaceClient };
 })();
 const { createWorkspaceClient } = m12;
-// ---- module: launcher ----
+// ---- module: notifications ----
 const m13 = (() => {
+// Desktop notifications for embedded and Local Web sessions.
+//
+// Every DSH Web page runs this Client. It watches its own Session status and reports
+// two events: a Turn settling, and a pending interaction that needs the user. An
+// embedded page sends them to its framing Shell; the top-level Shell turns them into
+// native notifications. The framing Shell owns the tab identity, so the guest never
+// names a tab and never gains a navigation primitive of its own.
+const NOTIFICATION_EVENT = 'workspace-shell-notification';
+const OPEN_SESSION_EVENT = 'workspace-shell-open-session';
+const NOTIFICATION_VERSION = 1;
+const NOTIFICATION_KINDS = new Set(['turn-end', 'approval', 'question', 'plan-review', 'attention']);
+const NOTIFICATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const NOTIFICATION_REQUEST_ID = /^[A-Za-z0-9_-]{16,128}$/;
+const NOTIFICATION_FIELD_LIMIT = 1024;
+const NOTIFICATION_TEXT_LIMIT = 200;
+const NOTIFICATION_TAG = 'workspace-shell:';
+// Chromium drops control characters and collapses whitespace in notification copy;
+// normalize here so both the body layout and the tests see the same string.
+function notificationText(value, limit = NOTIFICATION_TEXT_LIMIT) {
+  if (typeof value !== 'string') return '';
+  const normalized = value.replace(/[\u0000-\u001F\u007F-\u009F]/gu, ' ').replace(/\s+/gu, ' ').trim();
+  return normalized.length > limit ? normalized.slice(0, limit - 1).trimEnd() + '…' : normalized;
+}
+
+function notificationObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : null;
+}
+
+// A malformed or oversized field rejects the whole frame: partial messages would
+// otherwise present a half-truth about which Session needs attention.
+function notificationField(data, name) {
+  const value = data[name];
+  if (value === undefined) return '';
+  if (typeof value !== 'string' || value.length > NOTIFICATION_FIELD_LIMIT) return null;
+  return notificationText(value);
+}
+
+function validNotificationEvent(data) {
+  const value = notificationObject(data);
+  if (!value || value.type !== NOTIFICATION_EVENT || value.version !== NOTIFICATION_VERSION) return null;
+  if (value.event !== 'turn-end' && value.event !== 'attention') return null;
+  if (typeof value.sessionId !== 'string' || !NOTIFICATION_ID.test(value.sessionId)) return null;
+  if (typeof value.kind !== 'string' || !NOTIFICATION_KINDS.has(value.kind)) return null;
+  if (value.event === 'turn-end' && value.kind !== 'turn-end') return null;
+  if (value.event === 'attention' && value.kind === 'turn-end') return null;
+  const title = notificationField(value, 'title');
+  const detail = notificationField(value, 'detail');
+  if (title === null || detail === null) return null;
+  if (typeof value.viewing !== 'boolean') return null;
+  return { event: value.event, kind: value.kind, sessionId: value.sessionId, title, detail, viewing: value.viewing };
+}
+
+function validOpenSessionRequest(data) {
+  const value = notificationObject(data);
+  if (!value || value.type !== OPEN_SESSION_EVENT || value.version !== NOTIFICATION_VERSION) return null;
+  if (typeof value.requestId !== 'string' || !NOTIFICATION_REQUEST_ID.test(value.requestId)) return null;
+  if (typeof value.sessionId !== 'string' || !NOTIFICATION_ID.test(value.sessionId)) return null;
+  return { requestId: value.requestId, sessionId: value.sessionId };
+}
+
+function notificationKindOf(pending) {
+  if (!pending || typeof pending !== 'object') return 'attention';
+  if (pending.kind === 'approval') return 'approval';
+  if (pending.kind === 'question') return 'question';
+  if (pending.kind === 'plan-review') return 'plan-review';
+  return 'attention';
+}
+
+function notificationDetailOf(pending, kind) {
+  if (!pending || typeof pending !== 'object') return '';
+  if (kind === 'approval') {
+    return [pending.toolName, pending.displayReason ?? pending.reason].filter((part) => typeof part === 'string' && part.trim()).join(' · ');
+  }
+  if (kind === 'question' || kind === 'plan-review') {
+    const questions = Array.isArray(pending.questions) ? pending.questions : [];
+    const first = questions[0];
+    if (typeof first?.question === 'string' && first.question.trim()) return first.question;
+    if (typeof first?.header === 'string' && first.header.trim()) return first.header;
+    return '';
+  }
+  return typeof pending.kind === 'string' ? pending.kind : '';
+}
+
+// Snapshot-driven transition detector. Any first snapshot seeds the baseline so a
+// page that opens long after a Turn ended does not replay history.
+function createSessionNotificationMonitor({ status, list, report }) {
+  const previous = new Map();
+  let seeded = false;
+  let disposed = false;
+  const readTitle = (sessionId) => {
+    try {
+      const row = list?.getSnapshot?.()?.byId?.[sessionId];
+      return typeof row?.displayTitle === 'string' ? row.displayTitle : '';
+    } catch {
+      return '';
+    }
+  };
+  const isSubagent = (sessionId) => {
+    try {
+      return list?.getSnapshot?.()?.byId?.[sessionId]?.origin === 'subagent';
+    } catch {
+      return false;
+    }
+  };
+  const isViewing = (sessionId) => {
+    try {
+      const row = list?.getSnapshot?.()?.byId?.[sessionId];
+      return (row?.retainedBy?.mainView ?? 0) > 0;
+    } catch {
+      return false;
+    }
+  };
+  const emit = (payload) => {
+    if (disposed || typeof report !== 'function') return;
+    try {
+      report({ ...payload, title: notificationText(payload.title), detail: notificationText(payload.detail), viewing: payload.viewing === true });
+    } catch {
+      // A framing Shell that cannot receive this event must not break the page.
+    }
+  };
+  const sync = () => {
+    if (disposed) return;
+    let snapshot;
+    try {
+      snapshot = status?.getSnapshot?.();
+    } catch {
+      return;
+    }
+    // Duck-typed so a page whose Map constructor differs from the Shell's still reports.
+    if (!snapshot || typeof snapshot.forEach !== 'function') return;
+    const next = new Map();
+    for (const [sessionId, value] of snapshot) {
+      if (typeof sessionId !== 'string' || !NOTIFICATION_ID.test(sessionId)) continue;
+      if (!value || typeof value !== 'object') continue;
+      const pending = value.pendingInteraction;
+      const pendingKey = typeof pending?.key === 'string' ? pending.key : null;
+      const running = value.running === true;
+      next.set(sessionId, { running, pendingKey });
+      if (!seeded) continue;
+      const before = previous.get(sessionId);
+      if (pending && pendingKey !== before?.pendingKey) {
+        const kind = notificationKindOf(pending);
+        emit({ event: 'attention', kind, sessionId, title: readTitle(sessionId), detail: notificationDetailOf(pending, kind), viewing: isViewing(sessionId) });
+        continue;
+      }
+      if (!pending && running === false && before?.running === true && !isSubagent(sessionId)) {
+        emit({ event: 'turn-end', kind: 'turn-end', sessionId, title: readTitle(sessionId), detail: '', viewing: isViewing(sessionId) });
+      }
+    }
+    previous.clear();
+    for (const [sessionId, value] of next) previous.set(sessionId, value);
+    seeded = true;
+  };
+  let unsubscribe = () => {};
+  try {
+    if (typeof status?.subscribe === 'function') unsubscribe = status.subscribe(sync) ?? (() => {});
+  } catch {
+    unsubscribe = () => {};
+  }
+  try {
+    sync();
+  } catch {
+    // A failed baseline leaves the monitor unseeded and silent.
+  }
+  return {
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      try {
+        unsubscribe();
+      } catch {
+        // Detaching from a disposed status source is best effort.
+      }
+      previous.clear();
+    },
+  };
+}
+
+// Login redirects drop the query but keep the fragment, so the framing Shell also
+// advertises its origin there. Only this exact parameter is read.
+function declaredParentOrigin(window) {
+  const pattern = /^[a-z][a-z0-9+.-]{1,31}:\/\/[^\s/?#@]{1,255}$/u;
+  for (const value of [window?.location?.search, (window?.location?.hash ?? '').slice(1)]) {
+    try {
+      if (typeof value !== 'string' || value.length === 0 || value.length > 8192) continue;
+      const origin = new URLSearchParams(value).get('workspaceShellParentOrigin');
+      if (typeof origin === 'string' && pattern.test(origin)) return origin;
+    } catch {
+      // The other source may still carry the parameter.
+    }
+  }
+  return null;
+}
+
+function embeddedWindow(window) {
+  try {
+    return window.parent !== window;
+  } catch {
+    return false;
+  }
+}
+
+// A Desktop Web Guest is a <webview>: it is its own top-level document, so
+// `window.parent === window` and postMessage cannot reach the embedder. Both
+// transports therefore share one payload; the embedder listens to console output
+// and drives navigation with executeJavaScript.
+const NOTIFICATION_CONSOLE_MARKER = '__workspace-shell-notification__';
+const OPEN_SESSION_GLOBAL = '__workspaceShellOpenSession';
+
+function embeddedPage(window) {
+  if (embeddedWindow(window)) return true;
+  for (const value of [window?.location?.search, (window?.location?.hash ?? '').slice(1)]) {
+    try {
+      if (typeof value === 'string' && new URLSearchParams(value).get('workspaceShellEmbedded') === '1') return true;
+    } catch {
+      // Only a parseable location counts.
+    }
+  }
+  return false;
+}
+
+// Embedded side: report transitions and answer the framing Shell's open request.
+// An iframe uses postMessage in both directions; a webview reports through the
+// console marker and exposes one validated navigation entry point.
+function createGuestNotificationBridge({ window, ctx }) {
+  if (!embeddedPage(window)) return Object.freeze({ dispose() {} });
+  const parentOrigin = embeddedWindow(window) ? declaredParentOrigin(window) : null;
+  const post = (message) => {
+    try {
+      window.parent.postMessage(message, parentOrigin);
+    } catch {
+      // A parent that navigated away has no channel left.
+    }
+  };
+  const useConsole = !embeddedWindow(window);
+  if (!useConsole && !parentOrigin) return Object.freeze({ dispose() {} });
+  // The Shell Client and the remote companion may both load in one page; only the
+  // first one installs a bridge, so one transition is never reported twice.
+  const marker = '__workspaceShellNotificationBridge';
+  try {
+    if (window[marker] === true) return Object.freeze({ dispose() {} });
+    window[marker] = true;
+  } catch {
+    // A window that refuses the marker still gets a working bridge.
+  }
+  let disposed = false;
+  const monitor = createSessionNotificationMonitor({
+    status: ctx?.uiSession?.sessionStatus,
+    list: ctx?.sessions?.list,
+    report: (payload) => {
+      if (disposed) return;
+      const message = { type: NOTIFICATION_EVENT, version: NOTIFICATION_VERSION, ...payload };
+      if (useConsole) {
+        try {
+          window.console?.log?.(NOTIFICATION_CONSOLE_MARKER + JSON.stringify(message));
+        } catch {
+          // A console that refuses the write has no other upward channel.
+        }
+      } else {
+        post(message);
+      }
+    },
+  });
+  const seen = new Set();
+  const open = (sessionId) => {
+    if (disposed || typeof sessionId !== 'string' || !NOTIFICATION_ID.test(sessionId)) return false;
+    try {
+      ctx?.uiWorkspace?.openSession(sessionId);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const onMessage = (event) => {
+    if (disposed) return;
+    try {
+      if (event.source !== window.parent) return;
+      if (event.origin !== parentOrigin) return;
+      const request = validOpenSessionRequest(event.data);
+      if (!request || seen.has(request.requestId)) return;
+      seen.add(request.requestId);
+      if (seen.size > 64) seen.delete(seen.values().next().value);
+      open(request.sessionId);
+    } catch {
+      // Malformed frames and navigation races both leave the page usable.
+    }
+  };
+  let listening = false;
+  if (!useConsole) {
+    try {
+      window.addEventListener('message', onMessage);
+      listening = true;
+    } catch {
+      listening = false;
+    }
+  }
+  // The embedder calls this with executeJavaScript; the value never comes from a
+  // frame or URL, and the identifier check keeps the call single-valued.
+  let exposed = false;
+  if (useConsole) {
+    try {
+      window[OPEN_SESSION_GLOBAL] = open;
+      exposed = window[OPEN_SESSION_GLOBAL] === open;
+    } catch {
+      exposed = false;
+    }
+  }
+  const remove = () => {
+    if (listening) {
+      listening = false;
+      try {
+        window.removeEventListener('message', onMessage);
+      } catch {
+        // Detaching from a torn-down window is best effort.
+      }
+    }
+    if (!exposed) return;
+    exposed = false;
+    try {
+      if (window[OPEN_SESSION_GLOBAL] === open) Reflect.deleteProperty(window, OPEN_SESSION_GLOBAL);
+    } catch {
+      // A foreign replacement is not removed.
+    }
+  };
+  return Object.freeze({
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      monitor.dispose();
+      remove();
+      seen.clear();
+      try {
+        if (window[marker] === true) Reflect.deleteProperty(window, marker);
+      } catch {
+        // The page is going away with the bridge.
+      }
+    },
+  });
+}
+
+const NOTIFICATION_COPY = {
+  zh: {
+    turnEnd: '回合结束', approval: '等待你确认', question: '等待你回答', planReview: '计划等待你确认', attention: '需要你处理', session: '会话',
+  },
+  en: {
+    turnEnd: 'Turn finished', approval: 'Waiting for your approval', question: 'Waiting for your answer', planReview: 'Plan awaiting approval', attention: 'Needs your action', session: 'Session',
+  },
+};
+
+function notificationCopy(locale) {
+  const active = typeof locale?.active === 'string' ? locale.active : '';
+  return /^zh/iu.test(active) ? NOTIFICATION_COPY.zh : NOTIFICATION_COPY.en;
+}
+
+// Top-level side: decides whether the user is already looking at the Session, and
+// otherwise shows one native notification per Session. The tag keeps a burst of
+// events for one Session at a single notification.
+function createNotificationCenter({ window, document, workspace, localeOf, openLocalSession, NotificationCtor, log }) {
+  const Ctor = NotificationCtor ?? (typeof window?.Notification === 'function' ? window.Notification : null);
+  const live = new Map();
+  let windowFocused = true;
+  let disposed = false;
+  let warned = false;
+  const warn = (message, error) => {
+    try {
+      if (typeof log === 'function') log(message, error);
+      else console.warn('workspace-shell notifications: ' + message, error);
+    } catch {
+      // Diagnostics never change delivery.
+    }
+  };
+  const text = (value) => typeof value === 'string' ? value : '';
+  const tabOf = (tabId) => workspace.tabs.getSnapshot().tabs.find((tab) => tab.id === tabId) ?? null;
+  const tabLabel = (tab) => {
+    if (!tab) return '';
+    try {
+      const appearance = workspace.getTabAppearance?.(tab);
+      if (typeof appearance?.name === 'string' && appearance.name.trim()) return appearance.name.trim();
+    } catch {
+      // Appearance is display-only; the tab title still identifies the tab.
+    }
+    return typeof tab.title === 'string' ? tab.title : '';
+  };
+  const isFocused = () => {
+    try {
+      if (windowFocused !== true) return false;
+      return document?.visibilityState !== 'hidden';
+    } catch {
+      return windowFocused === true;
+    }
+  };
+  // The framing page must not notify for the exact Session the user is reading.
+  const suppressed = (entry) => isFocused() && workspace.tabs.getSnapshot().activeId === entry.tabId && entry.viewing;
+  const bodyOf = (entry, copy) => {
+    const label = {
+      'turn-end': copy.turnEnd, attention: copy.attention, approval: copy.approval, question: copy.question, 'plan-review': copy.planReview,
+    }[entry.kind] ?? copy.attention;
+    const detail = text(entry.detail);
+    const head = detail ? (copy === NOTIFICATION_COPY.zh ? label + '：' + detail : label + ': ' + detail) : label;
+    const tab = text(entry.tabLabel);
+    return tab ? head + ' · ' + tab : head;
+  };
+  // The click has to bring the tab forward first: a notification for a background
+  // Session must land on the Session, not leave the user on whatever tab is active.
+  const openTarget = (entry) => {
+    try {
+      window.focus?.();
+    } catch {
+      // Window activation is best effort and never blocks navigation.
+    }
+    Promise.resolve().then(() => workspace.activate(entry.tabId)).then((active) => {
+      if (active === false) return;
+      if (entry.tabId === 'local') {
+        try {
+          openLocalSession?.(entry.sessionId);
+        } catch {
+          // A Session that cannot open leaves the page where it was.
+        }
+        return;
+      }
+      workspace.openSessionInTab(entry.tabKey, entry.sessionId);
+    }, () => {});
+  };
+  const show = (entry) => {
+    if (disposed || !Ctor) return;
+    if (suppressed(entry)) return;
+    let permission;
+    try {
+      permission = Ctor.permission;
+    } catch {
+      permission = undefined;
+    }
+    if (permission === 'denied') {
+      if (!warned) {
+        warned = true;
+        warn('notification permission is denied');
+      }
+      return;
+    }
+    const copy = notificationCopy(localeOf?.());
+    const title = text(entry.title).trim() || copy.session;
+    let notification;
+    try {
+      notification = new Ctor(title, { body: bodyOf(entry, copy), tag: NOTIFICATION_TAG + entry.sessionId });
+    } catch (error) {
+      if (!warned) {
+        warned = true;
+        warn('notification unavailable', error);
+      }
+      return;
+    }
+    const previous = live.get(entry.sessionId);
+    if (previous && previous !== notification) {
+      try {
+        previous.close();
+      } catch {
+        // A stale notification is already gone.
+      }
+    }
+    live.set(entry.sessionId, notification);
+    try {
+      notification.onclick = () => {
+        try {
+          notification.close();
+        } catch {
+          // Closing before navigation keeps the list tidy.
+        }
+        if (live.get(entry.sessionId) === notification) live.delete(entry.sessionId);
+        openTarget(entry);
+      };
+      notification.onclose = () => {
+        if (live.get(entry.sessionId) === notification) live.delete(entry.sessionId);
+      };
+    } catch {
+      // Some implementations expose read-only event slots; delivery already happened.
+    }
+  };
+  const resolveEntry = (tabKey, payload) => {
+    const tab = workspace.tabs.getSnapshot().tabs.find((candidate) => candidate.key === tabKey);
+    if (!tab) return null;
+    return { ...payload, tabId: tab.id, tabKey: tab.key, tabLabel: notificationText(tabLabel(tab)) };
+  };
+  const reportHost = (payload) => {
+    const value = notificationObject(payload);
+    if (!value) return;
+    const tab = tabOf('local');
+    show({ ...value, tabId: 'local', tabKey: 'local', tabLabel: notificationText(tabLabel(tab)) });
+  };
+  const reportGuest = (tabKey, data) => {
+    const payload = validNotificationEvent(data);
+    if (!payload || typeof tabKey !== 'string') return;
+    const entry = resolveEntry(tabKey, payload);
+    if (entry) show(entry);
+  };
+  const onFocus = () => { windowFocused = true; };
+  const onBlur = () => { windowFocused = false; };
+  try {
+    windowFocused = typeof document?.hasFocus === 'function' ? document.hasFocus() : true;
+  } catch {
+    windowFocused = true;
+  }
+  let listening = false;
+  try {
+    window?.addEventListener?.('focus', onFocus);
+    window?.addEventListener?.('blur', onBlur);
+    listening = true;
+  } catch {
+    listening = false;
+  }
+  return Object.freeze({
+    reportHost,
+    reportGuest,
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      if (listening) {
+        try {
+          window?.removeEventListener?.('focus', onFocus);
+          window?.removeEventListener?.('blur', onBlur);
+        } catch {
+          // A torn-down window has no listeners left to remove.
+        }
+      }
+      for (const notification of live.values()) {
+        try {
+          notification.close();
+        } catch {
+          // Each notification closes independently.
+        }
+      }
+      live.clear();
+    },
+  });
+}
+
+return { NOTIFICATION_EVENT, OPEN_SESSION_EVENT, NOTIFICATION_VERSION, validNotificationEvent, validOpenSessionRequest, createSessionNotificationMonitor, createGuestNotificationBridge, createNotificationCenter };
+})();
+const { NOTIFICATION_EVENT, OPEN_SESSION_EVENT, NOTIFICATION_VERSION, validNotificationEvent, validOpenSessionRequest, createSessionNotificationMonitor, createGuestNotificationBridge, createNotificationCenter } = m13;
+// ---- module: launcher ----
+const m14 = (() => {
 // Launcher page: a real workspace tab, not a modal. The component owns only UI
 // state; every effect goes through the injected workspace client, and every
 // conversion preserves the tab ID/position through `launcher.replace`.
@@ -4628,7 +5334,13 @@ function launcherCopy(english) {
     refresh: 'Refresh', open: 'Open workspace', web: 'Web', tui: 'TUI', browser: 'Browser', browserSoon: 'Not available yet',
     chooseKind: 'Workspace type', cwd: 'Working directory', cwdPlaceholder: 'Absolute project directory',
     command: 'Launch command', commandHint: 'Parsed into an executable and arguments; it never goes through a shell.',
-    hosts: 'Running Web Hosts', hostsEmpty: 'No Web Host is running.', hostsStale: 'This list may be out of date.',
+    hosts: 'Web Hosts', hostsEmpty: 'No Web Host is running.', hostsStale: 'This list may be out of date.', stopped: 'Not running',
+    current: 'Current', versionUnknown: 'Unknown', upgrade: 'Upgrade', syncUpgrade: 'Sync & upgrade',
+    upgradeStepBackup: 'Backing up', upgradeStepDsh: 'Upgrading DSH', upgradeStepStop: 'Stopping Host',
+    upgradeStepWrite: 'Writing config', upgradeStepInstall: 'Installing plugins', upgradeStepValidate: 'Validating config',
+    upgradeRunning: 'Upgrading…', upgradeDoneRestart: 'Upgraded. Restart the Host to apply.',
+    upgradeDoneReopen: 'Upgraded. Reopen the tab.', upgradeFailed: 'Upgrade failed', checkingUpdates: 'Checking for updates…',
+    upgradeBuildsPending: (count) => `${count} dependency build script${count === 1 ? '' : 's'} still need approval.`,
     views: 'views', newView: 'New view', waitStart: 'Waiting for the Host to start', stopping: 'Stopping',
     heldByOther: 'Owned by another window', stop: 'Stop Host', status: 'Status', source: 'Source',
     confirmStop: 'Stopping this Host interrupts its Agents, terminals, and background tasks. Web views sharing this Host close; other Hosts are unaffected. Stop it?',
@@ -4653,7 +5365,13 @@ function launcherCopy(english) {
     refresh: '刷新', open: '打开工作区', web: 'Web', tui: 'TUI', browser: 'Browser', browserSoon: '暂未开放',
     chooseKind: '工作区类型', cwd: '工作目录', cwdPlaceholder: '输入项目目录的绝对路径',
     command: '启动命令', commandHint: '命令会解析为可执行文件和参数，不经过 shell。',
-    hosts: '运行中的 Web Host', hostsEmpty: '当前没有运行中的 Web Host。', hostsStale: '可能不是最新。',
+    hosts: 'Web Host', hostsEmpty: '当前没有运行中的 Web Host。', hostsStale: '可能不是最新。', stopped: '未运行',
+    current: '当前', versionUnknown: '未知', upgrade: '升级', syncUpgrade: '同步并升级',
+    upgradeStepBackup: '正在备份', upgradeStepDsh: '正在升级 DSH', upgradeStepStop: '正在停止 Host',
+    upgradeStepWrite: '正在写入配置', upgradeStepInstall: '正在安装插件', upgradeStepValidate: '正在校验配置',
+    upgradeRunning: '正在升级…', upgradeDoneRestart: '升级完成，重启 Host 生效',
+    upgradeDoneReopen: '升级完成，请重新打开页签', upgradeFailed: '升级失败', checkingUpdates: '正在检查更新…',
+    upgradeBuildsPending: (count) => `另有 ${count} 个依赖的构建脚本待批准。`,
     views: '个视图', newView: '新建视图', waitStart: '等待 Host 启动', stopping: '正在停止',
     heldByOther: '由其它窗口持有', stop: '停止 Host', status: '状态', source: '来源',
     confirmStop: '停止所选 Host 实例会中断该实例内的 Agent、终端和后台任务；共用此 Host 的 Web 视图会关闭，其它 Host 不受影响。确认停止？',
@@ -4715,6 +5433,7 @@ const launcherCss = [
   '.wsh-host-row{display:flex;align-items:center;justify-content:space-between;gap:10px;min-width:0;padding:8px 10px;border:1px solid var(--dsw-alias-border-l3);border-radius:8px;background:var(--dsw-alias-bg-layer-1)}',
   '.wsh-host-main{display:flex;flex-direction:column;gap:2px;min-width:0}',
   '.wsh-host-title{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+  '.wsh-host-title .wsh-launcher-badge{margin-left:6px}',
   '.wsh-host-meta{font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
   '.wsh-host-actions{display:flex;gap:6px;flex:none}',
   '.wsh-launcher-empty{display:flex;align-items:center;gap:10px;padding:16px;border:1px dashed var(--dsw-alias-border-l2);border-radius:10px;color:var(--dsw-alias-label-secondary);font-size:12px}',
@@ -4743,8 +5462,10 @@ function createLauncher(React, deps = {}) {
   if (!React || typeof React.createElement !== 'function') throw new TypeError('createLauncher requires React');
   const h = React.createElement;
   const document = deps.document ?? globalThis.document;
+  const window = deps.window ?? globalThis.window;
   const initialLocale = deps.locale || document?.documentElement?.lang || 'zh';
   const copy = launcherCopy(!String(initialLocale).toLowerCase().startsWith('zh'));
+  const pollIntervalMs = Number.isInteger(deps.pollIntervalMs) && deps.pollIntervalMs > 0 ? deps.pollIntervalMs : 1500;
   const safeCode = (value) => {
     let code;
     try { code = typeof value === 'string' ? value : value?.code; } catch {}
@@ -4919,30 +5640,89 @@ function createLauncher(React, deps = {}) {
       usable && kind === 'tui' ? h(TuiForm, { cwd, command, cwdText, commandText, busy, onCwd, onCommand, onOpen: () => onOpen('tui') }) : null);
   }
 
-  function HostList({ info, busy, onNewView, onStop, onRefresh }) {
+  function upgradeStepLabel(step) {
+    switch (step) {
+      case 'backup': return copy.upgradeStepBackup;
+      case 'dsh': return copy.upgradeStepDsh;
+      case 'stop': return copy.upgradeStepStop;
+      case 'write': return copy.upgradeStepWrite;
+      case 'install': return copy.upgradeStepInstall;
+      case 'validate': return copy.upgradeStepValidate;
+      default: return copy.upgradeRunning;
+    }
+  }
+
+  function upgradeStatus(upgrade, current) {
+    if (!upgrade) return null;
+    if (upgrade.phase === 'running') return upgradeStepLabel(upgrade.step);
+    if (upgrade.phase === 'done') {
+      const done = current ? copy.upgradeDoneRestart : copy.upgradeDoneReopen;
+      const pending = Array.isArray(upgrade.ignoredBuilds) ? upgrade.ignoredBuilds.length : 0;
+      return pending ? `${done} ${copy.upgradeBuildsPending(pending)}` : done;
+    }
+    if (upgrade.phase === 'failed') return `${copy.upgradeFailed} ${upgrade.error ?? ''}`.trim();
+    return null;
+  }
+
+  const VERSION_PREFIX = 'DSH ';
+
+  function HostList({ info, busy, onNewView, onStop, onUpgrade, onRefresh }) {
     const runtimes = (Array.isArray(info.runtimes) ? info.runtimes : []).filter((runtime) => runtime.kind === 'web'
-      && runtime.source !== 'ssh' && ACTIVE_PHASES.includes(runtime.phase));
+      && runtime.source !== 'ssh' && (ACTIVE_PHASES.includes(runtime.phase) || runtime.phase === 'stopped'));
+    const currentProfile = (Array.isArray(info.profiles) ? info.profiles : EMPTY_LIST).find((profile) => profile.isCurrent === true) ?? null;
+    const currentHost = currentProfile?.web && info.currentHost ? info.currentHost : null;
+    const rows = [
+      ...(currentHost ? [{ key: 'current', current: true, profileId: currentHost.profileId ?? info.currentProfile, phase: 'running', state: currentHost }] : []),
+      ...runtimes.map((runtime) => ({ key: runtime.id, current: false, profileId: runtime.profileId, phase: runtime.phase, runtime, state: runtime })),
+    ];
     const stale = info.phase === 'error';
     return h('section', { className: 'wsh-launcher-hosts', 'data-launcher-hosts': '', 'aria-label': copy.hosts },
       h('div', { className: 'wsh-launcher-section-title' },
         h('strong', null, copy.hosts),
         h('button', { type: 'button', className: 'wsh-button', 'data-launcher-action': 'refresh', disabled: busy, onClick: onRefresh }, copy.refresh)),
       stale ? h('p', { className: 'wsh-warning', role: 'status', 'data-launcher-stale': '' }, copy.hostsStale) : null,
-      runtimes.length
-        ? h('ul', { className: 'wsh-host-list' }, runtimes.map((runtime) => {
-          const owned = runtime.canStop === true;
-          const canOpen = runtime.phase === 'running' && owned;
-          const reason = runtime.phase === 'starting' ? copy.waitStart : runtime.phase === 'stopping' ? copy.stopping : !owned ? copy.heldByOther : copy.newView;
-          return h('li', { key: runtime.id, className: 'wsh-host-row', 'data-runtime-id': runtime.id, 'data-phase': runtime.phase },
+      rows.length
+        ? h('ul', { className: 'wsh-host-list' }, rows.map((row) => {
+          const state = row.state;
+          const upgrade = state.upgrade ?? null;
+          const status = upgradeStatus(upgrade, row.current);
+          const running = upgrade?.phase === 'running';
+          const canUpgrade = state.upgradeAvailable === true && !running;
+          const stopped = !row.current && row.phase === 'stopped';
+          const owned = row.runtime?.canStop === true;
+          const canOpen = !stopped && row.runtime?.phase === 'running' && owned;
+          const reason = row.runtime?.phase === 'starting' ? copy.waitStart : row.runtime?.phase === 'stopping' ? copy.stopping : !owned ? copy.heldByOther : copy.newView;
+          const version = typeof state.dshVersion === 'string' && state.dshVersion ? state.dshVersion : copy.versionUnknown;
+          const meta = [copy.web, `${copy.source} ${copy.local}`];
+          meta.push(row.current ? `${copy.status} ${copy.current}` : stopped ? copy.stopped : `${copy.status} ${row.phase}`);
+          meta.push(`${VERSION_PREFIX}${version}`);
+          if (!row.current) meta.push(`${row.runtime?.views ?? 0} ${copy.views}`);
+          return h('li', {
+            key: row.key, className: 'wsh-host-row', 'data-runtime-id': row.current ? 'current' : row.key,
+            'data-phase': row.current ? 'running' : row.phase,
+            ...(row.current ? { 'data-current-host': 'true' } : {}),
+            ...(upgrade ? { 'data-upgrade-phase': upgrade.phase } : {}),
+            ...(state.upgradeAvailable === true ? { 'data-upgrade-available': 'true' } : {}),
+          },
             h('div', { className: 'wsh-host-main' },
-              h('strong', { className: 'wsh-host-title' }, runtime.profileId),
-              h('span', { className: 'wsh-muted wsh-host-meta' },
-                [copy.web, `${copy.source} ${copy.local}`, `${copy.status} ${runtime.phase}`, `${runtime.views ?? 0} ${copy.views}`].join(' · '))),
+              h('strong', { className: 'wsh-host-title' }, row.profileId,
+                row.current ? h('span', { className: 'wsh-launcher-badge', 'data-host-current': '' }, copy.current) : null),
+              h('span', { className: 'wsh-muted wsh-host-meta' }, meta.join(' · ')),
+              state.checking && !status ? h('span', { className: 'wsh-muted wsh-host-meta', 'data-upgrade-checking': '' }, copy.checkingUpdates) : null,
+              status ? h('span', { className: running ? 'wsh-muted wsh-host-meta' : 'wsh-warning wsh-host-meta', role: 'status', 'data-upgrade-status': '' }, status) : null),
             h('div', { className: 'wsh-host-actions' },
-              h('button', { type: 'button', className: 'wsh-button', disabled: busy || !canOpen, title: reason,
-                'data-launcher-action': 'new-view', onClick: () => onNewView(runtime) }, copy.newView),
-              h('button', { type: 'button', className: 'wsh-button wsh-danger', disabled: busy || !owned, title: owned ? copy.stop : copy.heldByOther,
-                'data-launcher-action': 'stop-host', onClick: () => onStop(runtime) }, copy.stop)));
+              canUpgrade || running
+                ? h('button', {
+                  type: 'button', className: 'wsh-button', disabled: busy || running,
+                  'data-launcher-action': 'upgrade-host',
+                  'data-upgrade-target': row.current ? 'current' : row.key,
+                  onClick: () => onUpgrade({ runtime: row.current || stopped ? null : row.runtime, profileId: row.profileId }),
+                }, running ? upgradeStepLabel(upgrade.step) : row.profileId === 'web' ? copy.syncUpgrade : copy.upgrade)
+                : null,
+              row.current || stopped ? null : h('button', { type: 'button', className: 'wsh-button', disabled: busy || !canOpen, title: reason,
+                'data-launcher-action': 'new-view', onClick: () => onNewView(row.runtime) }, copy.newView),
+              row.current || stopped ? null : h('button', { type: 'button', className: 'wsh-button wsh-danger', disabled: busy || !owned, title: owned ? copy.stop : copy.heldByOther,
+                'data-launcher-action': 'stop-host', onClick: () => onStop(row.runtime) }, copy.stop)));
         }))
         : h('p', { className: 'wsh-muted', 'data-launcher-empty': 'hosts' }, copy.hostsEmpty));
   }
@@ -4994,6 +5774,35 @@ function createLauncher(React, deps = {}) {
       onModalChange?.(modalOpen);
       return () => { if (reportedModal.current === onModalChange) reportedModal.current = null; };
     }, [modalOpen, onModalChange]);
+    // The Host returns cached version state only: while a probe or upgrade is
+    // running the launcher re-reads the catalog until it settles.
+    const polling = React.useMemo(() => {
+      const current = info.currentHost;
+      const runtimes = Array.isArray(info.runtimes) ? info.runtimes : EMPTY_LIST;
+      return Boolean(current?.checking || current?.upgrade?.phase === 'running'
+        || runtimes.some((runtime) => runtime.checking || runtime.upgrade?.phase === 'running'));
+    }, [info]);
+    React.useEffect(() => {
+      if (!polling || !workspace || typeof workspace.refresh !== 'function') return undefined;
+      if (typeof window?.setInterval !== 'function') return undefined;
+      const timer = window.setInterval(() => { Promise.resolve(workspace.refresh()).catch(() => {}); }, pollIntervalMs);
+      return () => { window.clearInterval(timer); };
+    }, [polling, workspace]);
+    // A managed Host row disappears as soon as the upgrade stops it, so its
+    // final state is surfaced as a toast instead of an invisible row update.
+    const finishedUpgrades = React.useRef(new Set());
+    React.useEffect(() => {
+      const runtimes = Array.isArray(info.runtimes) ? info.runtimes : EMPTY_LIST;
+      for (const runtime of runtimes) {
+        const phase = runtime.upgrade?.phase;
+        if (phase !== 'done' && phase !== 'failed') continue;
+        const key = `${runtime.id}:${phase}:${runtime.upgrade.error ?? ''}`;
+        if (finishedUpgrades.current.has(key)) continue;
+        finishedUpgrades.current.add(key);
+        if (phase === 'done') setNotice(copy.upgradeDoneReopen);
+        else setError(runtime.upgrade.error ?? 'UPGRADE_INSTALL_FAILED');
+      }
+    }, [info]);
     const connectionList = ssh && Array.isArray(connections) ? connections : EMPTY_LIST;
     const sources = React.useMemo(() => {
       const local = { key: 'local', group: 'local', kind: 'local', label: copy.local, detail: info.currentProfile || null };
@@ -5060,6 +5869,11 @@ function createLauncher(React, deps = {}) {
     });
     const newView = (runtime) => run(async () => { await workspace.openLauncherWeb(tabId, { profileId: runtime.profileId, runtimeId: runtime.id }); });
     const refresh = () => run(() => workspace.refresh());
+    const upgradeHost = (target) => run(async () => {
+      if (typeof workspace.upgradeHost !== 'function') throw Object.assign(new Error('UPGRADE_RUNTIME_UNAVAILABLE'), { code: 'UPGRADE_RUNTIME_UNAVAILABLE' });
+      await workspace.upgradeHost(target?.runtime?.id ?? null, target?.profileId);
+      await workspace.refresh();
+    });
     const confirmStop = () => {
       const runtime = confirm?.runtime;
       if (!runtime) return;
@@ -5099,7 +5913,13 @@ function createLauncher(React, deps = {}) {
           onRetry: () => { void refresh(); },
         })
         : null,
-      h(HostList, { info, busy, onNewView: (runtime) => { void newView(runtime); }, onStop: (runtime) => setConfirm({ type: 'stop', runtime }), onRefresh: refresh }));
+      h(HostList, {
+        info, busy,
+        onNewView: (runtime) => { void newView(runtime); },
+        onStop: (runtime) => setConfirm({ type: 'stop', runtime }),
+        onUpgrade: (target) => { void upgradeHost(target); },
+        onRefresh: refresh,
+      }));
     // The SSH component talks to the manager API through `api(path, input, signal)`.
     // The client exposes one origin-checked request surface for it; no URL, token,
     // or credential ever passes back through this prop.
@@ -5158,9 +5978,9 @@ function createLauncher(React, deps = {}) {
 
 return { parseTuiCommand, parseTuiCwd, launcherCss, createLauncher };
 })();
-const { parseTuiCommand, parseTuiCwd, launcherCss, createLauncher } = m13;
+const { parseTuiCommand, parseTuiCwd, launcherCss, createLauncher } = m14;
 // ---- module: styles ----
-const m14 = (() => {
+const m15 = (() => {
 const shellCss = [
 '.wsh-frame{--wsh-header-height:48px;grid-template-rows:var(--wsh-header-height) minmax(0,1fr)!important;min-height:0;min-width:0;isolation:isolate;position:relative}',
 '.wsh-header{grid-column:1/-1;grid-row:1;display:flex;align-items:center;gap:8px;padding:0 12px;background:var(--dsw-specific-sidebar-fill,var(--dsw-alias-bg-base));border-bottom:1px solid var(--dsw-alias-border-l3);min-width:0;z-index:2;user-select:none;-webkit-app-region:drag}',
@@ -5226,9 +6046,9 @@ const shellCss = [
 
 return { shellCss };
 })();
-const { shellCss } = m14;
+const { shellCss } = m15;
 // ---- module: frame ----
-const m15 = (() => {
+const m16 = (() => {
 // Window frame: the permanent Local surface, Chrome-style workspace tabs, and one
 // launcher page per `launcher` tab. Tab metadata is identity-based; the frame never
 // reads a numeric generation and never owns provider resources itself.
@@ -5808,9 +6628,9 @@ function createFrameViews(React, deps) {
 
 return { createFrameViews };
 })();
-const { createFrameViews } = m15;
+const { createFrameViews } = m16;
 // ---- module: entry ----
-const m16 = (() => {
+const m17 = (() => {
 function createWorkspaceSelection(React, slots) {
   const key = 'conversation.hero.workspace';
   const core = slots?._core;
@@ -5928,7 +6748,22 @@ return {
   apply(ctx) {
     // Embedded views still register sessions and accept navigation without mounting another frame.
     sessions?.apply(ctx);
-    if ([window.location.search, (window.location.hash ?? '').slice(1)].some((value) => new URLSearchParams(value).get('workspaceShellEmbedded') === '1')) return;
+    const embedded = [window.location.search, (window.location.hash ?? '').slice(1)].some((value) => new URLSearchParams(value).get('workspaceShellEmbedded') === '1');
+    // Session status arrives from a service other plugins provide; waiting for it
+    // keeps a profile without that UI domain from holding the whole Shell back.
+    const withUiSession = (callback) => {
+      if (typeof ctx.inject === 'function') ctx.inject(['uiSession'], callback);
+      else callback(ctx);
+    };
+    if (embedded) {
+      // The framing Shell owns the notification surface; the guest only reports
+      // transitions and answers its open-Session request.
+      if (typeof deps.createGuestNotificationBridge === 'function') withUiSession((scope) => {
+        const bridge = safeFactory(deps.createGuestNotificationBridge, { window, ctx: scope });
+        if (bridge) scope.effect(() => () => bridge.dispose(), 'workspace guest notifications');
+      });
+      return;
+    }
     ctx.effect(() => ctx.locale.register('workspace-shell', shellMessages), 'workspace locale dictionaries');
     const activeLocale = ctx.locale?.getSnapshot?.().active || document?.documentElement?.lang || 'zh';
     const launcherModule = typeof deps.createLauncher === 'function'
@@ -5936,10 +6771,38 @@ return {
       : null;
     const classes = {};
     let controller;
-    const workspace = createWorkspaceClient({ ...deps, ctx, isFrameActive: () => controller?.getSnapshot().phase === 'active' });
+    let notifications = null;
+    const workspace = createWorkspaceClient({ ...deps, ctx, isFrameActive: () => controller?.getSnapshot().phase === 'active',
+      onGuestNotification: (key, data) => notifications?.reportGuest(key, data) });
     ctx.effect(() => () => workspace.dispose(), 'workspace view ownership');
     const workspaceSelection = createWorkspaceSelection(React, ctx.slots);
     ctx.effect(() => () => workspaceSelection.dispose(), 'workspace selection observation');
+    // Native notifications belong to Desktop: a plain browser page keeps its own
+    // notification permission model and is deliberately left alone.
+    const desktopNotification = typeof window.dshDesktop === 'object'
+      && window.dshDesktop !== null
+      && typeof window.dshDesktop.browser === 'object'
+      && window.dshDesktop.browser !== null;
+    if (desktopNotification && typeof deps.createNotificationCenter === 'function') {
+      notifications = safeFactory(deps.createNotificationCenter, {
+        window,
+        document,
+        workspace,
+        localeOf: () => ctx.locale?.getSnapshot?.(),
+        openLocalSession: (sessionId) => { ctx.uiWorkspace.openSession(sessionId); },
+      });
+      if (notifications) {
+        ctx.effect(() => () => notifications.dispose(), 'workspace notifications');
+        if (typeof deps.createSessionNotificationMonitor === 'function') withUiSession((scope) => {
+          const monitor = safeFactory(deps.createSessionNotificationMonitor, {
+            status: scope.uiSession?.sessionStatus,
+            list: scope.sessions?.list,
+            report: (payload) => notifications.reportHost(payload),
+          });
+          if (monitor) scope.effect(() => () => monitor.dispose(), 'workspace notification monitor');
+        });
+      }
+    }
     ctx.provide('workspaceShell', Object.freeze({
       getSnapshot: workspace.tabs.getSnapshot, subscribe: workspace.tabs.subscribe,
       registerProvider: workspace.registerProvider, open: workspace.open, activate: workspace.activate,
@@ -5982,9 +6845,9 @@ return {
 
 return { createWorkspaceSelection, createShellPlugin };
 })();
-const { createWorkspaceSelection, createShellPlugin } = m16;
+const { createWorkspaceSelection, createShellPlugin } = m17;
 // ---- module: ../session-host/submissions ----
-const m17 = (() => {
+const m18 = (() => {
 // Observe the public Session prompt boundary without changing admission or draft restoration.
 function observeSessionSubmissions(sessions, { failed, succeeded }) {
   const bindings = new Map();
@@ -6046,9 +6909,9 @@ function applyTransferredDraft(ctx, sessionId, draft, received) {
 
 return { observeSessionSubmissions, applyTransferredDraft };
 })();
-const { observeSessionSubmissions, applyTransferredDraft } = m17;
+const { observeSessionSubmissions, applyTransferredDraft } = m18;
 // ---- module: ../session-host/controller ----
-const m18 = (() => {
+const m19 = (() => {
 const validToken = (value) => typeof value === 'string' && /^[a-f0-9]{32}$/.test(value);
 const fail = (code) => Object.assign(new Error(code), { code });
 
@@ -6278,9 +7141,9 @@ function createSessionHostClient({ ctx, window, applyDraft }) {
 
 return { createSessionHostClient };
 })();
-const { createSessionHostClient } = m18;
+const { createSessionHostClient } = m19;
 // ---- module: ../session-host/ui ----
-const m19 = (() => {
+const m20 = (() => {
 const sessionHostCss = `
 .wsh-session-notice{display:flex;align-items:center;flex-wrap:wrap;gap:8px;width:calc(100% - var(--dsh-composer-side-clearance,16px) - var(--dsh-composer-side-clearance,16px));max-width:var(--dsh-composer-card-max-width,760px);margin:0 auto;box-sizing:border-box;padding:8px 0;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;letter-spacing:0}
 .wsh-session-notice>span{flex:1 1 180px;min-width:0;overflow-wrap:anywhere}
@@ -6348,6 +7211,6 @@ function createSessionHostPlugin(React, primitives, deps) {
 
 return { sessionHostCss, createSessionHostPlugin };
 })();
-const { sessionHostCss, createSessionHostPlugin } = m19;
-return createShellPlugin(React,{installFrameAdapter,installRightbarSlotRecovery,createFrameViews,solveFrame,createPointerResize,shellCss,createTabState,createTabController,createTabOrderMemory,createTabAppearanceMemory,installInputGate,createWebTiming,createDesktopGuest,createBrowserGuest,createTuiProvider,createChromeTabs,createWorkspaceClient,createLauncher,createSessionHostPlugin,createSessionHostClient,observeSessionSubmissions,applyTransferredDraft,sessionHostCss,primitives,document,window});
+const { sessionHostCss, createSessionHostPlugin } = m20;
+return createShellPlugin(React,{installFrameAdapter,installRightbarSlotRecovery,createFrameViews,solveFrame,createPointerResize,shellCss,createTabState,createTabController,createTabOrderMemory,createTabAppearanceMemory,installInputGate,createWebTiming,createDesktopGuest,createBrowserGuest,createTuiProvider,createChromeTabs,createWorkspaceClient,createLauncher,createSessionNotificationMonitor,createGuestNotificationBridge,createNotificationCenter,createSessionHostPlugin,createSessionHostClient,observeSessionSubmissions,applyTransferredDraft,sessionHostCss,primitives,document,window});
 }});

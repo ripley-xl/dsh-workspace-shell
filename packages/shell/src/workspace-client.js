@@ -40,7 +40,7 @@ export function createWorkspaceClient(deps) {
     getSnapshot: () => sshRegistration?.extension ?? null,
     subscribe(listener) { extensionListeners.add(listener); return () => extensionListeners.delete(listener); },
   });
-  let infoValue = Object.freeze({ phase: 'loading', currentProfile: '', defaultCwd: '', profiles: [], runtimes: [] });
+  let infoValue = Object.freeze({ phase: 'loading', currentProfile: '', defaultCwd: '', profiles: [], currentHost: null, runtimes: [] });
   let sshConnections = Object.freeze([]);
   let disposed = false, disposal, navigation = 0, refreshGeneration = 0, wantedLocal = true;
   let overlayOpen = false;
@@ -50,6 +50,7 @@ export function createWorkspaceClient(deps) {
   const terminalCwds = new Map();
   const webCwdReaders = new Map();
   const webRuntimeIds = new Map();
+  const guestOpeners = new Map();
   const sessionTabTokens = new Map();
   let sessionNavigation = null;
   const sessionNavigationListeners = new Set();
@@ -268,7 +269,7 @@ export function createWorkspaceClient(deps) {
     try { window.sessionStorage.setItem('workspace-shell.owner.v1', ownerId); } catch {}
   }
   const publish = (value) => {
-    infoValue = Object.freeze(value);
+    infoValue = Object.freeze({ currentHost: null, ...value });
     for (const listener of [...listeners]) { try { listener(); } catch {} }
   };
   const publishConnections = (value) => {
@@ -317,9 +318,41 @@ export function createWorkspaceClient(deps) {
     id: item.id, isCurrent: item.isCurrent === true, web: item.web === true, tui: item.tui === true,
     ...['dsh-tui', 'pi-tui', 'generic-tui'].includes(item.tuiFlavor) ? { tuiFlavor: item.tuiFlavor } : {},
   });
+  const UPGRADE_PHASES = new Set(['running', 'done', 'failed']);
+  const UPGRADE_STEPS = new Set(['backup', 'dsh', 'stop', 'write', 'install', 'validate']);
+  const mapUpgrade = (value) => {
+    if (!value || typeof value !== 'object' || !UPGRADE_PHASES.has(value.phase)) return null;
+    const step = UPGRADE_STEPS.has(value.step) ? value.step : null;
+    const errorCode = typeof value.error === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(value.error) ? value.error : null;
+    const ignoredBuilds = Array.isArray(value.ignoredBuilds)
+      ? value.ignoredBuilds.filter((name) => typeof name === 'string' && /^[A-Za-z0-9@/._#+-]{1,160}$/.test(name)).slice(0, 32)
+      : [];
+    return Object.freeze({
+      phase: value.phase,
+      ...(step ? { step } : {}),
+      ...(errorCode ? { error: errorCode } : {}),
+      ...(ignoredBuilds.length ? { ignoredBuilds: Object.freeze(ignoredBuilds) } : {}),
+    });
+  };
+  const mapVersionState = (item) => {
+    const upgrade = mapUpgrade(item.upgrade);
+    return {
+      ...(typeof item.dshVersion === 'string' && item.dshVersion ? { dshVersion: item.dshVersion } : { dshVersion: null }),
+      ...(typeof item.latestDshVersion === 'string' && item.latestDshVersion ? { latestDshVersion: item.latestDshVersion } : { latestDshVersion: null }),
+      checking: item.checking === true,
+      upgradeAvailable: item.upgradeAvailable === true,
+      ...(typeof item.alignPending === 'boolean' ? { alignPending: item.alignPending } : {}),
+      ...(upgrade ? { upgrade } : {}),
+    };
+  };
+  const mapCurrentHost = (value) => {
+    if (!value || typeof value !== 'object' || typeof value.profileId !== 'string') return null;
+    return Object.freeze({ profileId: value.profileId, ...mapVersionState(value) });
+  };
   const mapRuntime = (item) => Object.freeze({
     id: item.id, kind: item.kind, profileId: item.profileId, phase: item.phase, canStop: item.canStop === true,
     ...(item.source === 'ssh' ? { source: 'ssh' } : {}),
+    ...mapVersionState(item),
   });
   async function refresh() {
     if (disposed) return false;
@@ -333,7 +366,7 @@ export function createWorkspaceClient(deps) {
       if (typeof result?.currentProfile !== 'string' || !Array.isArray(result.profiles) || !Array.isArray(result.runtimes)) throw error('WORKSPACE_INVALID_CATALOG');
       const profiles = result.profiles.slice(0, 256).filter((item) => typeof item?.id === 'string').map(mapProfile);
       const runtimes = withViews(result.runtimes.slice(0, 128).filter((item) => typeof item?.id === 'string').map(mapRuntime));
-      publish({ phase: 'ready', currentProfile: result.currentProfile, defaultCwd: typeof result.defaultCwd === 'string' ? result.defaultCwd : '', profiles: Object.freeze(profiles), runtimes });
+      publish({ phase: 'ready', currentProfile: result.currentProfile, defaultCwd: typeof result.defaultCwd === 'string' ? result.defaultCwd : '', profiles: Object.freeze(profiles), currentHost: mapCurrentHost(result.currentHost), runtimes });
       return true;
     } catch (cause) {
       // Keep the previous list and mark it possibly stale instead of pretending it is empty.
@@ -534,9 +567,20 @@ export function createWorkspaceClient(deps) {
       if (typeof result?.runtimeId === 'string') { webRuntimeIds.set(spec.key, result.runtimeId); syncViews(); }
       return webUrl(result?.url);
     };
+    const guestNotice = (data) => {
+      try {
+        deps.onGuestNotification?.(spec.key, data);
+      } catch {
+        // A notification consumer cannot interrupt the Guest.
+      }
+    };
     const task = resolveUrl().then(async (url) => {
       if (closed) return;
       if (spec.ssh && sshRegistration !== registration) throw error('SSH_COMPONENT_DISABLED');
+      // Connection's login redirect removes the query but preserves the fragment,
+      // so the embedded flag must travel in the hash for every Guest. SSH views have
+      // no session-navigation identity but still need it for the notification bridge.
+      const bootstrap = new URLSearchParams({ workspaceShellEmbedded: '1', ...(parentOrigin ? { workspaceShellParentOrigin: parentOrigin } : {}) });
       if (!spec.ssh && sessionNavigation?.context) {
         const parent = await sessionNavigation.context();
         if (closed) return;
@@ -545,12 +589,14 @@ export function createWorkspaceClient(deps) {
         url.searchParams.set('workspaceSessionWindow', parent.windowId);
         url.searchParams.set('workspaceSessionParent', parent.instanceId);
         url.searchParams.set('workspaceSessionTab', token);
-        // Connection's login redirect removes the query but preserves the fragment.
-        const bootstrap = new URLSearchParams({ workspaceShellEmbedded: '1', workspaceSessionWindow: parent.windowId, workspaceSessionParent: parent.instanceId, workspaceSessionTab: token });
-        url.hash = url.hash.slice(1) + (url.hash ? '&' : '') + bootstrap.toString();
+        bootstrap.set('workspaceSessionWindow', parent.windowId);
+        bootstrap.set('workspaceSessionParent', parent.instanceId);
+        bootstrap.set('workspaceSessionTab', token);
       }
+      url.hash = url.hash.slice(1) + (url.hash ? '&' : '') + bootstrap.toString();
       token?.mark('host');
       guest = createGuest({ document, window, container: options.container, workspaceKey: 'workspace-profile:' + spec.key, url: url.href, signal: abort.signal,
+        onGuestEvent: guestNotice,
         onReady() {
           window.clearTimeout(readyTimer);
           if (closed) return;
@@ -561,6 +607,7 @@ export function createWorkspaceClient(deps) {
         },
         onError: report, openExternal: (target) => { if (!closed) window.open(target, '_blank', 'noopener,noreferrer'); } });
       guest.setVisible(shown);
+      guestOpeners.set(spec.key, (sessionId) => guest?.openSession?.(sessionId) === true);
       readyTimer = window.setTimeout(() => report(error('WORKSPACE_VIEW_TIMEOUT')), 30000);
       await guest.start();
       token?.mark('lease');
@@ -568,7 +615,7 @@ export function createWorkspaceClient(deps) {
     const dispose = () => {
       if (closing) return closing;
       closed = true; abort.abort(); window.clearTimeout(readyTimer);
-      sessionTabTokens.delete(spec.key);
+      sessionTabTokens.delete(spec.key); guestOpeners.delete(spec.key);
       // A cancelled open is not a measurement: retire it without publishing.
       timings.delete(spec.key);
       if (token) { try { timing.invalidate(spec.key); } catch { /* Timing cleanup never blocks the view. */ } }
@@ -909,6 +956,16 @@ export function createWorkspaceClient(deps) {
       await refresh();
     }
   }
+  async function upgradeHost(runtimeId, profileId) {
+    if (disposed) throw error('WORKSPACE_DISPOSED');
+    const input = {
+      ownerId,
+      ...(typeof runtimeId === 'string' && runtimeId ? { runtimeId } : {}),
+      ...(typeof profileId === 'string' && profileId ? { profileId } : {}),
+    };
+    const result = await api('/hosts/upgrade', input);
+    return result ?? null;
+  }
   async function readDefaultCwd(tabId, localCwd) {
     const snapshot = tabs.getSnapshot();
     const source = snapshot.tabs.find((tab) => tab.id === tabId);
@@ -950,7 +1007,14 @@ export function createWorkspaceClient(deps) {
       return id;
     });
   };
-  return Object.freeze({ tabs, info, connections, sshExtension, registerSshExtension, sessionNavigationExtension, registerSessionNavigation, sessionTabs, openSessionHost, timing, canWeb, canTui, refresh, registerProvider, open, activate, setOverlay, close, closeViews, readDefaultCwd,
+  // The Guest owns the only navigation primitive; the Shell asks the exact view that
+  // produced a notification to show one Session.
+  function openSessionInTab(key, sessionId) {
+    if (disposed || typeof key !== 'string') return false;
+    const open = guestOpeners.get(key);
+    return typeof open === 'function' ? open(sessionId) === true : false;
+  }
+  return Object.freeze({ tabs, info, connections, sshExtension, registerSshExtension, sessionNavigationExtension, registerSessionNavigation, sessionTabs, openSessionHost, openSessionInTab, timing, canWeb, canTui, refresh, registerProvider, open, activate, setOverlay, close, closeViews, readDefaultCwd,
     appearance, appearanceColors, getTabAppearance, canCustomizeTab, setTabAppearance,
     openLauncher, launcherSource, readLauncherCwd, openLauncherWeb, openLauncherTui, moveTab,
     openWeb, openTui, getTabStatus, sshRequest, reportSsh, openSshWeb, closeSshViews, sshViewCounts,
@@ -961,6 +1025,7 @@ export function createWorkspaceClient(deps) {
       return tabs.retry(id);
     },
     stopRuntime,
+    upgradeHost,
     dispose() {
       if (disposal) return disposal;
       disposed = true; ++navigation; ++refreshGeneration; refreshAbort.abort();
@@ -968,7 +1033,7 @@ export function createWorkspaceClient(deps) {
       try { orderMemory?.dispose(); } catch {}
       appearanceReady = false; appearanceHydrated = true; appearanceListeners.clear();
       try { appearanceMemory?.dispose(); } catch {}
-      sessionTabTokens.clear(); sessionNavigation = null; sessionNavigationListeners.clear();
+      sessionTabTokens.clear(); guestOpeners.clear(); sessionNavigation = null; sessionNavigationListeners.clear();
       sshRegistration?.unsubscribe?.(); sshRegistration?.abort.abort(); sshRegistration = null; extensionListeners.clear(); sshSpecs.clear();
       window.removeEventListener('pagehide', pagehide); offTabs(); listeners.clear(); connectionListeners.clear();
       for (const [key] of timings) { try { timing.invalidate(key); } catch {} }

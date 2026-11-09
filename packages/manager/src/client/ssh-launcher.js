@@ -39,6 +39,10 @@ export function createSshLauncher(React, deps = {}) {
       connected: 'Connected', disconnected: 'Not connected', connectionState: 'Connection state', hostAlias: 'OpenSSH alias',
       displayName: 'Display name', resolvedHost: 'Resolved host', port: 'Port', user: 'User', identityFile: 'Identity file',
       remoteVersion: 'Remote version', instance: 'Instance', source: 'Source', state: 'State',
+      dshVersion: 'DSH version', upgrade: 'Upgrade', upgradeHint: 'Install the newest bundled runtime and upgrade remote plugins.',
+      upgradeStep_runtime: 'Upgrading runtime…', upgradeStep_plugins: 'Upgrading plugins…',
+      upgradeStarted: 'Remote Host upgrade started.', upgradeDone: 'Remote Host upgraded.', upgradeUpToDate: 'That Host already runs the newest bundled runtime.',
+      buildApprovalPending: 'Pending build approval: ', approveBuilds: 'Approve & retry', approveStarted: 'Build scripts approved; retrying the upgrade.',
       source_remote: 'Remote', source_default: 'Default',
       hostState_idle: 'Not started', hostState_starting: 'Starting', hostState_running: 'Running',
       hostState_stopping: 'Stopping', hostState_offline: 'Offline', hostState_failed: 'Failed', hostState_unknown: 'Unknown',
@@ -84,7 +88,15 @@ export function createSshLauncher(React, deps = {}) {
       errorAuthRequired: 'SSH authentication needs manual input.', errorHostKey: 'The SSH host key is not trusted yet.',
       errorSshConfig: 'The OpenSSH configuration could not be resolved.', errorConnectionFailed: 'The SSH connection failed.',
       errorInstanceUnavailable: 'The remote Host instance is no longer available.', errorTunnel: 'The port forward failed.',
-      errorLocalDshOutdated: 'The remote Host runs a newer DSH version. Update the local DSH before connecting.', errorVersionMismatch: 'The remote DSH version differs from the local version.',
+      errorVersionMismatch: 'The remote runtime package is unavailable or does not match this plugin build. Reinstall the SSH Remote plugin and retry.',
+      errorUpgradeBusy: 'Another upgrade is already running for this SSH connection.',
+      errorUpgradeUnavailable: 'This remote Host cannot be upgraded safely right now.',
+      errorUpgradeFailed: 'The remote Host upgrade failed.',
+      errorUpgradeApprovalUnavailable: 'No remote plugin is waiting for build-script approval.',
+      errorUpgradeRegistry: 'The plugin registry could not be reached, so the plugin was left unchanged.',
+      errorUpgradeUnsupported: 'This profile is not a Web profile.',
+      errorUpgradeProfileUnavailable: 'The remote Web profile is unavailable.',
+      errorPluginBuildApproval: 'A remote plugin needs build-script approval before it can be upgraded.',
       errorAliasExists: 'This OpenSSH alias is already saved.', errorServiceDisposed: 'The SSH Remote service is unavailable.',
       errorInvalidProfile: 'The Web profile is invalid.', errorCancelled: 'The operation was cancelled.',
       pluginsAligned: (count) => `Remote plugins aligned to local versions: ${count}`,
@@ -104,6 +116,10 @@ export function createSshLauncher(React, deps = {}) {
       connected: '已连接', disconnected: '未连接', connectionState: '连接状态', hostAlias: 'OpenSSH 别名',
       displayName: '显示名称', resolvedHost: '解析后的主机', port: '端口', user: '用户', identityFile: '身份文件',
       remoteVersion: '远端版本', instance: '实例', source: '来源', state: '状态',
+      dshVersion: 'DSH 版本', upgrade: '升级', upgradeHint: '安装最新的内置运行包，并把远端插件升级到最新版本。',
+      upgradeStep_runtime: '正在升级运行包…', upgradeStep_plugins: '正在升级插件…',
+      upgradeStarted: '远端 Host 升级已开始。', upgradeDone: '远端 Host 已升级。', upgradeUpToDate: '这个 Host 已经是最新运行包版本。',
+      buildApprovalPending: '待批准构建：', approveBuilds: '批准并重试', approveStarted: '已批准构建脚本，正在重试升级。',
       source_remote: '远端', source_default: '默认',
       hostState_idle: '未启动', hostState_starting: '启动中', hostState_running: '运行中',
       hostState_stopping: '停止中', hostState_offline: '离线', hostState_failed: '失败', hostState_unknown: '未知',
@@ -149,7 +165,15 @@ export function createSshLauncher(React, deps = {}) {
       errorAuthRequired: 'SSH 认证需要手动输入。', errorHostKey: 'SSH 主机密钥尚未信任。',
       errorSshConfig: '无法解析 OpenSSH 配置。', errorConnectionFailed: 'SSH 连接失败。',
       errorInstanceUnavailable: '远端 Host 实例已不可用。', errorTunnel: '端口转发失败。',
-      errorLocalDshOutdated: '本机 DSH 版本低于远端 Host，请先更新本机 DSH 后重试。', errorVersionMismatch: '远端 DSH 版本与本机不同。',
+      errorVersionMismatch: '远端运行包不可用或与本插件构建不匹配，请重装 SSH Remote 插件后重试。',
+      errorUpgradeBusy: '这个 SSH 连接已经有一个升级在执行。',
+      errorUpgradeUnavailable: '这个远端 Host 现在无法安全升级。',
+      errorUpgradeFailed: '远端 Host 升级失败。',
+      errorUpgradeApprovalUnavailable: '当前没有等待批准构建脚本的远端插件。',
+      errorUpgradeRegistry: '无法访问插件 registry，该插件保持原样。',
+      errorUpgradeUnsupported: '这个 profile 不是 Web profile。',
+      errorUpgradeProfileUnavailable: '远端 Web profile 不可用。',
+      errorPluginBuildApproval: '远端插件需要先批准构建脚本才能升级。',
       errorAliasExists: '这个 OpenSSH 别名已经保存。', errorServiceDisposed: 'SSH Remote 服务不可用。',
       errorInvalidProfile: 'Web profile 无效。', errorCancelled: '操作已取消。',
       pluginsAligned: (count) => `已把远端插件对齐到本机版本：${count} 个`,
@@ -163,13 +187,21 @@ export function createSshLauncher(React, deps = {}) {
     SSH_AUTH_FAILED: 'errorAuthFailed', SSH_AUTH_INTERACTION_REQUIRED: 'errorAuthRequired', SSH_HOST_KEY_UNKNOWN: 'errorHostKey',
     SSH_CONFIG_INVALID: 'errorSshConfig', SSH_UNSUPPORTED_CONFIG: 'errorSshConfig', SSH_CONNECTION_FAILED: 'errorConnectionFailed',
     REMOTE_INSTANCE_UNAVAILABLE: 'errorInstanceUnavailable', TUNNEL_FAILED: 'errorTunnel',
-    LOCAL_DSH_OUTDATED: 'errorLocalDshOutdated', REMOTE_VERSION_MISMATCH: 'errorVersionMismatch',
+    REMOTE_VERSION_MISMATCH: 'errorVersionMismatch',
+    UPGRADE_BUSY: 'errorUpgradeBusy', UPGRADE_RUNTIME_UNAVAILABLE: 'errorUpgradeUnavailable',
+    UPGRADE_REGISTRY_UNAVAILABLE: 'errorUpgradeRegistry', UPGRADE_INSTALL_FAILED: 'errorUpgradeFailed',
+    UPGRADE_PLUGIN_FAILED: 'errorUpgradeFailed', UPGRADE_BACKUP_FAILED: 'errorUpgradeFailed',
+    UPGRADE_RESTORE_FAILED: 'errorUpgradeFailed', UPGRADE_VALIDATION_FAILED: 'errorUpgradeFailed',
+    UPGRADE_NPM_FAILED: 'errorUpgradeFailed', UPGRADE_UNSUPPORTED_PROFILE: 'errorUpgradeUnsupported',
+    UPGRADE_PROFILE_UNAVAILABLE: 'errorUpgradeProfileUnavailable',
+    PLUGIN_BUILD_APPROVAL_REQUIRED: 'errorPluginBuildApproval',
     HOST_ALIAS_EXISTS: 'errorAliasExists', SERVICE_DISPOSED: 'errorServiceDisposed',
     INVALID_PROFILE_ID: 'errorInvalidProfile', INVALID_WEB_URL: 'invalidWebUrl', INVALID_RESPONSE: 'invalidResponse',
     OPERATION_CANCELLED: 'errorCancelled', ALIAS_REQUIRED: 'aliasRequired', PROFILE_NOT_WEB: 'disabledNotWeb',
   };
   const NOTICE_KEYS = {
     CONNECTED: 'connectNotice', DISCONNECTED: 'disconnectedNotice', RESTARTED: 'restarted', PLUGINS_ALIGNED: 'pluginsAligned',
+    UPGRADE_STARTED: 'upgradeStarted', UPGRADE_DONE: 'upgradeDone', UPGRADE_UP_TO_DATE: 'upgradeUpToDate',
     AUTO_CONNECT_ON: 'autoConnectSaved', AUTO_CONNECT_OFF: 'autoConnectOffSaved',
     HOST_SAVED: 'hostSaved', HOST_DELETED: 'deleted', WEB_OPENED: 'webOpened', WEB_STOPPED: 'stoppedNotice',
     OPERATION_CANCELLED: 'errorCancelled',
@@ -274,6 +306,72 @@ export function createSshLauncher(React, deps = {}) {
     }).filter(Boolean);
     return { ok: raw.ok === true, items, restarted: raw.restarted === true };
   }
+  const UPGRADE_PHASES = new Set(['running', 'done', 'failed']);
+  const UPGRADE_STEPS = new Set(['runtime', 'plugins']);
+  function normalizeUpgrade(value) {
+    const raw = object(value);
+    if (!UPGRADE_PHASES.has(raw.phase)) return null;
+    const step = UPGRADE_STEPS.has(raw.step) ? raw.step : null;
+    const error = firstString(raw.error?.code);
+    const items = (Array.isArray(raw.items) ? raw.items : []).slice(0, 32).map((item) => {
+      const entry = object(item);
+      const name = firstString(entry.name);
+      if (!name) return null;
+      const code = firstString(entry.error?.code);
+      return {
+        name: name.slice(0, 256),
+        fromVersion: firstString(entry.fromVersion).slice(0, 128),
+        toVersion: firstString(entry.toVersion).slice(0, 128),
+        ok: entry.ok === true,
+        ...code ? { error: { code } } : {},
+      };
+    }).filter(Boolean);
+    return {
+      phase: raw.phase,
+      step,
+      ...error && /^[A-Z][A-Z0-9_]{0,63}$/u.test(error) ? { error: { code: error } } : {},
+      ...items.length ? { items } : {},
+    };
+  }
+  function parseSemver(value) {
+    const text = firstString(value).replace(/^v/u, '');
+    const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z.-]+)?$/u.exec(text);
+    if (!match) return null;
+    return {
+      numbers: [Number(match[1]), Number(match[2]), Number(match[3])],
+      prerelease: match[4] ? match[4].split('.') : [],
+    };
+  }
+  function compareSemver(left, right) {
+    const a = parseSemver(left);
+    const b = parseSemver(right);
+    if (!a || !b) return 0;
+    for (let index = 0; index < 3; index += 1) {
+      if (a.numbers[index] !== b.numbers[index]) return a.numbers[index] > b.numbers[index] ? 1 : -1;
+    }
+    if (!a.prerelease.length && !b.prerelease.length) return 0;
+    if (!a.prerelease.length) return 1;
+    if (!b.prerelease.length) return -1;
+    const length = Math.max(a.prerelease.length, b.prerelease.length);
+    for (let index = 0; index < length; index += 1) {
+      const leftId = a.prerelease[index];
+      const rightId = b.prerelease[index];
+      if (leftId === undefined) return -1;
+      if (rightId === undefined) return 1;
+      const leftNumeric = /^\d+$/u.test(leftId);
+      const rightNumeric = /^\d+$/u.test(rightId);
+      if (leftNumeric && rightNumeric) {
+        if (Number(leftId) !== Number(rightId)) return Number(leftId) > Number(rightId) ? 1 : -1;
+      } else if (leftNumeric) return -1;
+      else if (rightNumeric) return 1;
+      else if (leftId !== rightId) return leftId > rightId ? 1 : -1;
+    }
+    return 0;
+  }
+  function isNewerVersion(candidate, current) {
+    if (!parseSemver(candidate) || !parseSemver(current)) return false;
+    return compareSemver(candidate, current) > 0;
+  }
   function normalizeStatus(value) {
     const raw = payload(value);
     const list = Array.isArray(raw.connections) ? raw.connections : Array.isArray(raw.hosts) ? raw.hosts : [];
@@ -304,6 +402,16 @@ export function createSshLauncher(React, deps = {}) {
         state: token(host.state ?? host.phase, HOST_STATES, 'unknown'),
         connected: object(host.health).connected === true,
         views: Number.isSafeInteger(host.views) && host.views >= 0 ? Math.min(host.views, 999) : 0,
+        dshVersion: firstString(host.dshVersion, host.version),
+        latestDshVersion: firstString(host.latestDshVersion),
+        pluginsUpgradable: host.pluginsUpgradable === true,
+        buildApprovals: (Array.isArray(host.buildApprovals) ? host.buildApprovals : []).slice(0, 16).map((entry) => {
+          const name = firstString(entry?.name);
+          if (!name) return null;
+          const builds = (Array.isArray(entry.builds) ? entry.builds : []).filter((value) => typeof value === 'string').slice(0, 8);
+          return { name: name.slice(0, 256), builds };
+        }).filter(Boolean),
+        upgrade: normalizeUpgrade(host.upgrade),
         error: host.error ? safeError(host.error) : null,
       };
     }).filter(Boolean);
@@ -657,27 +765,52 @@ export function createSshLauncher(React, deps = {}) {
     };
   }
 
-  function ProfileRow({ profile, host, detail, views, busy, operation, onOpen, onStop, t }) {
+  function ProfileRow({ profile, host, detail, views, busy, operation, onOpen, onStop, onUpgrade, onApprove, t }) {
     const actions = hostActions(profile, host, detail, Boolean(busy), t);
     const opening = operation === `open:${profile.id}`;
     const stopping = operation === `stop:${profile.id}`;
     const state = hostStateText(t, host?.state ?? 'idle');
     const source = t('source_' + detail.profilesSource);
+    const upgrade = host?.upgrade ?? null;
+    const upgrading = upgrade?.phase === 'running';
+    const hasNewRuntime = Boolean(host?.instanceId) && isNewerVersion(host?.latestDshVersion, host?.dshVersion);
+    const hasNewPlugins = host?.pluginsUpgradable === true;
+    const showUpgrade = upgrading || Boolean(upgrade) || hasNewRuntime || hasNewPlugins;
+    const stepText = upgrading ? t(`upgradeStep_${upgrade.step ?? 'runtime'}`) : t('upgrade');
+    const approvals = Array.isArray(host?.buildApprovals) ? host.buildApprovals : [];
+    const approvalNames = [...new Set(approvals.flatMap((entry) => entry.builds))];
     return h('li', { className: 'wsh-ssh-host', 'data-state': host?.state ?? 'idle' },
       h('div', { className: 'wsh-ssh-host-text' },
         h('strong', null, profile.name || host?.profileName || profile.id),
         h('span', { className: 'wsh-ssh-host-meta' },
           h('span', null, `${t('source')}: ${source}`),
           h('span', null, `${t('state')}: ${state}`),
+          h('span', null, `${t('dshVersion')}: ${host?.dshVersion || '—'}`),
           h('span', null, `${views} ${t('viewsUnit')}`)),
         h('code', { className: 'wsh-ssh-host-id' }, profile.id),
-        host?.error ? h('span', { className: 'wsh-ssh-error-text' }, statusTextFor(t, host.error.code)) : null),
+        host?.error ? h('span', { className: 'wsh-ssh-error-text' }, statusTextFor(t, host.error.code)) : null,
+        upgrade?.error ? h('span', { className: 'wsh-ssh-error-text', role: 'alert' }, statusTextFor(t, upgrade.error.code)) : null,
+        approvalNames.length
+          ? h('span', { className: 'wsh-ssh-build-approval', 'data-build-approval': '' },
+            h('span', { className: 'wsh-ssh-error-text' }, `${t('buildApprovalPending')}${approvalNames.join(', ')}`),
+            h(Button, {
+              onClick: () => onApprove(profile),
+              disabled: upgrading || Boolean(busy),
+              'data-launcher-action': 'approve-builds',
+            }, t('approveBuilds')))
+          : null),
       h('div', { className: 'wsh-ssh-host-actions' },
+        showUpgrade ? h(Button, {
+          onClick: () => onUpgrade(profile),
+          disabled: upgrading || Boolean(busy),
+          title: upgrading ? stepText : t('upgradeHint'),
+          'aria-busy': upgrading || undefined,
+        }, stepText) : null,
         h(Button, { onClick: () => onOpen(profile), disabled: actions.newDisabled, title: actions.newHint }, t(opening ? 'opening' : 'newTab')),
         h(Button, { kind: 'danger', onClick: () => onStop(host), disabled: actions.stopDisabled, title: actions.stopHint }, t(stopping ? 'operation_stop' : 'stop'))));
   }
 
-  function DetailPane({ connection, detail, loading, busy, operation, viewMap, notice, onDismissNotice, onConnect, onCancel, onRefresh, onOpen, onStop, onDismiss, t }) {
+  function DetailPane({ connection, detail, loading, busy, operation, viewMap, notice, onDismissNotice, onConnect, onCancel, onRefresh, onOpen, onStop, onUpgrade, onApprove, onDismiss, t }) {
     if (!connection) {
       return h('section', { className: 'wsh-ssh-detail wsh-ssh-empty', role: 'status' },
         h('strong', null, t('noConnections')), h('p', { className: 'wsh-ssh-muted' }, t('noConnectionsHint')));
@@ -695,7 +828,7 @@ export function createSshLauncher(React, deps = {}) {
       rows.length
         ? h('ul', { className: 'wsh-ssh-hosts', 'aria-label': t('hostsTitle') }, rows.map(({ profile, host }) => h(ProfileRow, {
           key: profile.id, profile, host, detail, views: viewsFor(profile.id, host), busy, operation,
-          onOpen, onStop, t,
+          onOpen, onStop, onUpgrade, onApprove, t,
         })))
         : !loading ? h('div', { className: 'wsh-ssh-empty', role: 'status' },
           h('strong', null, t('emptyProfiles')),
@@ -825,7 +958,9 @@ export function createSshLauncher(React, deps = {}) {
     const {
       active = true, locale = 'en', initialHostId = '', viewCounts = {},
       tracks = null,
+      upgradePollMs = 1200,
     } = props;
+    const pollInterval = Number.isSafeInteger(upgradePollMs) && upgradePollMs >= 0 ? upgradePollMs : 1200;
     const onOpenWeb = typeof props.onOpenWeb === 'function' ? props.onOpenWeb : depsCallbacks.onOpenWeb;
     const onStopWeb = typeof props.onStopWeb === 'function' ? props.onStopWeb : depsCallbacks.onStopWeb;
     const notify = typeof props.notify === 'function' ? props.notify : depsCallbacks.notify;
@@ -853,6 +988,7 @@ export function createSshLauncher(React, deps = {}) {
     const detailTokens = useRef(new Map());
     const catalogToken = useRef({ generation: 0, abort: null });
     const connectTokens = useRef(new Map());
+    const upgradeTokens = useRef(new Map());
     const saveToken = useRef({ generation: 0, abort: null });
     const initialApplied = useRef(false);
 
@@ -881,6 +1017,8 @@ export function createSshLauncher(React, deps = {}) {
       catalogToken.current.abort?.abort();
       catalogToken.current.abort = null;
       catalogToken.current.generation += 1;
+      for (const token of upgradeTokens.current.values()) clearTimeout(token.timer);
+      upgradeTokens.current.clear();
     };
     const cancelInflight = () => {
       cancelReads();
@@ -940,7 +1078,7 @@ export function createSshLauncher(React, deps = {}) {
     }
 
     async function loadDetail(hostId) {
-      if (!alive.current || !hostId) return false;
+      if (!alive.current || !hostId) return null;
       const previous = detailTokens.current.get(hostId);
       previous?.abort?.abort();
       const generation = (previous?.generation ?? 0) + 1;
@@ -950,7 +1088,7 @@ export function createSshLauncher(React, deps = {}) {
       setDetails((current) => ({ ...current, [hostId]: { ...(current[hostId] ?? emptyDetail(hostId)), refreshing: true } }));
       try {
         const value = normalizeWebList(await api('/web/list', { hostId }, controller?.signal));
-        if (!alive.current || detailTokens.current.get(hostId) !== token) return false;
+        if (!alive.current || detailTokens.current.get(hostId) !== token) return null;
         setDetails((current) => {
           const before = current[hostId] ?? emptyDetail(hostId);
           return {
@@ -963,9 +1101,9 @@ export function createSshLauncher(React, deps = {}) {
             },
           };
         });
-        return true;
+        return value;
       } catch (cause) {
-        if (!alive.current || detailTokens.current.get(hostId) !== token) return false;
+        if (!alive.current || detailTokens.current.get(hostId) !== token) return null;
         setDetails((current) => ({
           ...current,
           [hostId]: {
@@ -974,7 +1112,7 @@ export function createSshLauncher(React, deps = {}) {
             error: failure(cause),
           },
         }));
-        return false;
+        return null;
       }
     }
 
@@ -1021,6 +1159,110 @@ export function createSshLauncher(React, deps = {}) {
       if (!alive.current || !connection) return;
       setSelectedId(connection.id);
       setMenu(null);
+    }
+
+    function applyUpgrade(connectionId, profileId, upgrade) {
+      setDetails((current) => {
+        const detail = current[connectionId] ?? emptyDetail(connectionId);
+        return {
+          ...current,
+          [connectionId]: {
+            ...detail,
+            hosts: detail.hosts.map((host) => host.profileId === profileId ? { ...host, upgrade } : host),
+          },
+        };
+      });
+    }
+
+    /**
+     * Polls the host list while an upgrade runs. The server exposes only the
+     * fixed phase/step fields; the client maps them to localized copy.
+     */
+    function pollUpgrade(connectionId, profileId) {
+      const key = `${connectionId}:${profileId}`;
+      const previous = upgradeTokens.current.get(key);
+      if (previous) clearTimeout(previous.timer);
+      const token = { timer: null };
+      upgradeTokens.current.set(key, token);
+      const tick = async () => {
+        if (!alive.current || upgradeTokens.current.get(key) !== token) return;
+        const value = await loadDetail(connectionId);
+        if (!alive.current || upgradeTokens.current.get(key) !== token) return;
+        const host = value?.hosts?.find((item) => item.profileId === profileId);
+        const phase = host?.upgrade?.phase;
+        if (phase === 'running') {
+          token.timer = setTimeout(tick, pollInterval);
+          return;
+        }
+        upgradeTokens.current.delete(key);
+        if (phase === 'failed') {
+          putNotice(`host:${connectionId}`, { kind: 'error', code: host.upgrade.error?.code ?? 'UPGRADE_PLUGIN_FAILED' });
+          track('upgrade', 'failed', connectionId);
+        } else if (phase === 'done') {
+          putNotice(`host:${connectionId}`, { kind: 'notice', code: 'UPGRADE_DONE' });
+          track('upgrade', 'complete', connectionId);
+          // One more read clears the finished state and shows the new version.
+          void loadDetail(connectionId);
+        } else {
+          // The server cleared the finished state between polls: read the new
+          // version once more so the row reflects it.
+          void loadDetail(connectionId);
+        }
+      };
+      token.timer = setTimeout(tick, pollInterval);
+    }
+
+    async function upgradeHost(connection, profile) {
+      if (!alive.current || !connection || !profile || busy) return false;
+      const hostId = connection.id;
+      const scope = `upgrade:${hostId}:${profile.id}`;
+      setBusy(scope);
+      setOperation(scope);
+      dropNotice(`host:${hostId}`);
+      try {
+        const value = payload(await api('/upgrade', { hostId, profileId: profile.id }));
+        if (!alive.current) return false;
+        if (value?.started !== true) {
+          putNotice(`host:${hostId}`, { kind: 'notice', code: 'UPGRADE_UP_TO_DATE' });
+          void loadDetail(hostId);
+          return true;
+        }
+        const upgrade = normalizeUpgrade(value.upgrade) ?? { phase: 'running', step: 'runtime' };
+        applyUpgrade(hostId, profile.id, upgrade);
+        putNotice(`host:${hostId}`, { kind: 'notice', code: 'UPGRADE_STARTED' });
+        track('upgrade', 'start', hostId);
+        pollUpgrade(hostId, profile.id);
+        return true;
+      } catch (cause) {
+        if (alive.current) putNotice(`host:${hostId}`, failure(cause));
+        return false;
+      } finally {
+        if (alive.current) clearBusy(scope);
+      }
+    }
+
+    async function approveHost(connection, profile) {
+      if (!alive.current || !connection || !profile || busy) return false;
+      const hostId = connection.id;
+      const scope = `upgrade:${hostId}:${profile.id}`;
+      setBusy(scope);
+      setOperation(scope);
+      dropNotice(`host:${hostId}`);
+      try {
+        const value = payload(await api('/upgrade/approve', { hostId, profileId: profile.id }));
+        if (!alive.current) return false;
+        const upgrade = normalizeUpgrade(value?.upgrade) ?? { phase: 'running', step: 'plugins' };
+        applyUpgrade(hostId, profile.id, upgrade);
+        putNotice(`host:${hostId}`, { kind: 'notice', code: 'UPGRADE_STARTED' });
+        track('approve', 'start', hostId);
+        pollUpgrade(hostId, profile.id);
+        return true;
+      } catch (cause) {
+        if (alive.current) putNotice(`host:${hostId}`, failure(cause));
+        return false;
+      } finally {
+        if (alive.current) clearBusy(scope);
+      }
     }
 
     // autoConnect is the Desktop startup policy. Saving goes through hosts upsert;
@@ -1407,6 +1649,8 @@ export function createSshLauncher(React, deps = {}) {
           onRefresh: () => { if (selected) void loadDetail(selected.id); },
           onOpen: (profile) => { if (selected) openWeb(selected, profile); },
           onStop: (host) => { if (selected && host) setDialog({ type: 'stop', hostId: selected.id, host }); },
+          onUpgrade: (profile) => { if (selected) void upgradeHost(selected, profile); },
+          onApprove: (profile) => { if (selected) void approveHost(selected, profile); },
           onDismiss: () => dropNotice(`host:${selectedId}`), t,
         })),
       modal);
@@ -1430,6 +1674,7 @@ function buildCss() {
     '.wsh-ssh-muted{color:var(--ssh-muted);font-size:12px}.wsh-ssh-status{color:var(--ssh-muted);font-size:12px;padding:2px 0}.wsh-ssh-error-text{color:var(--ssh-error);font-size:12px}',
     '.wsh-ssh-notice{margin:0;padding:8px 10px;border:1px solid var(--ssh-border);border-radius:var(--dsw-radius-sm);display:flex;align-items:flex-start;justify-content:space-between;gap:10px;font-size:12px;overflow-wrap:anywhere}.wsh-ssh-notice-error{border-color:var(--ssh-error);color:var(--ssh-error)}',
     '.wsh-ssh-link{align-self:flex-start;border:0;background:transparent;color:inherit;font:inherit;font-size:15px;line-height:1;padding:2px 4px;cursor:pointer;border-radius:var(--dsw-radius-xs)}.wsh-ssh-link:hover{background:var(--ssh-hover)}',
+    '.wsh-ssh-build-approval{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}',
     '.wsh-ssh-connections,.wsh-ssh-hosts,.wsh-ssh-ports,.wsh-ssh-picker{list-style:none;margin:0;padding:0;display:grid;gap:4px}',
     '.wsh-ssh-connection{position:relative;border:1px solid transparent;border-radius:var(--ssh-radius);padding:8px 8px 8px 10px;display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px}',
     '.wsh-ssh-connection:hover{background:var(--ssh-hover)}.wsh-ssh-connection[data-selected=true]{background:var(--ssh-hover);border-color:var(--ssh-border-strong);box-shadow:inset 3px 0 var(--ssh-primary)}',

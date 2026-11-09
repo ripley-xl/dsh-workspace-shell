@@ -13,6 +13,10 @@ const CWD_VERSION = 1;
 const CWD_TIMEOUT = 1000;
 const CWD_PARENT_ORIGIN = 'workspaceShellParentOrigin';
 const CWD_REQUEST_ID = /^[A-Za-z0-9_-]{16,128}$/;
+const NOTIFY_EVENT = 'workspace-shell-notification';
+const OPEN_SESSION_EVENT = 'workspace-shell-open-session';
+const NOTIFY_VERSION = 1;
+const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const ORIGIN_PATTERN = /^[a-z][a-z0-9+.-]{1,31}:\/\/[^\s/?#@]{1,255}$/;
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
 const SANDBOX = 'allow-scripts allow-same-origin allow-forms allow-modals';
@@ -54,6 +58,7 @@ export function createBrowserGuest({
   signal,
   onReady,
   onError,
+  onGuestEvent,
   parentOrigin,
 }) {
   const timers = window ?? globalThis;
@@ -125,21 +130,38 @@ export function createBrowserGuest({
     return true;
   };
 
-  const onCwdMessage = (event) => {
-    const current = pending;
-    if (!current) return;
+  // One channel carries cwd replies and unsolicited guest events. The framed document
+  // must still be the assigned URL; a later navigation is caught by the origin gate.
+  const onChannelMessage = (event) => {
     try {
-      const data = event?.data;
-      if (!data || typeof data !== 'object' || Array.isArray(data)) return;
-      if (data.type !== CWD_RESPONSE || data.version !== CWD_VERSION) return;
-      if (data.requestId !== current.requestId) return;
       if (!sameOrigin()) return;
       const source = frame?.contentWindow;
       if (!source || event.source !== source) return;
       if (event.origin !== target.origin) return;
+      const data = event?.data;
+      if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+      if (data.type === NOTIFY_EVENT) {
+        if (data.version !== NOTIFY_VERSION) return;
+        callSafely(() => onGuestEvent?.(data));
+        return;
+      }
+      const current = pending;
+      if (!current) return;
+      if (data.type !== CWD_RESPONSE || data.version !== CWD_VERSION) return;
+      if (data.requestId !== current.requestId) return;
       settle(validCwd(data.cwd));
     } catch {
       // Cross-origin access revocation and malformed events both mean "no value".
+    }
+  };
+
+  const attachChannel = () => {
+    if (messageAttached) return;
+    try {
+      window?.addEventListener?.('message', onChannelMessage);
+      messageAttached = true;
+    } catch {
+      messageAttached = false;
     }
   };
 
@@ -148,7 +170,7 @@ export function createBrowserGuest({
     if (!messageAttached) return;
     messageAttached = false;
     try {
-      window?.removeEventListener?.('message', onCwdMessage);
+      window?.removeEventListener?.('message', onChannelMessage);
     } catch {
       // Cleanup continues with the iframe.
     }
@@ -259,6 +281,7 @@ export function createBrowserGuest({
       current.addEventListener('error', errorListener);
       frame = current;
       container.appendChild(current);
+      attachChannel();
       current.src = frameUrl;
       signal?.addEventListener?.('abort', onAbort, { once: true });
     } catch {
@@ -312,14 +335,7 @@ export function createBrowserGuest({
         settle(null);
         return;
       }
-      if (!messageAttached) {
-        try {
-          window?.addEventListener?.('message', onCwdMessage);
-          messageAttached = true;
-        } catch {
-          messageAttached = false;
-        }
-      }
+      attachChannel();
       try {
         source.postMessage({
           type: CWD_REQUEST,
@@ -335,5 +351,32 @@ export function createBrowserGuest({
     return validCwd(value);
   };
 
-  return { start, setVisible, focus, resize, getWorkingDirectory, dispose };
+  // Ask the guest to show one Session; the receiving page verifies the parent origin.
+  const openSession = (sessionId) => {
+    const current = frame;
+    if (!sameOrigin() || !target) return false;
+    if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return false;
+    const id = requestId(window);
+    if (!id) return false;
+    let source;
+    try {
+      source = current.contentWindow;
+    } catch {
+      return false;
+    }
+    if (!source || typeof source.postMessage !== 'function') return false;
+    try {
+      source.postMessage({
+        type: OPEN_SESSION_EVENT,
+        version: NOTIFY_VERSION,
+        requestId: id,
+        sessionId,
+      }, target.origin);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  return { start, setVisible, focus, resize, getWorkingDirectory, openSession, dispose };
 }

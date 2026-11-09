@@ -2,6 +2,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools';
 import { Service } from '@deepseek-ai/cordis';
 import { Group } from '@deepseek-ai/cordis-plugin-loader';
 import { createLocalRuntimeService } from './src/host/local-runtimes.js';
+import { createProfileUpgradeService } from './src/host/profile-upgrade.js';
 import { createWorkspacePreferencesStore } from './src/host/workspace-preferences-store.js';
 import { registerShellRoutes } from './src/host/routes.js';
 import { registerWorkspaceRuntimeTool } from './src/host/runtime-tool.js';
@@ -20,6 +21,23 @@ const storageDomainOf = (ctx) => {
   }
 };
 
+// The running Web Host version comes from the plugin-manager bundle inventory;
+// an absent or older plugin-manager simply means "unknown", never a failure.
+async function currentDshVersion(ctx) {
+  let manager;
+  try { manager = typeof ctx.get === 'function' ? ctx.get('pluginManager', false) : undefined; } catch { manager = undefined; }
+  if (!manager || typeof manager.listBundles !== 'function') return null;
+  const bundles = await manager.listBundles();
+  const available = (Array.isArray(bundles) ? bundles : []).filter((bundle) => bundle
+    && bundle.enabled !== false
+    && bundle.availability !== 'missing'
+    && typeof bundle.version === 'string'
+    && bundle.version.length > 0);
+  return available.find((bundle) => bundle.name === '@deepseek-ai/dsh-web-app')?.version
+    ?? available.find((bundle) => bundle.name === '@deepseek-ai/dsh-base')?.version
+    ?? null;
+}
+
 export async function apply(ctx) {
   // dsh-context ships sponsor cards inside its own Client bundle. Remove them
   // when that plugin is installed; an absent plugin is an ordinary no-op.
@@ -31,7 +49,21 @@ export async function apply(ctx) {
     })(),
   });
   await registerSessionHost(ctx);
-  const service = createLocalRuntimeService({ subprocess: ctx.subprocess, profileContext: ctx.profileContext, expectedVersion: '0.2.1-rc.5' });
+  // The upgrade executor needs the real subprocess service; a Host that only
+  // stubs the dependency still gets the runtime catalog and version display.
+  const upgrades = typeof ctx.subprocess?.resolveExecutable === 'function' && typeof ctx.subprocess?.spawn === 'function'
+    ? createProfileUpgradeService({
+      subprocess: ctx.subprocess,
+      profileContext: ctx.profileContext,
+      fetch: typeof fetch === 'function' ? fetch : undefined,
+    })
+    : undefined;
+  const service = createLocalRuntimeService({
+    subprocess: ctx.subprocess,
+    profileContext: ctx.profileContext,
+    currentDshVersion: () => currentDshVersion(ctx),
+    upgrades,
+  });
   ctx.provide('workspaceLocalRuntimes', service);
   ctx.effect(() => () => service.dispose(), 'workspace-owned local runtimes');
   const preferences = createWorkspacePreferencesStore({ getStorageDomain: () => storageDomainOf(ctx) });

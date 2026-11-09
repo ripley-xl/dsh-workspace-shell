@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { DEFAULT_PROFILE_ID, instanceProfileId, matchesProfile, normalizeProfileId } from './profiles.js';
+import { DEFAULT_PROFILE_ID, instanceProfileId, instanceRuntimeMatches, matchesProfile, normalizeProfileId } from './profiles.js';
 import { RemoteClient } from './remote-client.js';
 import { syncRemote } from './remote-sync.js';
 import { SshRemoteError } from './ssh/errors.js';
@@ -11,12 +11,13 @@ function instanceUnavailable(message, details) {
 }
 
 export class RemoteHostConnection extends EventEmitter {
-  constructor({ channel, controller, version, buildId, workspace, patch, fetchImpl, profileId, startMode = 'auto' }) {
+  constructor({ channel, controller, version, buildId, runtimeId, workspace, patch, fetchImpl, profileId, startMode = 'auto' }) {
     super();
     this.channel = channel;
     this.controller = controller;
     this.version = version;
     this.buildId = buildId;
+    this.runtimeId = runtimeId;
     this.workspace = workspace;
     this.patch = patch;
     this.fetchImpl = fetchImpl;
@@ -41,7 +42,9 @@ export class RemoteHostConnection extends EventEmitter {
 
   async openInternal() {
     const listed = await this.controller.list({ version: this.version, buildId: this.buildId, profileId: this.profileId });
-    let instance = listed.instances.find((candidate) => candidate.health?.healthy && matchesProfile(candidate, this.profileId))?.instance;
+    let instance = listed.instances.find((candidate) => candidate.health?.healthy
+      && matchesProfile(candidate, this.profileId)
+      && instanceRuntimeMatches(candidate.instance, this.runtimeId))?.instance;
     if (instance && instanceProfileId(instance) !== this.profileId) {
       throw instanceUnavailable('The remote controller returned an instance for another profile.', {
         profileId: this.profileId,

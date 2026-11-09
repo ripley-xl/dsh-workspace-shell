@@ -12,7 +12,7 @@ import { registerWorkspaceRuntimeTool } from '../../packages/shell/src/host/runt
 const PREFIX = '/api/workspace-shell';
 const SECRET = 'private-token-never-appear';
 const POST_ROUTES = [
-  '/catalog', '/web/open', '/web/attach', '/tui/open', '/terminal/read', '/terminal/write', '/terminal/resize', '/runtime/stop', '/runtime/close-owner',
+  '/catalog', '/web/open', '/web/attach', '/tui/open', '/terminal/read', '/terminal/write', '/terminal/resize', '/runtime/stop', '/runtime/close-owner', '/hosts/upgrade',
   '/tab-order/get', '/tab-order/set', '/tab-appearance/get', '/tab-appearance/set',
 ];
 const GET_ROUTES = ['/terminal', '/assets/xterm.js', '/assets/addon-fit.js', '/assets/terminal-document.js', '/assets/xterm.css'];
@@ -40,6 +40,7 @@ function fakeService(overrides = {}) {
     async writeTerminal(input) { return record('writeTerminal', input); },
     async resizeTerminal(input) { return record('resizeTerminal', input); },
     async stop(input) { return record('stop', input); },
+    async upgrade(input) { return record('upgrade', input, { started: true, upgrade: { phase: 'running', step: 'backup' } }); },
     ...overrides,
   };
 }
@@ -112,7 +113,7 @@ async function responseJson(response) {
   return response.json();
 }
 
-test('registers exactly eighteen routes with the real connection method/body contract', async (t) => {
+test('registers exactly nineteen routes with the real connection method/body contract', async (t) => {
   const state = setup(t);
   assert.deepEqual([...state.routes.keys()].sort(), [...POST_ROUTES, ...GET_ROUTES].map((path) => PREFIX + path).sort());
   for (const path of POST_ROUTES) {
@@ -139,6 +140,7 @@ test('POST routes project known kwargs and preserve the Request signal instead o
     ['/terminal/write', { runtimeId: 'runtime-tui', ownerId: 'owner', data: 'abc' }],
     ['/terminal/resize', { runtimeId: 'runtime-tui', ownerId: 'owner', cols: 120, rows: 40 }],
     ['/runtime/stop', { runtimeId: 'runtime-tui', ownerId: 'owner' }],
+    ['/hosts/upgrade', { runtimeId: 'runtime-web', ownerId: 'owner' }],
   ];
   let actualRequestSignal;
   for (const [suffix, input, signal] of cases) {
@@ -149,7 +151,7 @@ test('POST routes project known kwargs and preserve the Request signal instead o
     assert.equal(response.status, 200);
     assert.equal((await responseJson(response)).ok, true);
   }
-  assert.deepEqual(state.service.calls.map((call) => call.method), ['catalog', 'openWeb', 'attachWeb', 'openTui', 'readTerminal', 'writeTerminal', 'resizeTerminal', 'stop']);
+  assert.deepEqual(state.service.calls.map((call) => call.method), ['catalog', 'openWeb', 'attachWeb', 'openTui', 'readTerminal', 'writeTerminal', 'resizeTerminal', 'stop', 'upgrade']);
   for (const call of state.service.calls) assert.equal('unknownKwarg' in call.input, false);
   const open = state.service.calls[1].input;
   assert.equal(open.signal, actualRequestSignal);
@@ -393,7 +395,7 @@ test('dispose is idempotent, awaits asynchronous unregister, and removes every r
   const pending = dispose();
   assert.equal(dispose(), pending);
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(state.released.length, 18);
+  assert.equal(state.released.length, 19);
   assert.equal(firstFinished, false);
   assert.equal(secondFinished, false);
   first.resolve();
@@ -403,7 +405,7 @@ test('dispose is idempotent, awaits asynchronous unregister, and removes every r
   assert.equal(secondFinished, true);
   assert.equal(state.routes.size, 0);
   await dispose();
-  assert.equal(state.released.length, 18);
+  assert.equal(state.released.length, 19);
 });
 
 test('one rejected unregister does not block other cleanup or leak its error', async (t) => {
@@ -418,7 +420,7 @@ test('one rejected unregister does not block other cleanup or leak its error', a
     assert.equal(JSON.stringify(error).includes(SECRET), false);
     return true;
   });
-  assert.equal(state.released.length, 18);
+  assert.equal(state.released.length, 19);
   assert.equal(state.routes.size, 1);
   assert.equal(state.routes.has(`${PREFIX}/catalog`), true);
 });

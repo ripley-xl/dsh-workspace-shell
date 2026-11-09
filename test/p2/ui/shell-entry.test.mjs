@@ -2,8 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createShellPlugin } from "../../../packages/shell/src/entry.js";
 
-function mountEntry(dicts, { fail = false, embedded = false, fragmentEmbedded = false, trackLocale = true } = {}) {
+function mountEntry(dicts, { fail = false, embedded = false, fragmentEmbedded = false, trackLocale = true, notifications = false, guestBridge = false } = {}) {
   const effects = []; const calls = [];
+  const context = {};
   const ctx = {
     effect(setup, label) { const release = setup(); if (typeof release === "function" && (trackLocale || label !== "workspace locale dictionaries")) effects.push(release); return release; },
     locale: { register(ns, value) {
@@ -13,13 +14,43 @@ function mountEntry(dicts, { fail = false, embedded = false, fragmentEmbedded = 
     } },
     provide() {},
     slots: { inject(_slot, setup) { return setup(); }, register(options) { calls.push(options.id); } },
+    uiSession: { sessionStatus: { getSnapshot: () => new Map(), subscribe: () => () => {} } },
+    sessions: { list: { getSnapshot: () => ({ byId: {} }) } },
   };
-  const deps = { document: {}, window: { location: { search: embedded ? "?workspaceShellEmbedded=1" : "", hash: fragmentEmbedded ? "#workspaceShellEmbedded=1" : "" } },
-    createWorkspaceClient() { calls.push("workspace"); return { tabs: {}, dispose() { calls.push("workspace disposed"); } }; },
+  const window = {
+    location: { search: embedded ? "?workspaceShellEmbedded=1" : "", hash: fragmentEmbedded ? "#workspaceShellEmbedded=1" : "" },
+    ...(notifications ? { dshDesktop: { browser: {} }, Notification: class {} } : {}),
+  };
+  const deps = { document: {}, window,
+    createWorkspaceClient(input) {
+      calls.push("workspace");
+      context.onGuestNotification = input.onGuestNotification;
+      return { tabs: {}, dispose() { calls.push("workspace disposed"); } };
+    },
+    ...(guestBridge ? {
+      createGuestNotificationBridge(input) {
+        calls.push("guest bridge");
+        assert.equal(input.window, window);
+        return { dispose() { calls.push("guest bridge disposed"); } };
+      },
+    } : {}),
+    ...(notifications ? {
+      createNotificationCenter(input) {
+        calls.push("notifications");
+        assert.equal(input.window, window);
+        assert.equal(typeof input.openLocalSession, "function");
+        return { reportHost: (payload) => calls.push(["host", payload]), reportGuest: (key, data) => calls.push(["guest", key, data]), dispose() { calls.push("notifications disposed"); } };
+      },
+      createSessionNotificationMonitor(input) {
+        calls.push("monitor");
+        assert.equal(typeof input.report, "function");
+        return { dispose() { calls.push("monitor disposed"); } };
+      },
+    } : {}),
     createFrameViews() { return { makeView() {} }; },
     installFrameAdapter() { if (fail) throw new Error("adapter failed"); calls.push("adapter"); return { dispose() { calls.push("adapter disposed"); } }; },
   };
-  return { calls, apply() { createShellPlugin({}, deps).apply(ctx); }, async dispose() { for (const release of effects.splice(0).reverse()) await release(); } };
+  return { calls, context, window, apply() { createShellPlugin({}, deps).apply(ctx); }, async dispose() { for (const release of effects.splice(0).reverse()) await release(); } };
 }
 
 test("entry reload releases its locale before the next instance registers", async () => {
@@ -48,6 +79,37 @@ test("entry failure cleanup releases dictionaries and an acquired workspace", as
   assert.throws(() => entry.apply(), /adapter failed/);
   await entry.dispose(); assert.equal(dicts.size, 0);
   assert.ok(entry.calls.includes("workspace disposed"));
+});
+
+test("a Desktop entry wires one notification center and one Session monitor, then releases both", async () => {
+  const dicts = new Map();
+  const entry = mountEntry(dicts, { notifications: true });
+  entry.apply();
+  assert.ok(entry.calls.includes("notifications"));
+  assert.ok(entry.calls.includes("monitor"));
+  entry.context.onGuestNotification("local-web:alpha:1", { type: "workspace-shell-notification" });
+  assert.deepEqual(entry.calls.filter((item) => Array.isArray(item)), [["guest", "local-web:alpha:1", { type: "workspace-shell-notification" }]]);
+  await entry.dispose();
+  assert.ok(entry.calls.indexOf("monitor disposed") < entry.calls.indexOf("notifications disposed"), "the source stops before the surface");
+});
+
+test("a plain browser entry installs no notification surface", async () => {
+  const dicts = new Map();
+  const entry = mountEntry(dicts, { notifications: false });
+  entry.apply();
+  assert.equal(entry.calls.includes("notifications"), false);
+  assert.equal(entry.calls.includes("monitor"), false);
+  await entry.dispose();
+});
+
+test("an embedded entry installs the guest bridge and mounts no frame", async () => {
+  const dicts = new Map();
+  const entry = mountEntry(dicts, { embedded: true, guestBridge: true });
+  entry.apply();
+  assert.deepEqual(entry.calls, ["guest bridge"]);
+  assert.equal(dicts.size, 0);
+  await entry.dispose();
+  assert.deepEqual(entry.calls, ["guest bridge", "guest bridge disposed"]);
 });
 
 test("embedded entry stays inert and conflicting foreign dictionaries are untouched", async () => {

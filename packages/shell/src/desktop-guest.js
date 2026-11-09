@@ -6,6 +6,13 @@ const WORKSPACE_SHELL_CWD_VERSION = 1;
 const WORKSPACE_SHELL_CWD_TIMEOUT = 1000;
 const WORKSPACE_SHELL_CWD_PARENT_ORIGIN = 'workspaceShellParentOrigin';
 const WORKSPACE_SHELL_CWD_REQUEST_ID = /^[A-Za-z0-9_-]{16,128}$/;
+const WORKSPACE_SHELL_NOTIFICATION_EVENT = 'workspace-shell-notification';
+const WORKSPACE_SHELL_NOTIFICATION_VERSION = 1;
+// A Desktop Guest is a <webview> and has no parent frame, so it reports through
+// console output; the embedder pulls navigation commands in with executeJavaScript.
+const WORKSPACE_SHELL_NOTIFICATION_MARKER = '__workspace-shell-notification__';
+const WORKSPACE_SHELL_OPEN_SESSION_GLOBAL = '__workspaceShellOpenSession';
+const WORKSPACE_SHELL_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 // A serialized origin: scheme://host[:port] with no credentials, path, query or fragment.
 const WORKSPACE_SHELL_ORIGIN = /^[a-z][a-z0-9+.-]{1,31}:\/\/[^\s/?#@]{1,255}$/;
 
@@ -104,6 +111,7 @@ export function createDesktopGuest({
   onReady,
   onError,
   openExternal,
+  onGuestEvent,
   parentOrigin,
 }) {
   const timers = window ?? globalThis;
@@ -169,26 +177,48 @@ export function createDesktopGuest({
     }
   };
 
-  const onCwdMessage = (event) => {
-    const pending = pendingCwd;
-    if (!pending) return;
+  // One channel carries both replies and unsolicited guest events. A frame counts only
+  // while it comes from this guest's contentWindow, from the guest's own origin, and
+  // while the guest is still current.
+  const currentGuest = (event) => {
+    if (closed || invalidated || !ready || !webview?.isConnected) return false;
+    if (event.source !== webview.contentWindow) return false;
+    if (event.origin !== channelOrigin) return false;
+    return guestOriginNow() === channelOrigin;
+  };
+
+  const onChannelMessage = (event) => {
     try {
+      if (!currentGuest(event)) return;
       const data = event?.data;
       if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+      if (data.type === WORKSPACE_SHELL_NOTIFICATION_EVENT) {
+        if (data.version !== WORKSPACE_SHELL_NOTIFICATION_VERSION) return;
+        callSafely(onGuestEvent, data);
+        return;
+      }
+      const pending = pendingCwd;
+      if (!pending) return;
       if (data.type !== WORKSPACE_SHELL_CWD_RESPONSE) return;
       if (data.version !== WORKSPACE_SHELL_CWD_VERSION) return;
       if (data.requestId !== pending.requestId) return;
-      if (closed || invalidated || !ready || !webview?.isConnected) return;
-      if (event.source !== webview.contentWindow) return;
-      if (event.origin !== channelOrigin) return;
-      if (guestOriginNow() !== channelOrigin) return;
       settleCwd(validCwd(data.cwd));
     } catch {
       // Malformed events and revoked cross-origin access stay indistinguishable.
     }
   };
 
-  const removeCwdListener = () => {
+  const attachChannel = () => {
+    if (channelDetach) return;
+    try {
+      window?.addEventListener?.('message', onChannelMessage);
+      channelDetach = () => window?.removeEventListener?.('message', onChannelMessage);
+    } catch {
+      channelDetach = null;
+    }
+  };
+
+  const removeChannel = () => {
     abandonCwd();
     const detach = channelDetach;
     channelDetach = null;
@@ -201,7 +231,7 @@ export function createDesktopGuest({
   };
 
   const removeContained = () => {
-    removeCwdListener();
+    removeChannel();
     if (signal) {
       try {
         signal.removeEventListener?.('abort', onAbort);
@@ -317,9 +347,27 @@ export function createDesktopGuest({
     if (!closed && !invalidated) abandonCwd();
   };
 
+  // Webview DOM events pass one object; older signatures pass the message as a
+  // separate argument. Accept both without depending on the Electron version.
+  const onConsoleMessage = (event, _level, argument) => {
+    try {
+      const message = typeof event?.message === 'string' ? event.message : (typeof argument === 'string' ? argument : '');
+      if (!message.startsWith(WORKSPACE_SHELL_NOTIFICATION_MARKER)) return;
+      if (closed || invalidated || !ready || !webview?.isConnected) return;
+      let data;
+      try { data = JSON.parse(message.slice(WORKSPACE_SHELL_NOTIFICATION_MARKER.length)); } catch { return; }
+      if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+      if (data.type !== WORKSPACE_SHELL_NOTIFICATION_EVENT || data.version !== WORKSPACE_SHELL_NOTIFICATION_VERSION) return;
+      callSafely(onGuestEvent, data);
+    } catch {
+      // Malformed console output and a torn-down Guest both mean "no event".
+    }
+  };
+
   const attachListeners = (current, lease) => {
     listeners = [
       ['dom-ready', onDomReady],
+      ['console-message', onConsoleMessage],
       ['did-fail-load', (event) => {
         if (event?.isMainFrame !== true) return;
         if (event.errorCode === -3) {
@@ -331,6 +379,7 @@ export function createDesktopGuest({
       ['did-navigate-in-page', onNavigated],
     ];
     for (const [name, listener] of listeners) current.addEventListener(name, listener);
+    attachChannel();
     unsubscribeOpen = bridge.onOpenRequested(lease, onExternalRequest) ?? null;
     if (parentTarget) loadTarget = withParentOrigin(url, parentTarget) ?? url;
   };
@@ -436,14 +485,6 @@ export function createDesktopGuest({
       abandonCwd();
       return;
     }
-    if (!channelDetach) {
-      try {
-        window?.addEventListener?.('message', onCwdMessage);
-        channelDetach = () => window?.removeEventListener?.('message', onCwdMessage);
-      } catch {
-        channelDetach = null;
-      }
-    }
     try {
       target.postMessage({
         type: WORKSPACE_SHELL_CWD_REQUEST,
@@ -477,5 +518,22 @@ export function createDesktopGuest({
     return validCwd(value);
   };
 
-  return { start, setVisible, focus, resize, getWorkingDirectory, dispose };
+  // Ask the guest to show one Session. The identifier is checked here and the
+  // value is JSON-encoded into the call, so the Guest receives exactly one string.
+  // The request is one-way: a stale request after navigation does nothing.
+  const openSession = (sessionId) => {
+    const current = webview;
+    if (closed || invalidated || !ready || !current?.isConnected) return false;
+    if (typeof sessionId !== 'string' || !WORKSPACE_SHELL_SESSION_ID.test(sessionId)) return false;
+    let executing;
+    try {
+      executing = current.executeJavaScript(WORKSPACE_SHELL_OPEN_SESSION_GLOBAL + '(' + JSON.stringify(sessionId) + ')', false);
+    } catch {
+      return false;
+    }
+    if (executing && typeof executing.catch === 'function') executing.catch(() => {});
+    return true;
+  };
+
+  return { start, setVisible, focus, resize, getWorkingDirectory, openSession, dispose };
 }

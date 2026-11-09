@@ -76,7 +76,13 @@ function launcherCopy(english) {
     refresh: 'Refresh', open: 'Open workspace', web: 'Web', tui: 'TUI', browser: 'Browser', browserSoon: 'Not available yet',
     chooseKind: 'Workspace type', cwd: 'Working directory', cwdPlaceholder: 'Absolute project directory',
     command: 'Launch command', commandHint: 'Parsed into an executable and arguments; it never goes through a shell.',
-    hosts: 'Running Web Hosts', hostsEmpty: 'No Web Host is running.', hostsStale: 'This list may be out of date.',
+    hosts: 'Web Hosts', hostsEmpty: 'No Web Host is running.', hostsStale: 'This list may be out of date.', stopped: 'Not running',
+    current: 'Current', versionUnknown: 'Unknown', upgrade: 'Upgrade', syncUpgrade: 'Sync & upgrade',
+    upgradeStepBackup: 'Backing up', upgradeStepDsh: 'Upgrading DSH', upgradeStepStop: 'Stopping Host',
+    upgradeStepWrite: 'Writing config', upgradeStepInstall: 'Installing plugins', upgradeStepValidate: 'Validating config',
+    upgradeRunning: 'Upgrading…', upgradeDoneRestart: 'Upgraded. Restart the Host to apply.',
+    upgradeDoneReopen: 'Upgraded. Reopen the tab.', upgradeFailed: 'Upgrade failed', checkingUpdates: 'Checking for updates…',
+    upgradeBuildsPending: (count) => `${count} dependency build script${count === 1 ? '' : 's'} still need approval.`,
     views: 'views', newView: 'New view', waitStart: 'Waiting for the Host to start', stopping: 'Stopping',
     heldByOther: 'Owned by another window', stop: 'Stop Host', status: 'Status', source: 'Source',
     confirmStop: 'Stopping this Host interrupts its Agents, terminals, and background tasks. Web views sharing this Host close; other Hosts are unaffected. Stop it?',
@@ -101,7 +107,13 @@ function launcherCopy(english) {
     refresh: '刷新', open: '打开工作区', web: 'Web', tui: 'TUI', browser: 'Browser', browserSoon: '暂未开放',
     chooseKind: '工作区类型', cwd: '工作目录', cwdPlaceholder: '输入项目目录的绝对路径',
     command: '启动命令', commandHint: '命令会解析为可执行文件和参数，不经过 shell。',
-    hosts: '运行中的 Web Host', hostsEmpty: '当前没有运行中的 Web Host。', hostsStale: '可能不是最新。',
+    hosts: 'Web Host', hostsEmpty: '当前没有运行中的 Web Host。', hostsStale: '可能不是最新。', stopped: '未运行',
+    current: '当前', versionUnknown: '未知', upgrade: '升级', syncUpgrade: '同步并升级',
+    upgradeStepBackup: '正在备份', upgradeStepDsh: '正在升级 DSH', upgradeStepStop: '正在停止 Host',
+    upgradeStepWrite: '正在写入配置', upgradeStepInstall: '正在安装插件', upgradeStepValidate: '正在校验配置',
+    upgradeRunning: '正在升级…', upgradeDoneRestart: '升级完成，重启 Host 生效',
+    upgradeDoneReopen: '升级完成，请重新打开页签', upgradeFailed: '升级失败', checkingUpdates: '正在检查更新…',
+    upgradeBuildsPending: (count) => `另有 ${count} 个依赖的构建脚本待批准。`,
     views: '个视图', newView: '新建视图', waitStart: '等待 Host 启动', stopping: '正在停止',
     heldByOther: '由其它窗口持有', stop: '停止 Host', status: '状态', source: '来源',
     confirmStop: '停止所选 Host 实例会中断该实例内的 Agent、终端和后台任务；共用此 Host 的 Web 视图会关闭，其它 Host 不受影响。确认停止？',
@@ -163,6 +175,7 @@ export const launcherCss = [
   '.wsh-host-row{display:flex;align-items:center;justify-content:space-between;gap:10px;min-width:0;padding:8px 10px;border:1px solid var(--dsw-alias-border-l3);border-radius:8px;background:var(--dsw-alias-bg-layer-1)}',
   '.wsh-host-main{display:flex;flex-direction:column;gap:2px;min-width:0}',
   '.wsh-host-title{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+  '.wsh-host-title .wsh-launcher-badge{margin-left:6px}',
   '.wsh-host-meta{font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
   '.wsh-host-actions{display:flex;gap:6px;flex:none}',
   '.wsh-launcher-empty{display:flex;align-items:center;gap:10px;padding:16px;border:1px dashed var(--dsw-alias-border-l2);border-radius:10px;color:var(--dsw-alias-label-secondary);font-size:12px}',
@@ -191,8 +204,10 @@ export function createLauncher(React, deps = {}) {
   if (!React || typeof React.createElement !== 'function') throw new TypeError('createLauncher requires React');
   const h = React.createElement;
   const document = deps.document ?? globalThis.document;
+  const window = deps.window ?? globalThis.window;
   const initialLocale = deps.locale || document?.documentElement?.lang || 'zh';
   const copy = launcherCopy(!String(initialLocale).toLowerCase().startsWith('zh'));
+  const pollIntervalMs = Number.isInteger(deps.pollIntervalMs) && deps.pollIntervalMs > 0 ? deps.pollIntervalMs : 1500;
   const safeCode = (value) => {
     let code;
     try { code = typeof value === 'string' ? value : value?.code; } catch {}
@@ -367,30 +382,89 @@ export function createLauncher(React, deps = {}) {
       usable && kind === 'tui' ? h(TuiForm, { cwd, command, cwdText, commandText, busy, onCwd, onCommand, onOpen: () => onOpen('tui') }) : null);
   }
 
-  function HostList({ info, busy, onNewView, onStop, onRefresh }) {
+  function upgradeStepLabel(step) {
+    switch (step) {
+      case 'backup': return copy.upgradeStepBackup;
+      case 'dsh': return copy.upgradeStepDsh;
+      case 'stop': return copy.upgradeStepStop;
+      case 'write': return copy.upgradeStepWrite;
+      case 'install': return copy.upgradeStepInstall;
+      case 'validate': return copy.upgradeStepValidate;
+      default: return copy.upgradeRunning;
+    }
+  }
+
+  function upgradeStatus(upgrade, current) {
+    if (!upgrade) return null;
+    if (upgrade.phase === 'running') return upgradeStepLabel(upgrade.step);
+    if (upgrade.phase === 'done') {
+      const done = current ? copy.upgradeDoneRestart : copy.upgradeDoneReopen;
+      const pending = Array.isArray(upgrade.ignoredBuilds) ? upgrade.ignoredBuilds.length : 0;
+      return pending ? `${done} ${copy.upgradeBuildsPending(pending)}` : done;
+    }
+    if (upgrade.phase === 'failed') return `${copy.upgradeFailed} ${upgrade.error ?? ''}`.trim();
+    return null;
+  }
+
+  const VERSION_PREFIX = 'DSH ';
+
+  function HostList({ info, busy, onNewView, onStop, onUpgrade, onRefresh }) {
     const runtimes = (Array.isArray(info.runtimes) ? info.runtimes : []).filter((runtime) => runtime.kind === 'web'
-      && runtime.source !== 'ssh' && ACTIVE_PHASES.includes(runtime.phase));
+      && runtime.source !== 'ssh' && (ACTIVE_PHASES.includes(runtime.phase) || runtime.phase === 'stopped'));
+    const currentProfile = (Array.isArray(info.profiles) ? info.profiles : EMPTY_LIST).find((profile) => profile.isCurrent === true) ?? null;
+    const currentHost = currentProfile?.web && info.currentHost ? info.currentHost : null;
+    const rows = [
+      ...(currentHost ? [{ key: 'current', current: true, profileId: currentHost.profileId ?? info.currentProfile, phase: 'running', state: currentHost }] : []),
+      ...runtimes.map((runtime) => ({ key: runtime.id, current: false, profileId: runtime.profileId, phase: runtime.phase, runtime, state: runtime })),
+    ];
     const stale = info.phase === 'error';
     return h('section', { className: 'wsh-launcher-hosts', 'data-launcher-hosts': '', 'aria-label': copy.hosts },
       h('div', { className: 'wsh-launcher-section-title' },
         h('strong', null, copy.hosts),
         h('button', { type: 'button', className: 'wsh-button', 'data-launcher-action': 'refresh', disabled: busy, onClick: onRefresh }, copy.refresh)),
       stale ? h('p', { className: 'wsh-warning', role: 'status', 'data-launcher-stale': '' }, copy.hostsStale) : null,
-      runtimes.length
-        ? h('ul', { className: 'wsh-host-list' }, runtimes.map((runtime) => {
-          const owned = runtime.canStop === true;
-          const canOpen = runtime.phase === 'running' && owned;
-          const reason = runtime.phase === 'starting' ? copy.waitStart : runtime.phase === 'stopping' ? copy.stopping : !owned ? copy.heldByOther : copy.newView;
-          return h('li', { key: runtime.id, className: 'wsh-host-row', 'data-runtime-id': runtime.id, 'data-phase': runtime.phase },
+      rows.length
+        ? h('ul', { className: 'wsh-host-list' }, rows.map((row) => {
+          const state = row.state;
+          const upgrade = state.upgrade ?? null;
+          const status = upgradeStatus(upgrade, row.current);
+          const running = upgrade?.phase === 'running';
+          const canUpgrade = state.upgradeAvailable === true && !running;
+          const stopped = !row.current && row.phase === 'stopped';
+          const owned = row.runtime?.canStop === true;
+          const canOpen = !stopped && row.runtime?.phase === 'running' && owned;
+          const reason = row.runtime?.phase === 'starting' ? copy.waitStart : row.runtime?.phase === 'stopping' ? copy.stopping : !owned ? copy.heldByOther : copy.newView;
+          const version = typeof state.dshVersion === 'string' && state.dshVersion ? state.dshVersion : copy.versionUnknown;
+          const meta = [copy.web, `${copy.source} ${copy.local}`];
+          meta.push(row.current ? `${copy.status} ${copy.current}` : stopped ? copy.stopped : `${copy.status} ${row.phase}`);
+          meta.push(`${VERSION_PREFIX}${version}`);
+          if (!row.current) meta.push(`${row.runtime?.views ?? 0} ${copy.views}`);
+          return h('li', {
+            key: row.key, className: 'wsh-host-row', 'data-runtime-id': row.current ? 'current' : row.key,
+            'data-phase': row.current ? 'running' : row.phase,
+            ...(row.current ? { 'data-current-host': 'true' } : {}),
+            ...(upgrade ? { 'data-upgrade-phase': upgrade.phase } : {}),
+            ...(state.upgradeAvailable === true ? { 'data-upgrade-available': 'true' } : {}),
+          },
             h('div', { className: 'wsh-host-main' },
-              h('strong', { className: 'wsh-host-title' }, runtime.profileId),
-              h('span', { className: 'wsh-muted wsh-host-meta' },
-                [copy.web, `${copy.source} ${copy.local}`, `${copy.status} ${runtime.phase}`, `${runtime.views ?? 0} ${copy.views}`].join(' · '))),
+              h('strong', { className: 'wsh-host-title' }, row.profileId,
+                row.current ? h('span', { className: 'wsh-launcher-badge', 'data-host-current': '' }, copy.current) : null),
+              h('span', { className: 'wsh-muted wsh-host-meta' }, meta.join(' · ')),
+              state.checking && !status ? h('span', { className: 'wsh-muted wsh-host-meta', 'data-upgrade-checking': '' }, copy.checkingUpdates) : null,
+              status ? h('span', { className: running ? 'wsh-muted wsh-host-meta' : 'wsh-warning wsh-host-meta', role: 'status', 'data-upgrade-status': '' }, status) : null),
             h('div', { className: 'wsh-host-actions' },
-              h('button', { type: 'button', className: 'wsh-button', disabled: busy || !canOpen, title: reason,
-                'data-launcher-action': 'new-view', onClick: () => onNewView(runtime) }, copy.newView),
-              h('button', { type: 'button', className: 'wsh-button wsh-danger', disabled: busy || !owned, title: owned ? copy.stop : copy.heldByOther,
-                'data-launcher-action': 'stop-host', onClick: () => onStop(runtime) }, copy.stop)));
+              canUpgrade || running
+                ? h('button', {
+                  type: 'button', className: 'wsh-button', disabled: busy || running,
+                  'data-launcher-action': 'upgrade-host',
+                  'data-upgrade-target': row.current ? 'current' : row.key,
+                  onClick: () => onUpgrade({ runtime: row.current || stopped ? null : row.runtime, profileId: row.profileId }),
+                }, running ? upgradeStepLabel(upgrade.step) : row.profileId === 'web' ? copy.syncUpgrade : copy.upgrade)
+                : null,
+              row.current || stopped ? null : h('button', { type: 'button', className: 'wsh-button', disabled: busy || !canOpen, title: reason,
+                'data-launcher-action': 'new-view', onClick: () => onNewView(row.runtime) }, copy.newView),
+              row.current || stopped ? null : h('button', { type: 'button', className: 'wsh-button wsh-danger', disabled: busy || !owned, title: owned ? copy.stop : copy.heldByOther,
+                'data-launcher-action': 'stop-host', onClick: () => onStop(row.runtime) }, copy.stop)));
         }))
         : h('p', { className: 'wsh-muted', 'data-launcher-empty': 'hosts' }, copy.hostsEmpty));
   }
@@ -442,6 +516,35 @@ export function createLauncher(React, deps = {}) {
       onModalChange?.(modalOpen);
       return () => { if (reportedModal.current === onModalChange) reportedModal.current = null; };
     }, [modalOpen, onModalChange]);
+    // The Host returns cached version state only: while a probe or upgrade is
+    // running the launcher re-reads the catalog until it settles.
+    const polling = React.useMemo(() => {
+      const current = info.currentHost;
+      const runtimes = Array.isArray(info.runtimes) ? info.runtimes : EMPTY_LIST;
+      return Boolean(current?.checking || current?.upgrade?.phase === 'running'
+        || runtimes.some((runtime) => runtime.checking || runtime.upgrade?.phase === 'running'));
+    }, [info]);
+    React.useEffect(() => {
+      if (!polling || !workspace || typeof workspace.refresh !== 'function') return undefined;
+      if (typeof window?.setInterval !== 'function') return undefined;
+      const timer = window.setInterval(() => { Promise.resolve(workspace.refresh()).catch(() => {}); }, pollIntervalMs);
+      return () => { window.clearInterval(timer); };
+    }, [polling, workspace]);
+    // A managed Host row disappears as soon as the upgrade stops it, so its
+    // final state is surfaced as a toast instead of an invisible row update.
+    const finishedUpgrades = React.useRef(new Set());
+    React.useEffect(() => {
+      const runtimes = Array.isArray(info.runtimes) ? info.runtimes : EMPTY_LIST;
+      for (const runtime of runtimes) {
+        const phase = runtime.upgrade?.phase;
+        if (phase !== 'done' && phase !== 'failed') continue;
+        const key = `${runtime.id}:${phase}:${runtime.upgrade.error ?? ''}`;
+        if (finishedUpgrades.current.has(key)) continue;
+        finishedUpgrades.current.add(key);
+        if (phase === 'done') setNotice(copy.upgradeDoneReopen);
+        else setError(runtime.upgrade.error ?? 'UPGRADE_INSTALL_FAILED');
+      }
+    }, [info]);
     const connectionList = ssh && Array.isArray(connections) ? connections : EMPTY_LIST;
     const sources = React.useMemo(() => {
       const local = { key: 'local', group: 'local', kind: 'local', label: copy.local, detail: info.currentProfile || null };
@@ -508,6 +611,11 @@ export function createLauncher(React, deps = {}) {
     });
     const newView = (runtime) => run(async () => { await workspace.openLauncherWeb(tabId, { profileId: runtime.profileId, runtimeId: runtime.id }); });
     const refresh = () => run(() => workspace.refresh());
+    const upgradeHost = (target) => run(async () => {
+      if (typeof workspace.upgradeHost !== 'function') throw Object.assign(new Error('UPGRADE_RUNTIME_UNAVAILABLE'), { code: 'UPGRADE_RUNTIME_UNAVAILABLE' });
+      await workspace.upgradeHost(target?.runtime?.id ?? null, target?.profileId);
+      await workspace.refresh();
+    });
     const confirmStop = () => {
       const runtime = confirm?.runtime;
       if (!runtime) return;
@@ -547,7 +655,13 @@ export function createLauncher(React, deps = {}) {
           onRetry: () => { void refresh(); },
         })
         : null,
-      h(HostList, { info, busy, onNewView: (runtime) => { void newView(runtime); }, onStop: (runtime) => setConfirm({ type: 'stop', runtime }), onRefresh: refresh }));
+      h(HostList, {
+        info, busy,
+        onNewView: (runtime) => { void newView(runtime); },
+        onStop: (runtime) => setConfirm({ type: 'stop', runtime }),
+        onUpgrade: (target) => { void upgradeHost(target); },
+        onRefresh: refresh,
+      }));
     // The SSH component talks to the manager API through `api(path, input, signal)`.
     // The client exposes one origin-checked request surface for it; no URL, token,
     // or credential ever passes back through this prop.

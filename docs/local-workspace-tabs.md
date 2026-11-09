@@ -77,15 +77,15 @@ SSH profile 行只提供“新建页签”和“停止”。“新建页签”�
 - 旧 controller 的默认 `web` 重连省略它不支持的 profile 参数；非默认 profile 要求支持 profile 的新 controller。
 - 远程没有显式 profile 目录时仍保留运行时内置的 `web`；其它未声明的 profile 不会因此被允许。
 
-`autoConnect=true` 在 Desktop 启动后立即异步连接，不阻塞启动或认证；运行中开启也会立即连接。旧实例已停止时允许自动创建新实例。远端 Host 版本落后于本机时自动停止旧实例并升级到本机版本，不再要求人工确认；远端 Host 版本比本机新时拒绝连接并提示先更新本机 DSH，且不停止远端 Host。关闭 autoConnect 会断开当前通道，不停止远端 Host。
+`autoConnect=true` 在 Desktop 启动后立即异步连接，不阻塞启动或认证；运行中开启也会立即连接。旧实例已停止时允许自动创建新实例。本机 DSH 版本变化不改变远端运行包，只影响运行包选择偏好；插件自带运行包变化后，manager 以新运行包另起实例。其他运行包的实例视为其他 Desktop 的独立实例，不停止也不接入。关闭 autoConnect 会断开当前通道，不停止远端 Host。
 
-连接或打开 profile Host 后，manager 还会核对两类版本不齐：一是实例的 `createdBy` 运行包身份，与当前 DSH 版本/构建相同但由旧 controller 运行包启动的实例（如 `0.2.2-rc.1-controller-0.2.1-linux-x64-glibc`）会被自动停掉并以当前运行包重建，避免旧运行包继续提供 pnpm 等工具；二是由旧 DSH 版本钉死、被远端判为 `incompatible-version` 的官方远端插件，本机有对应新版本时先备份远端 profile，再 remove 后 install 到本机版本。插件安装只有返回 restart-required 才重启该 Host（HMR 应用不重启）；需要用户批准 build script 的插件标记为待批准且不重试，其它单项失败只记录，均不阻断连接。
+连接或打开 profile Host 后，manager 按 `createdBy` 运行包身份区分实例：与当前 DSH 版本/构建相同但由旧 controller 运行包启动的实例（如 `0.2.2-rc.1-controller-0.2.1-linux-x64-glibc`）是独立实例，manager 不接入也不停止它，会以当前运行包另起一个；由旧 DSH 版本钉死、被远端判为 `incompatible-version` 的官方远端插件，本机有对应新版本时先备份远端 profile，再 remove 后 install 到本机版本。插件安装只有返回 restart-required 才重启该 Host（HMR 应用不重启）；需要用户批准 build script 的插件标记为待批准且不重试，其它单项失败只记录，均不阻断连接。
 
 ## 远程运行时与传输
 
 运行时 ID 同时包含 DSH 版本、controller 版本和平台，例如 `0.2.2-rc.1-controller-0.2.1-linux-x64-glibc`。不同 controller 的运行时安装到不同目录，旧运行时不会被新 digest 覆盖。
 
-manager 安装包包含目标平台 artifact，打包安装后不再依赖源码目录中的 `controller/artifacts`。catalog 同时遇到旧版与带 controller 版本的 artifact 时选择后者。
+manager 安装包包含目标平台 artifact，打包安装后不再依赖源码目录中的 `controller/artifacts`。catalog 优先使用与偏好版本匹配的 artifact，其次使用带 controller 版本的最新 artifact；没有匹配偏好版本时仍可使用自带运行包。
 
 SFTP 使用无进度超时：持续上传大文件时重置计时，真正断流仍按超时失败。远程命令失败可携带经过脱敏和截断的 stderr 诊断，认证 URL、token 和私钥不进入日志。
 

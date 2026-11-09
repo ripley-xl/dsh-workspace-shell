@@ -189,7 +189,8 @@ export class FakeRemoteHost extends EventEmitter {
     if (this.state?.openDelay) await this.state.openDelay(this.profileId);
     const listed = await this.controller.list({ version: this.version, buildId: this.buildId, profileId: this.profileId });
     let instance = listed.instances.find((entry) => entry.health.healthy
-      && (entry.instance.profileId ?? 'web') === this.profileId)?.instance;
+      && (entry.instance.profileId ?? 'web') === this.profileId
+      && (!this.runtimeId || !entry.instance.createdBy || entry.instance.createdBy === this.runtimeId))?.instance;
     if (!instance && this.startMode === 'reuse-only') {
       const error = new Error('no healthy remote instance exists for this profile');
       error.code = 'REMOTE_INSTANCE_UNAVAILABLE';
@@ -247,6 +248,12 @@ export class FakeRemoteHost extends EventEmitter {
           state.pluginInstalls.push({ spec: body?.spec, requestId: body?.requestId, name });
           const custom = state.pluginInstallResults?.[name];
           if (custom) return { ok: custom.ok !== false, result: custom };
+          if (state.pluginBuildBlockedSpecs?.includes(body?.spec) === true) {
+            return { ok: false, result: { changed: false, application: 'failed', pendingBuilds: ['bun@1.4.4'], error: { code: 'operation-error' } } };
+          }
+          if (state.failPluginInstallSpecs?.includes(body?.spec) === true) {
+            throw Object.assign(new Error('simulated install failure'), { code: 'REMOTE_OPERATION_FAILED' });
+          }
           if (state.failPluginInstall === true || state.failPluginInstall === name) {
             throw Object.assign(new Error('simulated install failure'), { code: 'REMOTE_OPERATION_FAILED' });
           }
@@ -276,25 +283,33 @@ export class FakeRemoteHost extends EventEmitter {
 }
 
 export async function serviceFixture({
-  version = '1.0.0', controllerVersion = null, remotePlugins = [], shareLocalPlugins,
-  uploadLocalPluginSnapshot, localBundles, autoConnectOnStart = false,
+  version = '1.0.0', runtimeVersion = version ?? '1.0.0', controllerVersion = null, remotePlugins = [], shareLocalPlugins,
+  uploadLocalPluginSnapshot, localBundles, autoConnectOnStart = false, pluginLatest = {},
 } = {}) {
   const store = await createStore();
   const state = remoteState();
   state.remotePlugins = remotePlugins;
   let localVersion = version;
+  let bundledVersion = runtimeVersion;
+  let latestRuntimeVersion = runtimeVersion;
   let currentControllerVersion = controllerVersion;
-  const currentArtifact = (requestedVersion) => artifact(requestedVersion ?? localVersion, currentControllerVersion);
+  // The bundled runtime decides the remote version; the local version is only
+  // a catalog preference.
+  const currentArtifact = () => artifact(bundledVersion, currentControllerVersion);
   const credentialCalls = [];
   const descriptors = [
     { ns: 'ui-theme', value: { preference: 'dark', fontSize: 14 } },
     { ns: 'model', value: { enabled: true, apiKey: 'do-not-copy' }, schema: { properties: { apiKey: { credentialRef: 'TEST_KEY' } } }, secrets: [{ path: ['apiKey'], set: true }] },
   ];
-  const openControllerSession = async ({ alias, version: requestedVersion, channel: sharedChannel }) => {
+  const openControllerSession = async ({ alias, channel: sharedChannel, version }) => {
     // Mirrors the real helper: a supplied channel is reused, not replaced.
     const channel = sharedChannel ?? channelFor(state);
     channel.config.alias = alias;
-    const selected = currentArtifact(requestedVersion);
+    // An explicit preference that names the newest bundled runtime installs it;
+    // this is what an upgrade asks the real catalog for.
+    const selected = version === latestRuntimeVersion && version !== bundledVersion
+      ? artifact(version, currentControllerVersion)
+      : currentArtifact();
     return {
       channel,
       controller: controllerFor(state, channel, selected.runtimeId),
@@ -311,7 +326,15 @@ export async function serviceFixture({
   const service = new SshRemoteService({
     store,
     autoConnectOnStart,
-    catalog: { select: async ({ version: requestedVersion }) => currentArtifact(requestedVersion) },
+    catalog: {
+      select: async () => currentArtifact(),
+      newest: async ({ target } = {}) => {
+        const selected = artifact(latestRuntimeVersion, currentControllerVersion);
+        if (target && (!selected.target || Object.keys(target).some((key) => target[key] !== selected.target[key]))) return null;
+        return selected;
+      },
+    },
+    latestVersion: async (name) => pluginLatest[name] ?? null,
     localVersion: () => localVersion,
     localReturnUrl: 'http://127.0.0.1:54542/?tkn=local-secret',
     settings: { describe: () => descriptors },
@@ -335,6 +358,7 @@ export async function serviceFixture({
         controller,
         version: options.version,
         buildId: options.buildId,
+        runtimeId: options.runtimeId,
         workspace: options.workspace ?? '/home/test',
         profileId: options.profileId,
         state,
@@ -362,8 +386,12 @@ export async function serviceFixture({
     credentialCalls,
     descriptors,
     setVersion(value) { localVersion = value; },
+    setRuntimeVersion(value) { bundledVersion = value; latestRuntimeVersion = value; },
+    setLatestRuntimeVersion(value) { latestRuntimeVersion = value; },
+    latestRuntimeVersion() { return latestRuntimeVersion; },
     setControllerVersion(value) { currentControllerVersion = value; },
-    runtimeIdFor(value = localVersion, controller = currentControllerVersion) { return artifact(value, controller).runtimeId; },
+    runtimeVersion() { return bundledVersion; },
+    runtimeIdFor(value = bundledVersion, controller = currentControllerVersion) { return artifact(value, controller).runtimeId; },
     async close() { await service.close(); await store.close(); },
   };
 }

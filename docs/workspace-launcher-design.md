@@ -161,7 +161,7 @@ controller 与 supervisor 增加 profile 支持：
 - supervisor 使用 `dsh --profile <profileId>` 启动 Web，launcher 参数位于 app 参数之前。
 - 每个 SSH 来源和 profile 最多复用一个健康实例；新建视图 attach 到该实例。
 - 同一 SSH 连接下的 Host 共享控制通道与端口转发管理，视图使用独立 Guest lease。
-- 运行时安装和版本升级自动执行：远端 Host 落后时停止旧实例并换成本机版本，本机 DSH 落后于远端时报错且不动远端；实例的运行包身份（`createdBy` 与当前 runtimeId）不一致时同样视为陈旧并自动重建；同步仍使用现有确认流程，不因选中服务器而自动放行。
+- 运行时安装自动执行：运行包身份（`createdBy` 与当前 runtimeId）不一致的实例是独立实例，manager 不停止也不接入，只启动或复用自己运行包的实例；同步仍使用现有确认流程，不因选中服务器而自动放行。
 - 连接后自动对齐官方远端插件：远端 DSH 判为 `incompatible-version` 且本机有安全安装目标的插件，先备份远端 profile，再 remove 后 install 本机版本；installTarget 优先，其次 `name@version`，最后 `source`，本地路径、tarball、`file:` 与含凭据的 spec 一律跳过。
 - 运行时 ID 包含 DSH 版本、controller 版本和平台；不同 controller 使用独立目录，不覆盖旧运行时。
 - SFTP 按上传进度计算无进度超时，持续上传大文件不受固定总时长限制。
@@ -237,7 +237,7 @@ launcher 提供默认折叠的“最近打开耗时”，只显示安全数值�
 - 所有外部错误转换为稳定、安全代码或短摘要。
 - 任意异步回调都校验当前记录、运行身份和取消状态。
 - 停止失败保留页签和 Host 状态，不伪造成功。
-- SSH 删除、停止和同步沿用现有确认；版本升级与官方远端插件对齐自动执行，仅在远端版本更新时报 `LOCAL_DSH_OUTDATED` 并提示先更新本机 DSH。
+- SSH 删除、停止和同步沿用现有确认；本机运行包驱动的远端实例与官方远端插件对齐自动执行，其他 DSH 版本的实例保持独立，不停止也不接入。
 - 插件对齐时先创建远端备份再改动；`restart-required` 只重启一次对应 Host，`pendingBuilds` 标记为待用户批准且不重试、不回滚，单项或整体失败都不阻断连接。
 - 不读取或复制凭据来绕过 GUI 或远程认证。
 - 远程实例 profile 不匹配时拒绝 attach。

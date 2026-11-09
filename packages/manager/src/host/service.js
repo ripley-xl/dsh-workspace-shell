@@ -3,7 +3,6 @@ import { EventEmitter } from 'node:events';
 
 import { openRemoteHost, writeStatusPluginPatch } from './open-remote-host.js';
 import { openControllerSession } from './controller-session.js';
-import { compareDshVersions } from './dsh-version.js';
 import { buildPluginAlignmentPlan } from './plugin-alignment.js';
 import { RemoteHostConnection } from './remote-host.js';
 import { syncRemote } from './remote-sync.js';
@@ -11,7 +10,8 @@ import { buildSyncInput, buildSyncPreview, discoverCredentialRefs } from './sync
 import { publicError } from './diagnostics.js';
 import { addPortForward, createRemoteDiagnosticReport, listPortForwards, removePortForward } from './service-extensions.js';
 import { authenticationCallbacks, InteractionBroker, interactiveHostKeyVerifier } from './interactions.js';
-import { DEFAULT_PROFILE_ID, defaultProfiles, matchesProfile, normalizeInstanceList, normalizeProfileId, normalizeProfiles } from './profiles.js';
+import { DEFAULT_PROFILE_ID, defaultProfiles, instanceRuntimeMatches, matchesProfile, normalizeInstanceList, normalizeProfileId, normalizeProfiles } from './profiles.js';
+import { createLatestVersionCache, isNewerVersion } from './registry.js';
 import { SharedStart } from './shared-start.js';
 import { SshRemoteError, operationCancelled, operationTimeout } from './ssh/errors.js';
 
@@ -21,6 +21,14 @@ const DEFAULT_CONNECT_TIMEOUT_MS = 300_000;
 const DEFAULT_SYNC_TIMEOUT_MS = 180_000;
 const DEFAULT_STOP_TIMEOUT_MS = 150_000;
 const MAX_PROFILE_HOSTS = 16;
+const MAX_UPGRADE_PLUGINS = 64;
+const MAX_UPGRADE_ITEMS = 32;
+const UPGRADE_PHASES = new Set(['running', 'done', 'failed']);
+const UPGRADE_STEPS = new Set(['runtime', 'plugins']);
+const REGISTRY_PROTOCOL_SPEC = /^[A-Za-z][A-Za-z0-9+.-]*:/u;
+const LOCAL_SPEC_PATH = /(?:^|[\s("'=])\/(?:[^\s/]+[\\/])+[^\s]*|^[A-Za-z]:[\\/]|^~[\\/]/u;
+const TARBALL_SPEC = /\.(?:tgz|tar\.gz|tar|zip)(?:$|[?#])/iu;
+const UNSAFE_SPEC_URL = /[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s/]+@|[?&](?:access_?token|api_?key|auth|credential|password|secret|token)=/iu;
 
 function error(code, message, details) {
   return new SshRemoteError(code, message, { details });
@@ -44,23 +52,6 @@ function activeControllerChannel(host, runtime) {
 
 function isHealthy(entry) {
   return Boolean(entry?.health?.healthy && entry?.active !== false);
-}
-
-/** A remote Host newer than the local Desktop is never downgraded or stopped. */
-function localDshOutdated(version, remoteVersion, details = {}) {
-  return error('LOCAL_DSH_OUTDATED', 'The remote Host runs a newer DSH version than this Desktop. Update the local DSH before connecting.', {
-    localVersion: version,
-    remoteVersion: remoteVersion ?? null,
-    ...details,
-  });
-}
-
-/** A remote instance keeps working old data when it has no creator identity. */
-function runtimeIdentityMatches(instance, runtimeId) {
-  if (typeof runtimeId !== 'string' || runtimeId.length === 0) return true;
-  const createdBy = instance?.createdBy;
-  if (typeof createdBy !== 'string' || createdBy.length === 0) return true;
-  return createdBy === runtimeId;
 }
 
 /** Bounds the automatic plugin alignment result before it leaves the service. */
@@ -109,6 +100,49 @@ function sharingNeedsRestart(report) {
 
 function sharingSucceeded(report) {
   return report?.ok !== false && report?.official?.ok !== false && report?.localInventory?.ok !== false;
+}
+
+function safeErrorCode(cause, fallback = 'REMOTE_OPERATION_FAILED') {
+  const code = publicError(cause)?.code;
+  return typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/u.test(code) ? code : fallback;
+}
+
+function upgradeName(value) {
+  if (typeof value !== 'string') return null;
+  const name = value.trim();
+  return name && name.length <= 256 && !/[\0\r\n]/u.test(name) ? name : null;
+}
+
+/** The package name a plain registry spec installs, or `null` for source specs. */
+function registryPackageName(spec) {
+  if (typeof spec !== 'string' || spec.length === 0 || REGISTRY_PROTOCOL_SPEC.test(spec)) return null;
+  if (spec.startsWith('/') || LOCAL_SPEC_PATH.test(spec) || TARBALL_SPEC.test(spec) || UNSAFE_SPEC_URL.test(spec)) return null;
+  const at = spec.lastIndexOf('@');
+  if (at > 0) {
+    const version = spec.slice(at + 1);
+    if (!version || version.includes('/') || version.includes(':')) return null;
+  }
+  const name = at > 0 ? spec.slice(0, at) : spec;
+  return name.includes('/') && !name.startsWith('@') ? null : name || null;
+}
+
+/**
+ * The upgrade target for a remote bundle, or `null` when it must be skipped:
+ * official packages follow the runtime, and source/credential specs never go
+ * to the registry.
+ */
+function registryUpgradeName(bundle) {
+  if (!bundle || typeof bundle !== 'object') return null;
+  const name = upgradeName(bundle.name);
+  if (!name) return null;
+  if (bundle.official === true || name.startsWith('@deepseek-ai/')) return null;
+  const spec = typeof bundle.installTarget?.spec === 'string' ? bundle.installTarget.spec : bundle.spec;
+  if (typeof spec !== 'string' || registryPackageName(spec) !== name) {
+    // A bundle without an explicit spec may still be a plain registry install
+    // named after the package itself.
+    if (typeof spec === 'string' && spec.length > 0) return null;
+  }
+  return name;
 }
 
 function mergeAssessment(preview) {
@@ -281,6 +315,10 @@ export class SshRemoteService extends EventEmitter {
     this.connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
     this.syncTimeoutMs = options.syncTimeoutMs ?? DEFAULT_SYNC_TIMEOUT_MS;
     this.stopTimeoutMs = options.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS;
+    // Remote plugin upgrades resolve npm `latest` locally; tests may inject a
+    // plain resolver. Results are shared and cached for ten minutes.
+    this.versionCache = options.versionCache ?? createLatestVersionCache({ fetch: options.fetch, ttlMs: options.versionTtlMs });
+    this.latestVersion = options.latestVersion ?? ((name) => this.versionCache.latest(name));
     this.reconnectDelay = options.reconnectDelay ?? ((attempt) => Math.min(30_000, 1_000 * 2 ** (attempt - 1)));
     this.maxReconnectAttempts = options.maxReconnectAttempts ?? 10;
     this.runtimes = new Map();
@@ -341,6 +379,8 @@ export class SshRemoteService extends EventEmitter {
         preview: null,
         portManager: null,
         portForwards: [],
+        upgrade: null,
+        latestDshVersion: null,
       });
     }
     const runtime = this.runtimes.get(hostId);
@@ -391,8 +431,10 @@ export class SshRemoteService extends EventEmitter {
   }
 
   profileHosts(hostId) {
-    return [...this.profileRuntimes(hostId).values()]
-      .filter((runtime) => runtime.instanceId || (runtime.host && !runtime.host.closed))
+    const runtimes = [...this.profileRuntimes(hostId).values()]
+      .filter((runtime) => runtime.instanceId || (runtime.host && !runtime.host.closed));
+    for (const runtime of runtimes) void this.refreshPluginUpgrades(runtime).catch(() => {});
+    return runtimes
       .map((runtime) => this.publicProfileHost(runtime))
       .sort((left, right) => left.profileId.localeCompare(right.profileId));
   }
@@ -400,6 +442,7 @@ export class SshRemoteService extends EventEmitter {
   publicProfileHost(runtime) {
     const host = runtime.host && !runtime.host.closed ? runtime.host : null;
     const healthy = Boolean(host && runtime.phase === 'running');
+    const hostRuntime = this.runtimes.get(runtime.hostId);
     return {
       instanceId: host?.instanceId ?? runtime.instanceId ?? null,
       profileId: runtime.profileId,
@@ -412,8 +455,99 @@ export class SshRemoteService extends EventEmitter {
         hostAlive: healthy,
         supervisorAlive: healthy,
       },
+      dshVersion: host?.version ?? null,
+      latestDshVersion: hostRuntime?.latestDshVersion ?? null,
+      pluginsUpgradable: runtime.pluginsOutdated === true,
+      buildApprovals: Array.isArray(runtime.buildApprovals) ? runtime.buildApprovals : [],
+      upgrade: this.upgradeSnapshot(hostRuntime, runtime.profileId),
       error: runtime.error ?? null,
     };
+  }
+
+  /** Reads the newest bundled runtime for one host's target, if it is known. */
+  async refreshLatestDshVersion(runtime) {
+    const target = runtime.target ?? runtime.artifact?.target ?? this.sessions.get(runtime.hostId)?.target ?? null;
+    if (!target || typeof this.catalog?.newest !== 'function') {
+      runtime.latestDshVersion = null;
+      return null;
+    }
+    try {
+      const artifact = await this.catalog.newest({ target });
+      runtime.latestDshVersion = artifact?.dshVersion ?? null;
+    } catch {
+      runtime.latestDshVersion = null;
+    }
+    return runtime.latestDshVersion;
+  }
+
+  /**
+   * Public upgrade progress. `phase`, `step` and a safe error code only; the
+   * fixed step values are mapped to localized copy by the client.
+   */
+  upgradeSnapshot(runtime, profileId = null) {
+    const state = runtime?.upgrade;
+    if (!state || !UPGRADE_PHASES.has(state.phase)) return null;
+    if (profileId && state.profileId && state.profileId !== profileId) return null;
+    const step = UPGRADE_STEPS.has(state.step) ? state.step : null;
+    const errorCode = typeof state.error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/u.test(state.error.code)
+      ? state.error.code
+      : null;
+    const text = (value, max) => typeof value === 'string' ? value.slice(0, max) : null;
+    const items = (Array.isArray(state.items) ? state.items : []).slice(0, MAX_UPGRADE_ITEMS).map((item) => {
+      const name = text(item?.name, 256);
+      if (!name) return null;
+      const itemCode = typeof item?.error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/u.test(item.error.code)
+        ? item.error.code
+        : null;
+      return {
+        name,
+        fromVersion: text(item?.fromVersion, 128),
+        toVersion: text(item?.toVersion, 128),
+        ok: item?.ok === true,
+        ...typeof item?.application === 'string' ? { application: item.application.slice(0, 64) } : {},
+        ...itemCode ? { error: { code: itemCode } } : {},
+        ...Array.isArray(item?.pendingBuilds) && item.pendingBuilds.length > 0
+          ? { pendingBuilds: item.pendingBuilds.filter((value) => typeof value === 'string').slice(0, 8) }
+          : {},
+      };
+    }).filter(Boolean);
+    return {
+      phase: state.phase,
+      step,
+      ...errorCode ? { error: { code: errorCode } } : {},
+      ...items.length ? { items } : {},
+    };
+  }
+
+  /** `done` is visible for one poll, then cleared so the row shows the new version. */
+  prepareUpgradeReport(runtime) {
+    if (runtime?.upgrade?.phase === 'done' && runtime.upgrade.reported === true) runtime.upgrade = null;
+  }
+
+  finishUpgradeReport(runtime) {
+    if (runtime?.upgrade?.phase === 'done') runtime.upgrade.reported = true;
+  }
+
+  /** Keeps the legacy single-host view pointed at the upgraded default Host. */
+  syncDefaultProfileHost(runtime, profileId, host, session = this.sessions.get(runtime.hostId)) {
+    if (profileId !== DEFAULT_PROFILE_ID || !host) return;
+    const previous = runtime.host;
+    runtime.host = host;
+    if (session) {
+      runtime.channel = session.channel;
+      runtime.controller = session.controller;
+      runtime.installed = session.installed;
+      runtime.artifact = session.artifact;
+    }
+    if (previous !== host) this.observeHost(runtime, host);
+  }
+
+  currentProfileVersion(runtime, profileRuntime, profileId = DEFAULT_PROFILE_ID) {
+    const host = profileRuntime?.host && !profileRuntime.host.closed ? profileRuntime.host : null;
+    if (host?.version) return host.version;
+    if (profileId === DEFAULT_PROFILE_ID && runtime.host && !runtime.host.closed) return runtime.host.version ?? null;
+    const record = this.store.get(runtime.hostId);
+    return profileId === DEFAULT_PROFILE_ID ? record?.lastServerVersion ?? null : null;
   }
 
   profileRuntime(hostId, profileId, profileName) {
@@ -459,13 +593,20 @@ export class SshRemoteService extends EventEmitter {
   async webList(hostId) {
     const record = this.store.require(hostId);
     const session = this.session(hostId);
+    const runtime = this.runtime(hostId);
     if (session.connected) await this.refreshProfiles(session);
+    await this.refreshLatestDshVersion(runtime);
+    this.prepareUpgradeReport(runtime);
+    const hosts = this.profileHosts(hostId);
+    this.finishUpgradeReport(runtime);
     return {
       ok: true,
       profiles: session.profiles?.length ? session.profiles : defaultProfiles(),
       profilesSource: session.profiles?.length ? 'remote' : 'default',
       connected: session.connected,
-      hosts: this.profileHosts(hostId),
+      hosts,
+      latestDshVersion: runtime.latestDshVersion ?? null,
+      upgrade: this.upgradeSnapshot(runtime),
       hostAlias: record.hostAlias,
     };
   }
@@ -596,10 +737,9 @@ export class SshRemoteService extends EventEmitter {
       runtime.session = session;
       signal.throwIfAborted();
       if (this.closed) throw operationCancelled(signal);
-      const version = await this.localVersion();
-      if (!version) throw error('REMOTE_VERSION_MISMATCH', 'The local DSH version is unavailable.');
+      const preferredVersion = await this.localVersion();
       const artifact = session.artifact ?? await this.catalog.select({
-        version,
+        version: preferredVersion,
         target: session.target,
         signal,
       });
@@ -608,37 +748,13 @@ export class SshRemoteService extends EventEmitter {
       existing = listed.find((instance) => instance.profileId === profileId
         && instance.health.healthy
         && instance.state !== 'stopped'
-        && runtimeIdentityMatches(instance, artifact.runtimeId));
+        && instanceRuntimeMatches(instance, artifact.runtimeId));
       if (!existing && reuseOnly) {
         // Reuse-only never replaces a Host: an older instance is not adoptable.
         throw error('REMOTE_INSTANCE_UNAVAILABLE', 'The recorded remote Host is no longer available for this profile.', {
           profileId,
           instanceId: runtime.instanceId ?? null,
         });
-      }
-      if (!existing) {
-        const all = normalizeInstanceList(await session.controller.list({ profileId }));
-        const stale = all.filter((instance) => instance.profileId === profileId
-          && instance.health.healthy
-          && instance.state !== 'stopped'
-          && (instance.dshVersion !== artifact.dshVersion
-            || instance.buildId !== artifact.buildId
-            || !runtimeIdentityMatches(instance, artifact.runtimeId)));
-        // Refuse every newer remote before stopping anything.
-        for (const instance of stale) {
-          this.assertLocalDshCurrent(artifact.dshVersion, instance.dshVersion, {
-            hostId,
-            profileId,
-            instanceId: instance.instanceId,
-          });
-        }
-        // The matching runtime is installed; retire the older Hosts of this
-        // profile before starting a replacement, leaving other profiles online.
-        for (const instance of stale) await session.controller.stop({ instanceId: instance.instanceId });
-        if (stale.length) {
-          runtime.instanceId = null;
-          this.publish(hostId);
-        }
       }
       // This path also starts Hosts; it needs the same status-plugin overlay as
       // the default connect path. Without it the new Host has no
@@ -657,6 +773,7 @@ export class SshRemoteService extends EventEmitter {
         controller: session.controller,
         version: artifact.dshVersion,
         buildId: artifact.buildId,
+        runtimeId: artifact.runtimeId,
         workspace: session.installed?.home,
         patch,
         startMode: existing ? 'reuse-only' : 'auto',
@@ -765,15 +882,374 @@ export class SshRemoteService extends EventEmitter {
     return promise;
   }
 
+  /**
+   * Starts upgrading one remote Web Host: when a newer bundled runtime exists
+   * for its target it is installed on the shared channel and the Host is
+   * replaced, then non-official registry plugins are raised to npm `latest`.
+   * Returns immediately; progress is polled through status/web-list.
+   */
+  async upgradeHost({ hostId, profileId } = {}) {
+    const record = this.store.require(hostId);
+    if (this.closed) throw error('SERVICE_DISPOSED', 'The SSH Remote service is disposed.');
+    const id = normalizeProfileId(profileId ?? DEFAULT_PROFILE_ID);
+    const runtime = this.runtime(hostId);
+    if (runtime.upgrade?.phase === 'running' || runtime.operation) {
+      throw error('UPGRADE_BUSY', 'Another upgrade or connection operation is running for this SSH host.');
+    }
+    const profiles = this.sessions.get(hostId)?.profiles;
+    const known = profiles?.find((profile) => profile.id === id);
+    if (profiles?.length && (!known || known.web !== true)) {
+      throw error('UPGRADE_UNSUPPORTED_PROFILE', 'The selected profile is not a Web profile.', { profileId: id });
+    }
+    const profileRuntime = this.profileRuntime(hostId, id, known?.name);
+    const target = this.runtimeTarget(runtime);
+    const current = this.currentProfileVersion(runtime, profileRuntime, id);
+    let newest = null;
+    if (target && typeof this.catalog?.newest === 'function') {
+      try {
+        newest = await this.catalog.newest({ target });
+      } catch {
+        newest = null;
+      }
+    }
+    if (newest) runtime.latestDshVersion = newest.dshVersion;
+    if (target && !newest) {
+      throw error('UPGRADE_RUNTIME_UNAVAILABLE', 'No bundled runtime package matches this remote target.');
+    }
+    if (newest && current && !isNewerVersion(newest.dshVersion, current)) {
+      // The runtime is current, but a connected Host may still have plugins
+      // behind npm latest; those are upgraded without replacing the runtime.
+      const connected = profileRuntime.host && !profileRuntime.host.closed ? profileRuntime.host : null;
+      const plan = connected?.client ? await this.pluginUpgradePlan(connected).catch(() => null) : null;
+      if (!plan || plan.length === 0) {
+        return {
+          started: false,
+          reason: 'up-to-date',
+          hostId: record.id,
+          profileId: id,
+          dshVersion: current,
+          latestDshVersion: newest.dshVersion,
+        };
+      }
+    }
+    const upgrade = { phase: 'running', step: 'runtime', profileId: id, error: null, items: [], reported: false };
+    runtime.buildApprovals = runtime.buildApprovals ?? [];
+    runtime.upgrade = upgrade;
+    this.publish(hostId);
+    void this.performHostUpgrade(runtime, upgrade, { profileId: id }).catch(() => {});
+    return { started: true, upgrade: this.upgradeSnapshot(runtime, id) };
+  }
+
+  /**
+   * Approves the recorded pending build scripts and retries the plugin
+   * upgrade. Approvals are applied per plugin, because the remote installer
+   * rejects approvals that are no longer pending for that plugin.
+   */
+  async approveUpgrades({ hostId, profileId } = {}) {
+    const record = this.store.require(hostId);
+    if (this.closed) throw error('SERVICE_DISPOSED', 'The SSH Remote service is disposed.');
+    const id = normalizeProfileId(profileId ?? DEFAULT_PROFILE_ID);
+    const runtime = this.runtime(hostId);
+    if (runtime.upgrade?.phase === 'running' || runtime.operation) {
+      throw error('UPGRADE_BUSY', 'Another upgrade or connection operation is running for this SSH host.');
+    }
+    const profileRuntime = this.profileRuntime(hostId, id);
+    const approvals = Array.isArray(profileRuntime.buildApprovals) ? profileRuntime.buildApprovals : [];
+    if (approvals.length === 0) {
+      throw error('UPGRADE_APPROVAL_UNAVAILABLE', 'No remote plugin is waiting for build-script approval.', { profileId: id });
+    }
+    const upgrade = {
+      phase: 'running',
+      step: 'plugins',
+      profileId: id,
+      error: null,
+      items: [],
+      reported: false,
+      approvedBuildsByPlugin: new Map(approvals.map((entry) => [entry.name, [...entry.builds]])),
+    };
+    runtime.upgrade = upgrade;
+    this.publish(hostId);
+    void this.performHostUpgrade(runtime, upgrade, { profileId: id }).catch(() => {});
+    return { started: true, approved: approvals.length, hostId: record.id, profileId: id, upgrade: this.upgradeSnapshot(runtime, id) };
+  }
+
+  runtimeTarget(runtime) {
+    return runtime.target ?? runtime.artifact?.target ?? this.sessions.get(runtime.hostId)?.target ?? null;
+  }
+
+  setUpgradeStep(runtime, upgrade, step) {
+    if (runtime.upgrade !== upgrade || upgrade.phase !== 'running') return;
+    upgrade.step = step;
+    this.publish(runtime.hostId);
+  }
+
+  async performHostUpgrade(runtime, upgrade, { profileId }) {
+    const hostId = runtime.hostId;
+    try {
+      const session = await this.ensureProfileTransport(hostId, { background: true });
+      if (upgrade !== runtime.upgrade) return;
+      const target = this.runtimeTarget(runtime) ?? session.target;
+      if (!target) throw error('UPGRADE_RUNTIME_UNAVAILABLE', 'The remote runtime target is unavailable.');
+      const newest = typeof this.catalog?.newest === 'function' ? await this.catalog.newest({ target }) : null;
+      if (!newest) throw error('UPGRADE_RUNTIME_UNAVAILABLE', 'No bundled runtime package matches this remote target.');
+      runtime.latestDshVersion = newest.dshVersion;
+      const profileRuntime = this.profileRuntime(hostId, profileId);
+      const current = this.currentProfileVersion(runtime, profileRuntime, profileId);
+      let host = profileRuntime.host && !profileRuntime.host.closed ? profileRuntime.host : null;
+      if (!current || isNewerVersion(newest.dshVersion, current)) {
+        this.setUpgradeStep(runtime, upgrade, 'runtime');
+        const record = this.store.require(hostId);
+        // Reopening the controller on the shared channel installs the newer
+        // runtime package before this manager detaches its held Host. Other
+        // profile Hosts on the same SSH connection keep running.
+        const opened = await this.openControllerSession({
+          channel: session.channel,
+          alias: record.hostAlias,
+          catalog: this.catalog,
+          version: newest.dshVersion,
+          interactive: false,
+          background: true,
+          authCallbacks: authenticationCallbacks(this.interactions, hostId),
+          hostKeyVerifier: interactiveHostKeyVerifier(this.interactions, hostId),
+        });
+        if (opened.artifact.dshVersion !== newest.dshVersion) {
+          throw error('UPGRADE_RUNTIME_UNAVAILABLE', 'The newest remote runtime package could not be installed.');
+        }
+        session.attachTransport(opened);
+        if (upgrade !== runtime.upgrade) return;
+        await this.startProfileHost(profileRuntime, new AbortController().signal);
+        host = profileRuntime.host;
+        if (!host || host.closed) throw error('UPGRADE_RUNTIME_UNAVAILABLE', 'The upgraded remote Host is unavailable.');
+        if (profileId === DEFAULT_PROFILE_ID) {
+          this.syncDefaultProfileHost(runtime, profileId, host, session);
+          await this.store.markConnected(hostId, {
+            instanceId: host.instanceId,
+            version: host.version,
+            buildId: host.buildId,
+          });
+          if (runtime.phase !== 'connected' && runtime.phase !== 'failed') this.transition(runtime, 'connected');
+        }
+      }
+      this.setUpgradeStep(runtime, upgrade, 'plugins');
+      const report = await this.upgradeRemotePlugins(runtime, { profileId, host, approvedBuildsByPlugin: upgrade.approvedBuildsByPlugin });
+      // The row is projected from the per-profile runtime, not the connection.
+      profileRuntime.pluginsOutdated = false;
+      profileRuntime.pluginCheck = null;
+      profileRuntime.buildApprovals = report.items
+        .filter((entry) => Array.isArray(entry.pendingBuilds) && entry.pendingBuilds.length > 0)
+        .map((entry) => ({ name: entry.name, builds: entry.pendingBuilds.slice(0, 8) }))
+        .slice(0, 16);
+      const failed = report.items.find((item) => item.ok !== true);
+      const errorCode = failed?.error?.code ?? report.error?.code ?? null;
+      runtime.upgrade = {
+        phase: errorCode ? 'failed' : 'done',
+        step: 'plugins',
+        profileId,
+        error: errorCode ? { code: errorCode } : null,
+        items: report.items,
+        reported: false,
+      };
+      this.publish(hostId);
+    } catch (cause) {
+      if (this.closed || upgrade !== runtime.upgrade) return;
+      runtime.upgrade = {
+        phase: 'failed',
+        step: UPGRADE_STEPS.has(upgrade.step) ? upgrade.step : 'runtime',
+        profileId,
+        error: { code: safeErrorCode(cause, 'UPGRADE_RUNTIME_UNAVAILABLE') },
+        items: Array.isArray(upgrade.items) ? upgrade.items : [],
+        reported: false,
+      };
+      // The previous Host was detached before the replacement failed; do not
+      // keep reporting a closed connection as connected.
+      if (profileId === DEFAULT_PROFILE_ID && runtime.host?.closed) {
+        runtime.host = null;
+        runtime.channel = null;
+        runtime.controller = null;
+        runtime.phase = 'failed';
+      }
+      this.publish(hostId);
+    }
+  }
+
+  /**
+   * Raises every installed non-official registry plugin to npm `latest`
+   * without rolling back per-plugin failures. A single `restart-required`
+   * result restarts the upgraded Host once, at the end.
+   */
+  /**
+   * Non-official registry plugins whose npm `latest` is newer than the
+   * installed one. `null` means the Host could not be read.
+   */
+  async pluginUpgradePlan(host) {
+    if (!host?.client) return null;
+    const listed = await host.client.post('/api/ssh-remote/plugins/list', {});
+    const bundles = Array.isArray(listed?.bundles) ? listed.bundles : [];
+    const plan = [];
+    for (const bundle of bundles.slice(0, MAX_UPGRADE_PLUGINS)) {
+      const name = registryUpgradeName(bundle);
+      if (!name) continue;
+      const fromVersion = typeof bundle.version === 'string' ? bundle.version : null;
+      let latest = null;
+      try {
+        latest = await this.latestVersion(name);
+      } catch {
+        latest = null;
+      }
+      if (typeof latest !== 'string' || latest.length === 0) continue;
+      if (fromVersion && !isNewerVersion(latest, fromVersion)) continue;
+      plan.push({ name, fromVersion, toVersion: latest });
+    }
+    return plan;
+  }
+
+  /** Cached, non-blocking "are remote plugins behind npm" probe for the row. */
+  async refreshPluginUpgrades(runtime) {
+    const host = runtime.host && !runtime.host.closed ? runtime.host : null;
+    if (!host?.client || runtime.upgrade?.phase === 'running') return;
+    const nowMs = Date.now();
+    const previous = runtime.pluginCheck;
+    if (previous && (previous.pending || nowMs - previous.at < 60_000)) return;
+    runtime.pluginCheck = { at: nowMs, pending: true };
+    try {
+      const plan = await this.pluginUpgradePlan(host);
+      runtime.pluginsOutdated = Boolean(plan && plan.length);
+    } catch {
+      runtime.pluginsOutdated = false;
+    } finally {
+      runtime.pluginCheck = { at: Date.now(), pending: false };
+    }
+  }
+
+  async upgradeRemotePlugins(runtime, { profileId, approvedBuildsByPlugin = null, signal = new AbortController().signal } = {}) {
+    const profileRuntime = this.profileRuntime(runtime.hostId, profileId);
+    const initial = profileRuntime.host && !profileRuntime.host.closed ? profileRuntime.host : null;
+    if (!initial?.client) throw error('UPGRADE_RUNTIME_UNAVAILABLE', 'The remote Host is not connected.');
+    const listed = await initial.client.post('/api/ssh-remote/plugins/list', {});
+    const bundles = Array.isArray(listed?.bundles) ? listed.bundles : [];
+    const items = [];
+    let restartRequired = false;
+    for (const bundle of bundles.slice(0, MAX_UPGRADE_PLUGINS)) {
+      signal.throwIfAborted();
+      const name = registryUpgradeName(bundle);
+      if (!name) continue;
+      const fromVersion = typeof bundle.version === 'string' ? bundle.version : null;
+      let latest = null;
+      try {
+        latest = await this.latestVersion(name);
+      } catch {
+        latest = null;
+      }
+      if (typeof latest !== 'string' || latest.length === 0) {
+        items.push({ name, fromVersion, toVersion: null, ok: false, error: { code: 'UPGRADE_REGISTRY_UNAVAILABLE' } });
+        continue;
+      }
+      if (fromVersion && !isNewerVersion(latest, fromVersion)) continue;
+      const item = { name, fromVersion, toVersion: latest, ok: false };
+      try {
+        const client = profileRuntime.host?.client;
+        if (!client) throw error('UPGRADE_RUNTIME_UNAVAILABLE', 'The remote Host is no longer connected.');
+        const approved = approvedBuildsByPlugin instanceof Map ? approvedBuildsByPlugin.get(name) : null;
+        const installAt = (version) => client.post('/api/ssh-remote/plugins/install', {
+          spec: `${name}@${version}`,
+          requestId: randomUUID(),
+          ...Array.isArray(approved) && approved.length > 0 ? { approvedBuilds: approved.slice(0, 16) } : {},
+        });
+        let response;
+        if (fromVersion) {
+          // DSH refuses to install a different version over an existing bundle,
+          // so the plugin is replaced; a failed install puts the old version
+          // back instead of leaving the profile without it.
+          const removed = await client.post('/api/ssh-remote/plugins/remove', { name });
+          if (removed?.ok === false) throw error('UPGRADE_PLUGIN_FAILED', 'The remote plugin could not be replaced.');
+          let failure = null;
+          try {
+            response = await installAt(latest);
+            const installed = response?.result ?? {};
+            if (response?.ok === false || installed.application === 'failed' || installed.application === 'cancelled') failure = response;
+          } catch (cause) {
+            failure = cause;
+          }
+          if (failure) {
+            await installAt(fromVersion).catch(() => {});
+            if (failure instanceof Error) throw failure;
+          }
+        } else {
+          response = await installAt(latest);
+        }
+        const result = response?.result ?? {};
+        if (response?.ok === false || result.application === 'failed' || result.application === 'cancelled') {
+          const blocked = (Array.isArray(result.pendingBuilds) ? result.pendingBuilds : [])
+            .filter((value) => typeof value === 'string' && value.length > 0).slice(0, 16);
+          if (blocked.length > 0) {
+            // Build-script approval is the only actionable failure: keep the
+            // names so the row can offer an explicit approve-and-retry.
+            items.push({ ...item, error: { code: 'PLUGIN_BUILD_APPROVAL_REQUIRED' }, pendingBuilds: blocked });
+            continue;
+          }
+          throw error('UPGRADE_PLUGIN_FAILED', 'The remote plugin could not be upgraded.', { remote: result.error?.code ?? null });
+        }
+        const pendingBuilds = (Array.isArray(result.pendingBuilds) ? result.pendingBuilds : [])
+          .filter((value) => typeof value === 'string' && value.length > 0).slice(0, 16);
+        if (pendingBuilds.length > 0) {
+          items.push({ ...item, error: { code: 'PLUGIN_BUILD_APPROVAL_REQUIRED' }, pendingBuilds });
+          continue;
+        }
+        if (result.application === 'restart-required') restartRequired = true;
+        items.push({
+          ...item,
+          ok: true,
+          application: typeof result.application === 'string' ? result.application.slice(0, 64) : 'applied',
+        });
+      } catch {
+        items.push({ ...item, error: { code: 'UPGRADE_PLUGIN_FAILED' } });
+      }
+    }
+    let restarted = false;
+    let restartError = null;
+    if (restartRequired && items.some((item) => item.ok)) {
+      try {
+        await this.restartHostForUpgrade(runtime, profileId);
+        restarted = true;
+      } catch (cause) {
+        restartError = { code: safeErrorCode(cause, 'UPGRADE_RUNTIME_UNAVAILABLE') };
+      }
+    }
+    return {
+      ok: items.every((item) => item.ok) && !restartError,
+      items,
+      restartRequired,
+      restarted,
+      ...restartError ? { error: restartError } : {},
+    };
+  }
+
+  async restartHostForUpgrade(runtime, profileId) {
+    const profileRuntime = this.profileRuntime(runtime.hostId, profileId);
+    const original = profileRuntime.host && !profileRuntime.host.closed ? profileRuntime.host : null;
+    if (!original) throw error('UPGRADE_RUNTIME_UNAVAILABLE', 'The upgraded remote Host is unavailable.');
+    profileRuntime.session = profileRuntime.session ?? this.sessions.get(runtime.hostId) ?? null;
+    const replacement = await this.restartHost(profileRuntime, original, { profile: true });
+    if (profileId === DEFAULT_PROFILE_ID) {
+      this.syncDefaultProfileHost(runtime, profileId, replacement, profileRuntime.session);
+      await this.store.markConnected(runtime.hostId, {
+        instanceId: replacement.instanceId,
+        version: replacement.version,
+        buildId: replacement.buildId,
+      });
+      if (runtime.phase !== 'connected' && runtime.phase !== 'failed') this.transition(runtime, 'connected');
+    }
+    return replacement;
+  }
+
   async ensureTransport(session, options = {}) {
     if (session.connected) return session;
     if (session.operation) return session.operation;
     const record = this.store.require(session.hostId);
-    const version = await this.localVersion();
-    if (!version) throw error('REMOTE_VERSION_MISMATCH', 'The local DSH version is unavailable.');
+    const preferredVersion = await this.localVersion();
     const interactive = options.interactive !== false && options.background !== true;
     const promise = bounded((signal) => this.openSessionTransport(session, record, {
-      version,
+      version: preferredVersion,
       interactive,
       background: options.background === true,
       signal,
@@ -826,8 +1302,11 @@ export class SshRemoteService extends EventEmitter {
       identityFiles: [...config?.identityFiles ?? []],
       phase: runtime.phase,
       instanceId: runtime.host?.instanceId ?? null,
-      remoteVersion: runtime.host?.version ?? null,
+      remoteVersion: runtime.host?.version ?? record.lastServerVersion ?? null,
+      dshVersion: runtime.host?.version ?? record.lastServerVersion ?? null,
       remoteBuildId: runtime.host?.buildId ?? null,
+      latestDshVersion: runtime.latestDshVersion ?? null,
+      upgrade: this.upgradeSnapshot(runtime),
       pluginAlignment: publicPluginAlignment(runtime.pluginAlignment),
       connected: Boolean(session?.connected),
       error: runtime.error ?? null,
@@ -851,7 +1330,11 @@ export class SshRemoteService extends EventEmitter {
   }
 
   async status() {
-    const connections = this.store.list().map((record) => this.publicConnection(record.id));
+    const runtimes = this.store.list().map((record) => this.runtime(record.id));
+    await Promise.all(runtimes.map((runtime) => this.refreshLatestDshVersion(runtime)));
+    for (const runtime of runtimes) this.prepareUpgradeReport(runtime);
+    const connections = runtimes.map((runtime) => this.publicConnection(runtime.hostId));
+    for (const runtime of runtimes) this.finishUpgradeReport(runtime);
     const phase = PHASE_PRIORITY.find((candidate) => connections.some((connection) => connection.phase === candidate)) ?? 'idle';
     return {
       ok: true,
@@ -976,56 +1459,49 @@ export class SshRemoteService extends EventEmitter {
     const { signal, background } = options;
     const profileId = normalizeProfileId(options.profileId);
     const record = this.store.require(runtime.hostId);
-    const version = await this.localVersion();
-    if (!version) throw error('REMOTE_VERSION_MISMATCH', 'The local DSH version is unavailable.');
+    // The local Desktop DSH version only orders catalog preferences. The
+    // remote runtime version comes from the runtime package bundled with this
+    // plugin, so a local version change does not force a remote upgrade.
+    const preferredVersion = await this.localVersion();
 
-    // A Host this manager already holds is reused only on an exact match,
-    // including the runtime package identity. A newer remote is never stopped;
-    // an older or differently packaged one is replaced once the matching
-    // runtime is installed below.
+    // A Host this manager already holds is reused only when it runs the runtime
+    // package this manager installed. A Host of another runtime is a separate
+    // instance owned by another Desktop and is never stopped here.
     const active = runtime.host && !runtime.host.closed && runtime.phase === 'connected' ? runtime.host : null;
-    const expectedArtifact = active ? await this.selectExpectedArtifact(runtime, version) : null;
+    const sessionConnected = this.sessions.get(runtime.hostId)?.connected === true;
+    // Only a held Host or an open transport can change which runtime this
+    // manager should use; the first connection lets the session select it.
+    const expectedArtifact = active || sessionConnected ? await this.selectExpectedArtifact(runtime, preferredVersion) : null;
+    const activeArtifact = expectedArtifact ?? runtime.artifact ?? this.sessions.get(runtime.hostId)?.artifact ?? null;
     if (active) {
-      const expectedRuntimeId = expectedArtifact?.runtimeId ?? null;
-      const artifact = runtime.artifact;
-      // An empty runtime.artifact (for example right after a plugin reload) is
-      // never reused: the full path selects and installs a current runtime.
-      const reusable = Boolean(artifact)
-        && active.version === version
-        && active.buildId === artifact.buildId
-        && (!expectedRuntimeId || expectedRuntimeId === artifact.runtimeId)
+      const reusable = Boolean(activeArtifact)
+        && active.version === activeArtifact.dshVersion
+        && active.buildId === activeArtifact.buildId
+        && (!active.runtimeId || active.runtimeId === activeArtifact.runtimeId)
         && this.sessions.get(runtime.hostId)?.connected;
       if (reusable) {
         this.transition(runtime, 'switching');
         this.transition(runtime, 'connected');
         return browserResult(this, runtime);
       }
-      this.assertLocalDshCurrent(version, active.version, {
-        hostId: runtime.hostId,
-        instanceId: active.instanceId,
-        profileId,
-      });
     }
 
-    const targetVersionChanged = Boolean(record.lastServerVersion && record.lastServerVersion !== version);
-    this.transition(runtime, targetVersionChanged ? 'upgrading' : 'installing');
+    this.transition(runtime, 'installing');
     let session;
     let opened;
     let selectedArtifact;
-    let retired = false;
+    let detached = false;
     try {
       const shared = this.session(runtime.hostId);
-      // Reopening the controller on the existing channel installs the matching
+      // Reopening the controller on the existing channel installs the bundled
       // runtime before any Host is stopped and keeps other profile Hosts on
       // this SSH connection online.
-      const expectedRuntimeId = expectedArtifact?.runtimeId ?? null;
-      if (!shared.connected || shared.artifact?.dshVersion !== version
-        || (expectedRuntimeId && shared.artifact?.runtimeId !== expectedRuntimeId)) {
+      if (!shared.connected || (expectedArtifact && shared.artifact?.runtimeId !== expectedArtifact.runtimeId)) {
         session = await this.openControllerSession({
           ...shared.connected ? { channel: shared.channel } : {},
           alias: record.hostAlias,
           catalog: this.catalog,
-          version,
+          version: preferredVersion,
           signal,
           interactive: !background,
           background,
@@ -1043,33 +1519,27 @@ export class SshRemoteService extends EventEmitter {
       };
       signal.throwIfAborted();
       selectedArtifact = session.artifact;
-      if (!selectedArtifact?.dshVersion) throw error('REMOTE_VERSION_MISMATCH', 'The selected remote runtime is unavailable.');
-      const listed = await session.controller.list({ profileId });
+      if (!selectedArtifact?.dshVersion) throw error('REMOTE_INSTALL_FAILED', 'The remote runtime package is unavailable.');
+      const targetVersion = selectedArtifact.dshVersion;
+      const targetVersionChanged = Boolean(record.lastServerVersion && record.lastServerVersion !== targetVersion);
+      if (targetVersionChanged) this.transition(runtime, 'upgrading');
+      // The list is scoped to this manager's runtime identity. Instances of
+      // another runtime package are separate instances and stay untouched.
+      const listed = await session.controller.list({ version: targetVersion, buildId: selectedArtifact.buildId, profileId });
       signal.throwIfAborted();
       const savedId = options.reconnectInstanceId ?? record.lastInstanceId;
-      const candidates = listed.instances.filter((entry) => matchesProfile(entry, profileId));
-      const previous = candidates.find((entry) => entry.instance?.instanceId === savedId);
-      const exact = previous?.instance?.dshVersion === version
+      const previous = listed.instances.find((entry) => entry.instance?.instanceId === savedId
+        && matchesProfile(entry, profileId));
+      const exact = previous?.instance?.dshVersion === targetVersion
         && previous?.instance?.buildId === selectedArtifact.buildId
-        && runtimeIdentityMatches(previous?.instance, selectedArtifact.runtimeId);
+        && instanceRuntimeMatches(previous?.instance, selectedArtifact.runtimeId);
 
-      if (isHealthy(previous) && !exact) {
-        this.assertLocalDshCurrent(version, previous.instance.dshVersion, {
-          hostId: runtime.hostId,
-          instanceId: savedId,
-          profileId,
-        });
-      }
-
-      // The matching runtime is installed: only now replace the stale Hosts.
+      // The matching runtime is installed: only now detach this manager's own
+      // previous Host. Its remote instance keeps running for other clients and
+      // expires by its idle timeout.
       if (active) {
-        await this.retireActiveHost(runtime, active);
-        retired = true;
-      }
-      if (isHealthy(previous) && !exact && previous.instance.instanceId !== active?.instanceId) {
-        this.transition(runtime, 'upgrading');
-        await session.controller.stop({ instanceId: savedId });
-        retired = true;
+        await this.detachActiveHost(runtime, active);
+        detached = true;
       }
 
       if (exact && isHealthy(previous)) {
@@ -1087,7 +1557,7 @@ export class SshRemoteService extends EventEmitter {
           channel: session.channel,
           artifactPath: selectedArtifact.artifactPath,
           sha256: selectedArtifact.sha256,
-          version,
+          version: targetVersion,
           buildId: selectedArtifact.buildId,
           runtimeId: selectedArtifact.runtimeId,
           localReturnUrl: this.localReturnUrl,
@@ -1104,9 +1574,6 @@ export class SshRemoteService extends EventEmitter {
         runtime.installed = opened.installed;
         runtime.artifact = opened.artifact;
         this.observeHost(runtime, opened.host);
-      }
-      if (runtime.host.version !== version || runtime.host.buildId !== runtime.artifact?.buildId) {
-        throw error('REMOTE_VERSION_MISMATCH', 'The attached remote instance does not match the selected local build.');
       }
       signal.throwIfAborted();
 
@@ -1132,7 +1599,7 @@ export class SshRemoteService extends EventEmitter {
       }
       const connected = await this.store.markConnected(runtime.hostId, {
         instanceId: runtime.host.instanceId,
-        version,
+        version: targetVersion,
         buildId: runtime.artifact.buildId,
       });
       runtime.reconnectAttempts = 0;
@@ -1148,28 +1615,25 @@ export class SshRemoteService extends EventEmitter {
       };
     } catch (cause) {
       this.interactions.cancelHost(runtime.hostId);
-      if (active && runtime.host === active && !active.closed && !retired) {
-        // The matching runtime could not be installed or the stale Host could
-        // not be retired: keep the working Host and its shared transport.
+      if (active && runtime.host === active && !active.closed && !detached) {
+        // The matching runtime could not be installed: keep the working Host
+        // and its shared transport.
         this.transition(runtime, 'connected', cause);
       } else {
         if (runtime.host) await this.releaseRuntime(runtime);
-        this.transition(runtime, cause?.code === 'LOCAL_DSH_OUTDATED' ? 'idle' : 'failed', cause);
+        this.transition(runtime, 'failed', cause);
       }
       throw cause;
     }
   }
 
-  /** Throws when the remote Host is strictly newer than this Desktop. */
-  assertLocalDshCurrent(version, remoteVersion, details = {}) {
-    if (compareDshVersions(remoteVersion, version) === 1) throw localDshOutdated(version, remoteVersion, details);
-  }
-
   /**
-   * Stops one Host of this manager after its replacement runtime is installed,
-   * without closing the shared SSH channel other profile Hosts use.
+   * Releases this manager's connection to one Host after its replacement
+   * runtime is installed, without closing the shared SSH channel other profile
+   * Hosts use and without stopping the remote instance. The detached instance
+   * keeps running for other clients and expires by its idle timeout.
    */
-  async retireActiveHost(runtime, host) {
+  async detachActiveHost(runtime, host) {
     this.closingHosts.add(host);
     await host.close().catch(() => {});
     for (const profileRuntime of this.profileRuntimes(runtime.hostId).values()) {
@@ -1182,20 +1646,20 @@ export class SshRemoteService extends EventEmitter {
       runtime.host = null;
       runtime.error = null;
     }
-    if (host.instanceId) await host.controller.stop({ instanceId: host.instanceId });
     this.publish(runtime.hostId);
   }
 
   /**
    * The runtime package this manager expects for the current remote target.
+   * The local DSH version is only a preference; the bundled runtime decides.
    * Returns null when the target or the catalog is unavailable so callers can
-   * fall back to the previous decision.
+   * fall back to the runtime already in use.
    */
-  async selectExpectedArtifact(runtime, version) {
+  async selectExpectedArtifact(runtime, preferredVersion) {
     const target = runtime.target ?? runtime.artifact?.target ?? this.sessions.get(runtime.hostId)?.target;
     if (!target) return null;
     try {
-      return await this.catalog.select({ version, target });
+      return await this.catalog.select({ version: preferredVersion, target });
     } catch {
       return null;
     }
@@ -1338,6 +1802,7 @@ export class SshRemoteService extends EventEmitter {
       controller: adapter,
       version: session.artifact.dshVersion,
       buildId: session.artifact.buildId,
+      runtimeId: session.artifact.runtimeId,
       workspace: session.installed.home,
       profileId,
     });
@@ -1373,9 +1838,9 @@ export class SshRemoteService extends EventEmitter {
       runtime.reconnectAttempts += 1;
       this.connect(runtime.hostId, { background: true, reconnectInstanceId: instanceId }).catch(async (cause) => {
         if (this.closed || !this.runtimes.has(runtime.hostId)) return;
-        // A newer remote cannot be fixed by reconnecting; older hosts upgrade
-        // automatically, so no confirmation state stops the retry loop.
-        if (cause?.code === 'LOCAL_DSH_OUTDATED' || runtime.reconnectAttempts >= this.maxReconnectAttempts) {
+        // A transient transport failure is retried; after the attempt limit
+        // the connection is reported as failed.
+        if (runtime.reconnectAttempts >= this.maxReconnectAttempts) {
           this.transition(runtime, 'failed', cause);
           return;
         }
@@ -1533,6 +1998,7 @@ export class SshRemoteService extends EventEmitter {
       controller,
       version: originalHost.version,
       buildId: originalHost.buildId,
+      runtimeId: originalHost.runtimeId,
       workspace: originalHost.workspace,
       patch: originalHost.patch,
       profileId: originalHost.profileId,

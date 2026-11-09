@@ -114,14 +114,14 @@ test('a remote Host upgrade connects without an upgrade prompt', async (t) => {
   assert.equal(f.extension.getSnapshot().prompts.length, 0);
   await view.unmount(); assert.equal(modal.at(-1), false);
 });
-test('LOCAL_DSH_OUTDATED is reported without a confirmation prompt', async (t) => {
+test('a runtime mismatch is reported without a confirmation prompt', async (t) => {
   const f = fixture(t, () => ({
     ok: false,
-    error: { code: 'LOCAL_DSH_OUTDATED', details: { remoteVersion: '3.0.0', localVersion: '2.0.0' } },
+    error: { code: 'REMOTE_VERSION_MISMATCH', details: { localVersion: '2.0.0' } },
   }));
   const view = await mount(t, f.extension.Overlay, {}, f.desktop);
   await assert.rejects(f.extension.request('/connect', { body: { hostId: 'c1' } }), (cause) => {
-    assert.equal(cause.code, 'LOCAL_DSH_OUTDATED');
+    assert.equal(cause.code, 'REMOTE_VERSION_MISMATCH');
     assert.equal(cause.message.includes('SECRET'), false);
     return true;
   });

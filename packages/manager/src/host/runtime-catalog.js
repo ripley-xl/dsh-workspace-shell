@@ -5,6 +5,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { compareVersions } from './registry.js';
 import { SshRemoteError } from './ssh/errors.js';
 
 const MAX_METADATA_BYTES = 64 * 1024;
@@ -40,6 +41,13 @@ function targetFromRuntimeId(runtimeId) {
 
 function sameTarget(left, right) {
   return left.platform === right.platform && left.arch === right.arch && left.libc === right.libc;
+}
+
+/** Orders bundled runtimes newest first; the preferred version still wins. */
+function compareArtifactVersions(left, right) {
+  const byDshVersion = left.dshVersion.localeCompare(right.dshVersion, 'en', { numeric: true });
+  if (byDshVersion !== 0) return byDshVersion;
+  return String(left.controllerVersion ?? '').localeCompare(String(right.controllerVersion ?? ''), 'en', { numeric: true });
 }
 
 export function validateRuntimeArtifactMetadata(value, directory) {
@@ -140,25 +148,51 @@ export class RuntimeCatalog {
     return artifacts;
   }
 
-  async select({ version, buildId, target, signal }) {
-    metadataString(version, 'local DSH version', 128);
+  /**
+   * The highest-version bundled runtime for one remote target, or `null` when
+   * no artifact matches. Versions are compared with SemVer rules so a
+   * prerelease never outranks its final release.
+   */
+  async newest({ target } = {}) {
     if (!target || !sameTarget(targetFromRuntimeId(`x-${target.platform}-${target.arch}-${target.libc}`), target)) {
       throw failure('REMOTE_PLATFORM_UNSUPPORTED', 'The remote runtime target must be Linux or macOS with a supported architecture and libc.');
     }
-    const versionMatches = (await this.list()).filter((artifact) => artifact.dshVersion === version
-      && (buildId === undefined || artifact.buildId === buildId));
-    if (versionMatches.length === 0) {
-      throw failure('REMOTE_VERSION_MISMATCH', `No runtime artifact exactly matches local DSH ${version}.`);
+    const matches = (await this.list()).filter((artifact) => sameTarget(artifact.target, target));
+    let newest = null;
+    for (const artifact of matches) {
+      let order;
+      try {
+        // Invalid metadata versions cannot be compared and are ignored.
+        compareVersions(artifact.dshVersion, artifact.dshVersion);
+        order = newest ? compareVersions(artifact.dshVersion, newest.dshVersion) : 1;
+      } catch {
+        continue;
+      }
+      if (order > 0) newest = artifact;
     }
-    const matches = versionMatches.filter((artifact) => sameTarget(artifact.target, target));
+    return newest;
+  }
+
+  async select({ version, buildId, target, signal }) {
+    // `version` is a preference, not a requirement: the remote runtime version
+    // comes from the runtime package bundled with this plugin.
+    if (version !== undefined && version !== null) metadataString(version, 'preferred DSH version', 128);
+    if (!target || !sameTarget(targetFromRuntimeId(`x-${target.platform}-${target.arch}-${target.libc}`), target)) {
+      throw failure('REMOTE_PLATFORM_UNSUPPORTED', 'The remote runtime target must be Linux or macOS with a supported architecture and libc.');
+    }
+    const all = await this.list();
+    const targetMatches = all.filter((artifact) => sameTarget(artifact.target, target));
+    if (targetMatches.length === 0) {
+      throw failure('REMOTE_PLATFORM_UNSUPPORTED', `No runtime artifact matches ${target.platform}-${target.arch}-${target.libc}.`);
+    }
+    const matches = buildId === undefined ? targetMatches : targetMatches.filter((artifact) => artifact.buildId === buildId);
     if (matches.length === 0) {
-      throw failure('REMOTE_PLATFORM_UNSUPPORTED', `No DSH ${version} runtime matches ${target.platform}-${target.arch}-${target.libc}.`);
+      throw failure('REMOTE_INSTALL_FAILED', 'No runtime artifact matches the requested remote build.');
     }
-    const current = matches.filter((artifact) => typeof artifact.controllerVersion === 'string');
-    const candidates = current.length ? current : matches;
-    if (candidates.length > 1) {
-      throw failure('REMOTE_VERSION_MISMATCH', 'More than one runtime artifact matches the local version and remote target.');
-    }
+    const preferred = version === undefined || version === null ? [] : matches.filter((artifact) => artifact.dshVersion === version);
+    const pool = preferred.length ? preferred : matches;
+    const current = pool.filter((artifact) => typeof artifact.controllerVersion === 'string');
+    const candidates = (current.length ? current : pool).slice().sort((left, right) => compareArtifactVersions(right, left));
     const artifact = candidates[0];
     const info = await fs.stat(artifact.artifactPath).catch((error) => {
       throw failure('REMOTE_INSTALL_FAILED', 'The selected runtime archive is unavailable.', { cause: error?.code });

@@ -99,7 +99,8 @@ const harness = (t, options = {}) => {
     let startPromise;
     let disposal;
     let lease;
-    const guest = resource({ input, closed: false, starts: 0,
+    const guest = resource({ input, closed: false, starts: 0, opened: [],
+      openSession(sessionId) { this.opened.push(sessionId); return !this.closed; },
       ...(options.readWebCwd ? { cwdReads: 0, getWorkingDirectory() { this.cwdReads++; return options.readWebCwd(guest); } } : {}),
       start() {
         if (!startPromise) {
@@ -151,7 +152,8 @@ const harness = (t, options = {}) => {
     createTabAppearanceMemory: options.createTabAppearanceMemory === false ? undefined : (options.createTabAppearanceMemory ?? createTabAppearanceMemory),
     ...(options.noTiming ? {} : { now: () => clock.now }),
     createWebTiming: options.noTiming ? undefined : (config) => createWebTiming({ limit: 8, now: () => clock.now }),
-    createBrowserGuest: options.createBrowserGuest });
+    createBrowserGuest: options.createBrowserGuest,
+    onGuestNotification: options.onGuestNotification });
   let unmountAll = () => {};
   let removeSsh;
   if (options.ssh !== false) {
@@ -215,6 +217,23 @@ test('session navigation carries non-secret view identity through login redirect
   assert.equal(ofPath(h, '/web/open').length, 0);
   assert.deepEqual(ofPath(h, '/api/workspace-session-hosts/attach').map((call) => call.input), [{ instanceId, sessionId: 's' }, { instanceId, sessionId: 's' }]);
   assert.doesNotMatch(JSON.stringify(h.client.tabs.getSnapshot()), /secret|http:/);
+});
+test('guest events carry their tab key and openSessionInTab reaches that exact view', async (t) => {
+  const seen = [];
+  const h = await loaded(t, { onGuestNotification: (key, data) => seen.push({ key, data }) });
+  const id = await openWeb(h, 'alpha');
+  const guest = h.guests[0];
+  const tab = h.client.tabs.getSnapshot().tabs.find((item) => item.id === id);
+  const event = { type: 'workspace-shell-notification', version: 1, event: 'turn-end', kind: 'turn-end', sessionId: 'a'.repeat(32), title: 'Alpha check', detail: '', viewing: false };
+  guest.input.onGuestEvent(event);
+  assert.deepEqual(seen, [{ key: tab.key, data: event }]);
+  assert.equal(h.client.openSessionInTab(tab.key, 'a'.repeat(32)), true);
+  assert.deepEqual(guest.opened, ['a'.repeat(32)]);
+  assert.equal(h.client.openSessionInTab('local-web:missing', 'a'.repeat(32)), false);
+  assert.equal(h.client.openSessionInTab('local', 'a'.repeat(32)), false);
+  h.client.tabs.close(id);
+  await flush();
+  assert.equal(h.client.openSessionInTab(tab.key, 'a'.repeat(32)), false, 'a closed view receives nothing');
 });
 const openWeb = async (h, profile = 'alpha') => { const id = await h.client.openWeb(profile, true); if (!h.guests.length) h.client.tabs.mount(id, {}); await flush(); return id; };
 const generic = (h, providerId, kind = 'browser', implementation) => {
@@ -311,9 +330,13 @@ test('startup catalog snapshots expose only allowlisted metadata, owner storage 
   assert.equal(h.ownerId, 'saved-window');
   assert.equal(h.uuids, 0);
   const snapshot = h.client.info.getSnapshot();
-  assert.deepEqual(Object.keys(snapshot).sort(), ['phase', 'currentProfile', 'defaultCwd', 'profiles', 'runtimes'].sort());
+  assert.deepEqual(Object.keys(snapshot).sort(), ['phase', 'currentProfile', 'defaultCwd', 'profiles', 'currentHost', 'runtimes'].sort());
+  assert.equal(snapshot.currentHost, null);
   assert.deepEqual(snapshot.profiles[0], { id: 'home', isCurrent: true, web: false, tui: true });
-  assert.deepEqual(snapshot.runtimes[0], { id: 'runtime-a', kind: 'web', profileId: 'home', phase: 'running', canStop: true, source: 'local', views: 0 });
+  assert.deepEqual(snapshot.runtimes[0], {
+    id: 'runtime-a', kind: 'web', profileId: 'home', phase: 'running', canStop: true, source: 'local', views: 0,
+    dshVersion: null, latestDshVersion: null, checking: false, upgradeAvailable: false,
+  });
   assert.equal(Object.isFrozen(snapshot.profiles), true);
   assert.equal(Object.isFrozen(snapshot.runtimes[0]), true);
   assert.doesNotMatch(JSON.stringify(snapshot), /secret|token|url|pid/);
@@ -322,6 +345,39 @@ test('startup catalog snapshots expose only allowlisted metadata, owner storage 
   assert.equal(request.init.credentials, 'same-origin');
   assert.equal(request.init.method, 'POST');
   assert.equal(h.client.tabs.getSnapshot().activeId, 'local');
+});
+
+test('catalog maps Host version and upgrade metadata and posts upgrades with the owner', async (t) => {
+  const h = await loaded(t, { catalog: catalog({
+    currentHost: { current: true, profileId: 'home', dshVersion: '0.2.1-rc.5', latestDshVersion: '0.2.2-rc.1',
+      checking: false, alignPending: false, upgradeAvailable: true, upgrade: { phase: 'running', step: 'install' }, url: 'secret-url', token: 'secret-token' },
+    runtimes: [
+      { id: 'runtime-a', kind: 'web', profileId: 'alpha', phase: 'running', canStop: true, dshVersion: '0.2.1-rc.5',
+        latestDshVersion: '0.2.2-rc.1', checking: false, alignPending: true, upgradeAvailable: true },
+      { id: 'runtime-b', kind: 'web', profileId: 'beta', phase: 'running', canStop: true,
+        dshVersion: 42, checking: 'yes', upgradeAvailable: 'yes', upgrade: { phase: 'weird', step: 'evil', error: 'secret-token' } },
+    ],
+  }) });
+  const snapshot = h.client.info.getSnapshot();
+  assert.deepEqual(snapshot.currentHost, {
+    profileId: 'home', dshVersion: '0.2.1-rc.5', latestDshVersion: '0.2.2-rc.1', checking: false,
+    upgradeAvailable: true, alignPending: false, upgrade: { phase: 'running', step: 'install' },
+  });
+  assert.deepEqual(snapshot.runtimes[0], {
+    id: 'runtime-a', kind: 'web', profileId: 'alpha', phase: 'running', canStop: true, source: 'local', views: 0,
+    dshVersion: '0.2.1-rc.5', latestDshVersion: '0.2.2-rc.1', checking: false, upgradeAvailable: true, alignPending: true,
+  });
+  assert.deepEqual(snapshot.runtimes[1], {
+    id: 'runtime-b', kind: 'web', profileId: 'beta', phase: 'running', canStop: true, source: 'local', views: 0,
+    dshVersion: null, latestDshVersion: null, checking: false, upgradeAvailable: false,
+  });
+  assert.doesNotMatch(JSON.stringify(snapshot), /secret|token|url/u);
+
+  await h.client.upgradeHost('runtime-a');
+  assert.deepEqual(ofPath(h, '/hosts/upgrade')[0].input, { ownerId: h.ownerId, runtimeId: 'runtime-a' });
+  await h.client.upgradeHost();
+  assert.deepEqual(ofPath(h, '/hosts/upgrade')[1].input, { ownerId: h.ownerId });
+  assert.equal(ofPath(h, '/hosts/upgrade')[0].init.method, 'POST');
 });
 
 test('catalog keeps only known TUI flavors and branded tabs retain terminal kind', async (t) => {
@@ -469,7 +525,10 @@ test('authenticated view URLs reach only the Guest, preserve hash, and add the e
   const url = new URL(guest.input.url);
   assert.equal(url.searchParams.get('token'), 'secret');
   assert.equal(url.searchParams.get('workspaceShellEmbedded'), '1');
-  assert.equal(url.hash, '#thread');
+  // The login redirect keeps the fragment only, so the embedded flag also rides there.
+  const fragment = new URLSearchParams(url.hash.slice(1));
+  assert.equal(url.hash.startsWith('#thread&'), true);
+  assert.equal(fragment.get('workspaceShellEmbedded'), '1');
   assert.match(guest.input.workspaceKey, /^workspace-profile:local-web:alpha:web:/);
   assert.doesNotMatch(JSON.stringify(h.client.tabs.getSnapshot()), /token|secret|http|runtimeId|lease/);
   assert.equal(tab(h.client, id).phase, 'opening');
@@ -1795,7 +1854,8 @@ test('measurements are bounded and never contain more than the configured entrie
 test('browser Guest is used when no Native bridge exists and receives the parent origin', async (t) => {
   const guests = [];
   const createBrowserGuest = (input) => {
-    const guest = resource({ input, closed: false, starts: 0,
+    const guest = resource({ input, closed: false, starts: 0, opened: [],
+      openSession(sessionId) { this.opened.push(sessionId); return !this.closed; },
       start() { guest.starts++; return Promise.resolve().then(() => input.onReady()); },
       dispose() { guest.closed = true; guest.disposed++; return Promise.resolve(); },
     });

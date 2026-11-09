@@ -35,7 +35,7 @@ export async function openControllerSession(options) {
       });
     }
     if (installed.runtime.dshVersion !== artifact.dshVersion || installed.runtime.buildId !== artifact.buildId) {
-      throw new SshRemoteError('REMOTE_VERSION_MISMATCH', 'The installed runtime does not match the selected local build.');
+      throw new SshRemoteError('REMOTE_VERSION_MISMATCH', 'The installed runtime does not match the selected plugin runtime package.');
     }
     const controller = new RemoteControllerClient({
       channel,

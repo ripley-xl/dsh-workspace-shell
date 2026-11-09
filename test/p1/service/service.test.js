@@ -38,7 +38,7 @@ test('connect returns a browser URL once and keeps it out of status and storage'
   assert.equal(fixture.store.get(record.id).lastInstanceId, null);
 });
 
-test('an active old instance upgrades automatically without confirmation', async (t) => {
+test('an instance of an older DSH version is left running as its own instance', async (t) => {
   const fixture = await serviceFixture({ version: '2.0.0' });
   t.after(fixture.close);
   const record = await fixture.store.upsert({ hostAlias: 'p0-test', syncPolicy: { appearance: false } });
@@ -48,13 +48,15 @@ test('an active old instance upgrades automatically without confirmation', async
   });
   await fixture.store.markConnected(record.id, { instanceId: 'old-instance', version: '1.0.0', buildId: 'build-1' });
   const upgraded = await fixture.service.connect(record.id);
-  assert.deepEqual(fixture.state.stops, ['old-instance']);
+  assert.deepEqual(fixture.state.stops, []);
   assert.equal(upgraded.host.lastServerVersion, '2.0.0');
   assert.notEqual(upgraded.host.instanceId, 'old-instance');
   assert.equal(upgraded.host.phase, 'connected');
+  const old = fixture.state.instances.find((entry) => entry.instance.instanceId === 'old-instance');
+  assert.equal(old.health.healthy, true);
 });
 
-test('a remote Host newer than the local DSH is refused and left running', async (t) => {
+test('an instance of a newer DSH version is left running and does not block connecting', async (t) => {
   const fixture = await serviceFixture({ version: '2.0.0' });
   t.after(fixture.close);
   const record = await fixture.store.upsert({ hostAlias: 'p0-test', syncPolicy: { appearance: false } });
@@ -63,15 +65,32 @@ test('a remote Host newer than the local DSH is refused and left running', async
     health: { healthy: true }, active: true,
   });
   await fixture.store.markConnected(record.id, { instanceId: 'newer-instance', version: '2.1.0', buildId: 'build-1' });
-  await assert.rejects(fixture.service.connect(record.id), (error) => {
-    assert.equal(error.code, 'LOCAL_DSH_OUTDATED');
-    assert.equal(error.details.localVersion, '2.0.0');
-    assert.equal(error.details.remoteVersion, '2.1.0');
-    return true;
-  });
+  const connected = await fixture.service.connect(record.id);
   assert.deepEqual(fixture.state.stops, []);
+  assert.notEqual(connected.host.instanceId, 'newer-instance');
+  assert.equal(connected.host.remoteVersion, '2.0.0');
   const instance = fixture.state.instances.find((entry) => entry.instance.instanceId === 'newer-instance');
   assert.equal(instance.health.healthy, true);
+});
+
+test('connects with the bundled runtime when the local DSH version differs', async (t) => {
+  const fixture = await serviceFixture({ version: '1.0.0', runtimeVersion: '2.0.0' });
+  t.after(fixture.close);
+  const record = await fixture.store.upsert({ hostAlias: 'p0-test', syncPolicy: { appearance: false } });
+  const connected = await fixture.service.connect(record.id);
+  assert.equal(connected.host.remoteVersion, '2.0.0');
+  assert.equal(fixture.state.starts[0].version, '2.0.0');
+  assert.equal((await fixture.service.status()).dshVersion, '1.0.0');
+});
+
+test('connects with the bundled runtime when the local DSH version is unavailable', async (t) => {
+  const fixture = await serviceFixture({ version: '1.0.0', runtimeVersion: '2.0.0' });
+  t.after(fixture.close);
+  const record = await fixture.store.upsert({ hostAlias: 'p0-test', syncPolicy: { appearance: false } });
+  fixture.setVersion(null);
+  const connected = await fixture.service.connect(record.id);
+  assert.equal(connected.host.remoteVersion, '2.0.0');
+  assert.equal((await fixture.service.status()).dshVersion, null);
 });
 
 test('transport recovery attaches to the original instance without replaying sync', async (t) => {

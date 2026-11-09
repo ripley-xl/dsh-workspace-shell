@@ -25,13 +25,14 @@ const launcherTab = Object.freeze({ id: 'tab-launcher', kind: 'launcher', key: '
 function makeWorkspace(calls, options = {}) {
   const tabStore = observable({ activeId: options.activeId ?? 'local', tabs: [localTab, ...(options.tabs ?? [])] });
   const infoStore = observable({
-    phase: options.infoPhase ?? 'ready', currentProfile: 'current', defaultCwd: '/work',
+    phase: options.infoPhase ?? 'ready', currentProfile: options.currentProfile ?? 'current', defaultCwd: '/work',
     profiles: options.profiles ?? [
       { id: 'current', isCurrent: true, web: true, tui: true },
       { id: 'web-other', web: true, tui: false },
       { id: 'tui-other', web: false, tui: true, tuiFlavor: 'dsh-tui' },
       { id: 'unknown', web: false, tui: false },
     ],
+    currentHost: options.currentHost ?? null,
     runtimes: options.runtimes ?? [],
   });
   const connections = observable(options.connections ?? []);
@@ -93,6 +94,11 @@ function makeWorkspace(calls, options = {}) {
     async closeViews() { calls.push(['closeViews']); tabStore.set({ activeId: 'local', tabs: [localTab] }); return true; },
     async retry(id) { calls.push(['retry', id]); tabStore.set({ ...tabStore.getSnapshot(), tabs: currentTabs().map((tab) => tab.id === id ? Object.freeze({ ...tab, phase: 'opening', identity: identity(), error: undefined }) : tab) }); return true; },
     async stopRuntime(id) { calls.push(['stopRuntime', id]); if (options.stopError) throw Object.assign(new Error('secret stop message'), { code: options.stopError }); return true; },
+    async upgradeHost(runtimeId, profileId) {
+      calls.push(['upgradeHost', runtimeId, profileId]);
+      if (options.upgradeError) throw Object.assign(new Error('secret upgrade message'), { code: options.upgradeError });
+      return { started: true, upgrade: { phase: 'running', step: 'backup' } };
+    },
     async refresh() { calls.push(['refresh']); },
     async setOverlay(value) { calls.push(['overlay', value]); if (options.overlayError) throw Object.assign(new Error('secret overlay message'), { code: options.overlayError }); return true; },
     getTabStatus(tab) { calls.push(['status', tab.id]); return options.statuses?.[tab.id] ?? null; },
@@ -171,14 +177,14 @@ function fixture(options = {}) {
     removeAttribute: (name) => { htmlAttributes.delete(name); },
   };
   const document = { title: 'DeepSeek Harness', documentElement, activeElement: null };
-  const window = { setTimeout, clearTimeout, requestAnimationFrame: (fn) => setTimeout(fn, 0), cancelAnimationFrame: clearTimeout,
+  const window = { setTimeout, clearTimeout, setInterval, clearInterval, requestAnimationFrame: (fn) => setTimeout(fn, 0), cancelAnimationFrame: clearTimeout,
     ResizeObserver: class { constructor(fn) { this.fn = fn; observers.push(this); } observe() {} disconnect() { this.disconnected = true; } },
     MutationObserver: class { constructor(fn) { this.fn = fn; mutationObservers.push(this); } observe() {} disconnect() { this.disconnected = true; } } };
   const controller = { reportFrame: (frame) => reports.push(frame), setEnabled: (enabled) => calls.push(['enabled', enabled]), getSnapshot: () => ({ phase: 'active' }), subscribe: () => () => {} };
   const classes = Object.fromEntries(['frame', 'sidebarCol', 'centerCol', 'rightbarCol', 'bottomRow', 'overlayLayer', 'leadingSeat'].map((key) => [key, 'test_' + key]));
   const ctx = { locale: { bind: () => (key) => key }, slots: { entries: () => [{ options: { key: 'ssh-remote' } }] }, layout: { selectPanel: (key) => calls.push(['panel', key]) } };
   const chromeTabs = createChromeTabs(React, { document, window });
-  const launcher = createLauncher(React, { document, window });
+  const launcher = createLauncher(React, { document, window, pollIntervalMs: options.pollIntervalMs });
   if (workspace) workspace.sshExtension = observable(options.sshLauncher ?? {
     SshLauncher: (props) => React.createElement('section', { 'data-ssh-stub': '', 'data-api': typeof props.api, 'data-initial-host': props.initialHostId }, 'ssh'),
     css: '.ssh-stub{}',
@@ -551,6 +557,103 @@ test('Host rows show profile, source, status and view count and use the runtime 
   const call = f.calls.find((entry) => entry[0] === 'openLauncherWeb');
   assert.deepEqual(call[2], { profileId: 'web-other', runtimeId: 'runtime-a' });
 });
+test('current Host row shows its DSH version, is marked current and has no stop control', async (t) => {
+  const f = fixture({ workspace: true, workspaceOptions: { tabs: [launcherTab], activeId: 'tab-launcher', currentHost: {
+    profileId: 'current', dshVersion: '0.2.2-rc.1', latestDshVersion: '0.2.2-rc.1', checking: false, upgradeAvailable: false,
+  } } });
+  const app = await mount(t, f.views.Frame, f.props, f.desktop);
+  const row = app.root.findAllByProps({ 'data-runtime-id': 'current' })[0];
+  assert.ok(row, 'the current Host row renders');
+  assert.equal(row.props['data-current-host'], 'true');
+  const rendered = jsonText(app.toJSON());
+  assert.ok(rendered.includes('DSH 0.2.2-rc.1'));
+  assert.ok(rendered.includes('当前'));
+  assert.equal(row.findAllByProps({ 'data-launcher-action': 'stop-host' }).length, 0, 'the current Host cannot be stopped');
+  assert.equal(app.root.findAllByProps({ 'data-launcher-action': 'upgrade-host' }).length, 0, 'no update means no button');
+});
+test('upgrade buttons appear only when offered and call the workspace per Host', async (t) => {
+  const runtimes = [{ id: 'runtime-a', kind: 'web', profileId: 'web-other', phase: 'running', canStop: true, source: 'local', views: 0,
+    dshVersion: '0.2.1-rc.5', latestDshVersion: '0.2.2-rc.1', checking: false, upgradeAvailable: true }];
+  const f = fixture({ workspace: true, workspaceOptions: {
+    tabs: [launcherTab], activeId: 'tab-launcher', runtimes, currentProfile: 'web',
+    profiles: [{ id: 'web', isCurrent: true, web: true }, { id: 'web-other', web: true, tui: false }],
+    currentHost: { profileId: 'web', dshVersion: '0.2.1-rc.5', latestDshVersion: '0.2.2-rc.1', checking: false, upgradeAvailable: true },
+  } });
+  const app = await mount(t, f.views.Frame, f.props, f.desktop);
+  assert.ok(jsonText(app.toJSON()).includes('DSH 0.2.1-rc.5'));
+  const buttons = app.root.findAll((node) => node.props?.['data-launcher-action'] === 'upgrade-host');
+  assert.equal(buttons.length, 2, 'one button per row at most');
+  const current = buttons.find((node) => node.props['data-upgrade-target'] === 'current');
+  assert.ok(textOf(current.props.children).includes('同步并升级'));
+  await flushEffects(() => current.props.onClick());
+  assert.ok(f.calls.some((call) => call[0] === 'upgradeHost' && call[1] == null && call[2] === 'web'), 'the current Host posts without a runtime id');
+  const runtime = app.root.findAll((node) => node.props?.['data-launcher-action'] === 'upgrade-host')
+    .find((node) => node.props['data-upgrade-target'] === 'runtime-a');
+  assert.ok(textOf(runtime.props.children).includes('升级'));
+  await flushEffects(() => runtime.props.onClick());
+  assert.ok(f.calls.some((call) => call[0] === 'upgradeHost' && call[1] === 'runtime-a' && call[2] === 'web-other'));
+  assert.ok(f.calls.filter((call) => call[0] === 'refresh').length >= 2, 'the row refreshes after starting');
+});
+test('a stopped Web profile row offers sync without start or stop controls', async (t) => {
+  const runtimes = [{ id: 'profile:web', kind: 'web', profileId: 'web', phase: 'stopped', canStop: false, source: 'local', views: 0,
+    dshVersion: '0.2.2-rc.1', latestDshVersion: '0.2.2-rc.1', checking: false, alignPending: true, upgradeAvailable: true }];
+  const f = fixture({ workspace: true, workspaceOptions: {
+    tabs: [launcherTab], activeId: 'tab-launcher', runtimes, currentProfile: 'desktop',
+    profiles: [{ id: 'desktop', isCurrent: true, web: true }, { id: 'web', web: true, tui: false }],
+    currentHost: { profileId: 'desktop', dshVersion: '0.2.2-rc.1', checking: false, upgradeAvailable: false },
+  } });
+  const app = await mount(t, f.views.Frame, f.props, f.desktop);
+  const rendered = jsonText(app.toJSON());
+  assert.ok(rendered.includes('未运行'));
+  assert.ok(rendered.includes('DSH 0.2.2-rc.1'));
+  const row = app.root.findAll((node) => node.props?.['data-runtime-id'] === 'profile:web')[0];
+  assert.ok(row);
+  const keyed = (action) => app.root.findAll((node) => node.props?.['data-launcher-action'] === action
+    && node.props['data-upgrade-target'] === 'profile:web');
+  assert.equal(app.root.findAll((node) => node.props?.['data-launcher-action'] === 'new-view'
+    && node.props['data-runtime-id'] === 'profile:web').length, 0);
+  assert.equal(app.root.findAll((node) => node.props?.['data-launcher-action'] === 'stop-host'
+    && node.props['data-runtime-id'] === 'profile:web').length, 0);
+  const button = app.root.findAll((node) => node.props?.['data-launcher-action'] === 'upgrade-host'
+    && node.props['data-upgrade-target'] === 'profile:web')[0];
+  assert.ok(button);
+  assert.ok(jsonText(button.props.children).includes('同步并升级'));
+  await flushEffects(() => button.props.onClick());
+  assert.ok(f.calls.some((call) => call[0] === 'upgradeHost' && call[1] == null && call[2] === 'web'));
+});
+
+test('running upgrades disable the button, failed ones surface only a safe code', async (t) => {
+  const runtimes = [{ id: 'runtime-a', kind: 'web', profileId: 'web-other', phase: 'running', canStop: true, source: 'local', views: 0,
+    dshVersion: '0.2.1-rc.5', checking: false, upgradeAvailable: false, upgrade: { phase: 'failed', error: 'UPGRADE_INSTALL_FAILED' } }];
+  const f = fixture({ workspace: true, workspaceOptions: {
+    tabs: [launcherTab], activeId: 'tab-launcher', runtimes,
+    currentHost: { profileId: 'current', dshVersion: '0.2.1-rc.5', checking: false, upgradeAvailable: false, upgrade: { phase: 'running', step: 'install' } },
+  } });
+  const app = await mount(t, f.views.Frame, f.props, f.desktop);
+  const rendered = jsonText(app.toJSON());
+  assert.ok(rendered.includes('正在安装插件'));
+  assert.ok(rendered.includes('升级失败 UPGRADE_INSTALL_FAILED'));
+  const running = app.root.findAll((node) => node.props?.['data-launcher-action'] === 'upgrade-host' && node.props.disabled === true);
+  assert.equal(running.length, 1, 'the running row keeps a disabled button');
+  assert.equal(rendered.includes('secret'), false);
+});
+test('launcher polls the catalog while a version probe is pending and stops when it settles', async (t) => {
+  const f = fixture({ workspace: true, pollIntervalMs: 5, workspaceOptions: {
+    tabs: [launcherTab], activeId: 'tab-launcher',
+    currentHost: { profileId: 'current', dshVersion: '0.2.1-rc.5', checking: true, upgradeAvailable: false },
+  } });
+  await mount(t, f.views.Frame, f.props, f.desktop);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.ok(f.calls.filter((call) => call[0] === 'refresh').length >= 1, 'the launcher polls while checking');
+  await flushEffects(() => {
+    const current = f.workspace.info.getSnapshot();
+    f.workspace.info.set({ ...current, currentHost: { ...current.currentHost, checking: false } });
+  });
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  const settled = f.calls.filter((call) => call[0] === 'refresh').length;
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(f.calls.filter((call) => call[0] === 'refresh').length, settled, 'polling stops once the probe settles');
+});
 test('stopping a Host confirms first and surfaces only a safe code on failure', async (t) => {
   const runtimes = [{ id: 'runtime-a', kind: 'web', profileId: 'web-other', phase: 'running', canStop: true, source: 'local', views: 1 }];
   const f = fixture({ workspace: true, workspaceOptions: { tabs: [launcherTab], activeId: 'tab-launcher', runtimes, stopError: 'RUNTIME_OWNER_MISMATCH' } });
@@ -875,7 +978,7 @@ test('launcher English locale renders translated copy and keeps the same control
   const app = await mount(t, f.views.Frame, f.props, f.desktop);
   const rendered = jsonText(app.toJSON());
   assert.ok(rendered.includes('New workspace'));
-  assert.ok(rendered.includes('Running Web Hosts'));
+  assert.ok(rendered.includes('Web Hosts'));
   assert.equal(app.root.findAllByProps({ 'data-launcher-action': 'open-web' }).length, 1);
 });
 

@@ -85,7 +85,8 @@ export function validateConnectionRecord(value) {
     lastInstanceId: nullableString(value.lastInstanceId, 'lastInstanceId'),
     lastServerVersion: nullableString(value.lastServerVersion, 'lastServerVersion'),
     lastBuildId: nullableString(value.lastBuildId, 'lastBuildId'),
-    autoConnect: value.autoConnect === true,
+    // Auto-connect is the default; only an explicit `false` keeps a host quiet.
+    autoConnect: value.autoConnect !== false,
     syncPolicy: syncPolicy(value.syncPolicy),
     lastConnectedAt: timestamp(value.lastConnectedAt, 'lastConnectedAt', { nullable: true }),
     lastSyncedAt: timestamp(value.lastSyncedAt, 'lastSyncedAt', { nullable: true }),
@@ -116,7 +117,7 @@ function editable(input, existing, now, id) {
     lastInstanceId: existing?.lastInstanceId ?? null,
     lastServerVersion: existing?.lastServerVersion ?? null,
     lastBuildId: existing?.lastBuildId ?? null,
-    autoConnect: input.autoConnect === undefined ? existing?.autoConnect === true : input.autoConnect,
+    autoConnect: input.autoConnect === undefined ? existing?.autoConnect !== false : input.autoConnect,
     syncPolicy: input.syncPolicy === undefined ? existing?.syncPolicy : input.syncPolicy,
     lastConnectedAt: existing?.lastConnectedAt ?? null,
     lastSyncedAt: existing?.lastSyncedAt ?? null,

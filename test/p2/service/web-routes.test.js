@@ -69,10 +69,10 @@ test('web routes exist with the agreed paths and reject bad input safely', async
   assert.equal((await badAuto.json()).error.code, 'INVALID_REQUEST');
 });
 
-test('the host record exposes autoConnect=false by default and accepts toggles', async (t) => {
+test('auto-connect defaults on and the toggle still decides', async (t) => {
   const { routes } = await routesFixture(t);
   const saved = await host(routes);
-  assert.equal(saved.autoConnect, false);
+  assert.equal(saved.autoConnect, true);
   const on = await (await route(routes, '/api/ssh-remote/autoconnect', { hostId: saved.id, autoConnect: true })).json();
   assert.equal(on.host.autoConnect, true);
   const off = await (await route(routes, '/api/ssh-remote/autoconnect', { hostId: saved.id, autoConnect: false })).json();

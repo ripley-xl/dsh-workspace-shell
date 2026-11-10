@@ -501,6 +501,13 @@ export class SshRemoteService extends EventEmitter {
   /** `done` is visible for one poll, then cleared so the row shows the new version. */
   /** Keeps the legacy single-host view pointed at the upgraded default Host. */
 
+  /** Actions connect on demand instead of making the user find the toggle first. */
+  async ensureConnected(hostId) {
+    if (this.session(hostId).connected) return;
+    await this.connect(hostId, { background: false });
+    if (!this.session(hostId).connected) throw error('HOST_NOT_CONNECTED', 'The SSH host is not connected.');
+  }
+
   async ensureProfileTransport(hostId, { background = false } = {}) {
     const session = this.session(hostId);
     await this.ensureTransport(session, {
@@ -587,6 +594,7 @@ export class SshRemoteService extends EventEmitter {
 
   /** Opens or reuses the single healthy Host of one Web profile. */
   async webOpen(hostId, { profileId = DEFAULT_PROFILE_ID, profileName, signal, reuseOnly = false } = {}) {
+    await this.ensureConnected(hostId);
     const id = normalizeProfileId(profileId);
     this.store.require(hostId);
     if (this.closed) throw error('SERVICE_DISPOSED', 'The SSH Remote service is disposed.');
@@ -633,6 +641,7 @@ export class SshRemoteService extends EventEmitter {
 
   /** Shared guard: the card must exist, be alive, and not be controller-managed. */
   async requireDiscoveredCard(hostId, instanceId, signal) {
+    await this.ensureConnected(hostId);
     const runtime = this.runtime(hostId);
     if (!runtime.channel || runtime.channel.closed) {
       throw error('HOST_NOT_CONNECTED', 'The SSH host is not connected.');
@@ -652,6 +661,7 @@ export class SshRemoteService extends EventEmitter {
 
   /** Stops a reported Host by signalling its process after the card check. */
   async stopDiscovered(hostId, { instanceId, signal } = {}) {
+    await this.ensureConnected(hostId);
     this.store.require(hostId);
     const { runtime, card } = await this.requireDiscoveredCard(hostId, instanceId, signal);
     const stopped = await terminateRemoteProcess(runtime.channel, card.pid, { signal });
@@ -665,6 +675,7 @@ export class SshRemoteService extends EventEmitter {
    * runtime, no controller involvement.
    */
   async restartDiscovered(hostId, { instanceId, signal } = {}) {
+    await this.ensureConnected(hostId);
     this.store.require(hostId);
     const { runtime, card } = await this.requireDiscoveredCard(hostId, instanceId, signal);
     return this.restartDiscoveredCard(runtime, card, { signal });
@@ -697,6 +708,7 @@ export class SshRemoteService extends EventEmitter {
    * plugin, a local path spec, and Desktop-only packages are left alone.
    */
   async syncDiscovered(hostId, { instanceId, signal } = {}) {
+    await this.ensureConnected(hostId);
     this.store.require(hostId);
     const { runtime, card } = await this.requireDiscoveredCard(hostId, instanceId, signal);
     const remoteDependencies = await readRemoteProfileDependencies(runtime.channel, card.profileId, { signal });
@@ -779,6 +791,7 @@ export class SshRemoteService extends EventEmitter {
   }
 
   async webAttach(hostId, { instanceId } = {}) {
+    await this.ensureConnected(hostId);
     this.store.require(hostId);
     if (typeof instanceId !== 'string' || instanceId.length === 0) {
       throw error('INVALID_REQUEST', 'instanceId is required.');
@@ -836,7 +849,7 @@ export class SshRemoteService extends EventEmitter {
     if (typeof instanceId !== 'string' || instanceId.length === 0) {
       return Promise.reject(error('INVALID_REQUEST', 'instanceId is required.'));
     }
-    return this.stopGuestHost(hostId, instanceId);
+    return this.ensureConnected(hostId).then(() => this.stopGuestHost(hostId, instanceId));
   }
 
   /**
@@ -1015,6 +1028,17 @@ export class SshRemoteService extends EventEmitter {
    * Attempts are deduplicated per record so a slow startup cannot stack
    * repeated logins; toggling autoConnect back on makes the record eligible.
    */
+  /**
+   * Records written before auto-connect became the default store `false`
+   * explicitly; a host that never connected is migrated by treating it as on.
+   * Once it connects, `lastConnectedAt` marks the preference as real.
+   */
+  wantsAutoConnect(record) {
+    if (!record) return false;
+    if (record.autoConnect === true) return true;
+    return record.autoConnect === false && record.lastConnectedAt === null;
+  }
+
   scheduleAutoConnect(hostId) {
     if (this.closed || !this.store.get(hostId)) return;
     if (this.autoConnectAttempts.has(hostId)) return;
@@ -1022,7 +1046,7 @@ export class SshRemoteService extends EventEmitter {
     const timer = setTimeout(() => {
       if (this.closed || !this.store.get(hostId)) return;
       const record = this.store.get(hostId);
-      if (record?.autoConnect !== true) return;
+      if (!record || !this.wantsAutoConnect(record)) return;
       const runtime = this.runtime(hostId);
       if (runtime.operation || runtime.host) return;
       this.connect(hostId, { background: true }).catch(() => {});
@@ -1033,7 +1057,7 @@ export class SshRemoteService extends EventEmitter {
   async autoConnectAll() {
     if (this.closed) return { ok: true, attempted: 0 };
     this.autoConnectStarted = true;
-    const records = this.store.list().filter((record) => record.autoConnect === true);
+    const records = this.store.list().filter((record) => this.wantsAutoConnect(record));
     for (const record of records) this.scheduleAutoConnect(record.id);
     return { ok: true, attempted: this.autoConnectAttempts.size };
   }
@@ -1094,6 +1118,7 @@ export class SshRemoteService extends EventEmitter {
    * controller-managed Host is still running — its supervisor owns that.
    */
   async cleanupRemoteRuntime(hostId, { signal } = {}) {
+    await this.ensureConnected(hostId);
     this.store.require(hostId);
     const runtime = this.runtime(hostId);
     if (!runtime.channel || runtime.channel.closed) {

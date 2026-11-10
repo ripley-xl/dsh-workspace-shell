@@ -70,7 +70,10 @@ test('connecting records fire once per autoConnect start', async (t) => {
   t.after(close);
   await store.open();
   const record = await store.upsert({ hostAlias: 'p0-test', autoConnect: true });
-  await store.upsert({ hostAlias: 'manual-only' });
+  // Auto-connect is the default now; an explicit off only sticks once the host
+  // has connected at least once (lastConnectedAt marks a real preference).
+  const manual = await store.upsert({ hostAlias: 'manual-only', autoConnect: false });
+  await store.markConnected(manual.id, { instanceId: 'previous', version: '1.0.0', buildId: 'build-1' });
   await service.autoConnectAll();
   await service.autoConnectAll();
   await new Promise((resolve) => setTimeout(resolve, 20));

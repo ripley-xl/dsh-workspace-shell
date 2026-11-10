@@ -7,6 +7,7 @@ import { createRequire } from 'node:module';
 import { readTuiDeclaration, tuiAdapter, tuiEnvironment, tuiPackageName } from './tui-adapters.js';
 import { parseCommandLine } from './command-line.js';
 import { isNewerVersion } from './registry.js';
+import { listHostCards } from './host-discovery.js';
 
 const WEB_BUNDLE = '@deepseek-ai/dsh-web-app';
 const requireGuest = createRequire(import.meta.url);
@@ -29,7 +30,13 @@ const MAX_TERMINAL_WRITE_BYTES = 64 * 1024;
 const DEFAULT_TERMINAL_BYTES = 1024 * 1024;
 const MAX_RETAINED_RUNTIMES = 128;
 const MAX_ACTIVE_RUNTIMES = 16;
-const ACTIVE_PHASES = new Set(['starting', 'running', 'stopping']);
+// A Web Host that restarts itself disappears for a moment; the record waits for
+// the replacement's card before it settles on `exited`.
+const RESTART_POLL_MS = 500;
+const RESTART_WAIT_MS = 20_000;
+const ACTIVE_PHASES = new Set(['starting', 'running', 'stopping', 'restarting']);
+// Catalog ids for Hosts discovered through their card rather than spawned here.
+const DISCOVERED_PREFIX = 'host:';
 
 const ERRORS = {
   INVALID_INPUT: 'The request is invalid.',
@@ -160,9 +167,11 @@ async function collectText(stream, maxBytes, code) {
   return text;
 }
 
-function webEnvironment(home) {
+function webEnvironment(home, hostKey) {
   const env = {
     DSH_HOME: home,
+    // Binds the Host card this process publishes to the exact Shell record.
+    DSH_WORKSPACE_HOST_KEY: hostKey,
     DSH_TUI_BACKEND: undefined,
     DSH_TUI_WORKSPACE_TARGET: undefined,
     DSH_TUI_DISABLE_TERMINAL_IMAGES: undefined,
@@ -275,6 +284,11 @@ export function createLocalRuntimeService(options) {
   const startupTimeoutMs = options?.startupTimeoutMs ?? 30_000;
   const graceMs = options?.graceMs ?? 8_000;
   const terminalBytes = options?.terminalBytes ?? DEFAULT_TERMINAL_BYTES;
+  // Host discovery is injected so tests can supply cards without touching
+  // `<DSH_HOME>/workspace-hosts`.
+  const hostDiscovery = options?.hostDiscovery ?? { listHostCards };
+  const restartPollMs = options?.restartPollMs ?? RESTART_POLL_MS;
+  const restartWaitMs = options?.restartWaitMs ?? RESTART_WAIT_MS;
   const fs = {
     readdir: options?.fs?.readdir ?? nodeFs.readdir,
     readFile: options?.fs?.readFile ?? nodeFs.readFile,
@@ -294,11 +308,14 @@ export function createLocalRuntimeService(options) {
   }
   if (upgrades !== undefined && (typeof upgrades?.check !== 'function' || typeof upgrades?.start !== 'function'
     || typeof upgrades?.state !== 'function')) throw failure('INVALID_INPUT');
+  if (typeof hostDiscovery?.listHostCards !== 'function') throw failure('INVALID_INPUT');
   absolute(profileContext.dir);
   absolute(profileContext.home);
   absolute(profileContext.cwd);
   if (!Number.isInteger(startupTimeoutMs) || startupTimeoutMs < 1 || !Number.isInteger(graceMs) || graceMs < 1
     || !Number.isInteger(terminalBytes) || terminalBytes < 1
+    || !Number.isInteger(restartPollMs) || restartPollMs < 1
+    || !Number.isInteger(restartWaitMs) || restartWaitMs < 1
     || !Number.isInteger(versionCheckTtlMs) || versionCheckTtlMs < 0) throw failure('INVALID_INPUT');
 
   const profilesHome = path.resolve(profileContext.home);
@@ -544,6 +561,9 @@ export function createLocalRuntimeService(options) {
   }
 
   function runtimeById(runtimeId, ownerId, { active = false, kind } = {}) {
+    // Discovered Hosts are addressed by their card, never by this service's
+    // owned records; they can be attached but not stopped or upgraded.
+    if (typeof runtimeId === 'string' && runtimeId.startsWith(DISCOVERED_PREFIX)) throw failure('RUNTIME_NOT_FOUND');
     identifier(runtimeId, 'runtime');
     identifier(ownerId, 'owner');
     const record = records.get(runtimeId);
@@ -562,16 +582,127 @@ export function createLocalRuntimeService(options) {
     }
   }
 
+  function sleep(ms, signal) {
+    return new Promise((resolve) => {
+      if (signal?.aborted) {
+        resolve();
+        return;
+      }
+      let timer;
+      const wake = () => {
+        signal?.removeEventListener('abort', wake);
+        timers.clearTimeout(timer);
+        resolve();
+      };
+      timer = timers.setTimeout(wake, ms);
+      timer.unref?.();
+      signal?.addEventListener('abort', wake, { once: true });
+    });
+  }
+
+  function portOf(url) {
+    try {
+      const port = Number(new URL(url).port);
+      return Number.isInteger(port) && port > 0 ? port : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function replacementCard(record) {
+    const listed = await hostDiscovery.listHostCards({ home: profilesHome });
+    const hosts = Array.isArray(listed?.hosts) ? listed.hosts : [];
+    return hosts.find((host) => host && host.hostKey === record.id
+      && Number.isInteger(host.pid) && host.pid !== record.pid
+      && typeof host.url === 'string') ?? null;
+  }
+
+  function adoptCard(record, card) {
+    let url;
+    try {
+      url = validateWebUrl(card.url);
+    } catch {
+      return false;
+    }
+    record.pid = Number.isInteger(card.pid) ? card.pid : record.pid;
+    record.port = Number.isInteger(card.port) ? card.port : portOf(url);
+    record.url = url;
+    record.phase = 'running';
+    record.exit = undefined;
+    record.adopted = true;
+    // The replacement is not this process's child: there is no handle to
+    // signal, so ending the record must never pretend to stop it.
+    record.handle = null;
+    notify(record);
+    return true;
+  }
+
+  // An adopted Host has no child handle, so its exits are invisible to us. Its
+  // card is the only source of truth for "is it still there, and on which
+  // port": re-read it before answering, otherwise a second restart would leave
+  // the Shell pointing at a URL that no longer exists.
+  async function refreshAdopted(record) {
+    if (record?.adopted !== true || !ACTIVE_PHASES.has(record.phase)) return;
+    let listed;
+    try { listed = await hostDiscovery.listHostCards({ home: profilesHome }); } catch { return; }
+    const card = (Array.isArray(listed?.hosts) ? listed.hosts : [])
+      .find((host) => host?.hostKey === record.id && Number.isInteger(host.pid) && host.pid !== record.pid);
+    if (!card) return;
+    adoptCard(record, card);
+  }
+
+  // The Host exited without being asked to. A Guest Host restarts itself and
+  // republishes its card under the same host key; wait for that card before
+  // settling on `exited`. The wait is abortable by stop and dispose.
+  function restart(record) {
+    const controller = new AbortController();
+    record.restartController = controller;
+    const task = (async () => {
+      const deadline = Date.now() + restartWaitMs;
+      try {
+        for (;;) {
+          if (controller.signal.aborted || disposed) return;
+          const card = await replacementCard(record).catch(() => null);
+          if (controller.signal.aborted || disposed) return;
+          if (card) {
+            if (adoptCard(record, card)) return;
+          }
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) break;
+          await sleep(Math.min(restartPollMs, remaining), controller.signal);
+        }
+      } catch {
+        // A discovery failure ends the wait; it must never surface as a crash.
+      }
+      if (controller.signal.aborted || disposed) return;
+      record.phase = 'exited';
+      notify(record);
+      pruneRecords();
+    })();
+    record.restartTask = task.catch(() => null);
+    // Announce only after the task is observable, so a listener that reacts to
+    // `restarting` can already wait on it.
+    record.phase = 'restarting';
+    notify(record);
+    return record.restartTask;
+  }
+
   function watch(record) {
     const finish = async (outcome) => {
       record.doneObserved = true;
       record.exit = publicExit(outcome);
       if (record.kind === 'tui') await record.outputTask?.catch(() => null);
+      // A running Web Host that disappears on its own may be restarting
+      // itself; only an explicit stop is final.
+      if (record.kind === 'web' && record.phase === 'running' && !disposed) {
+        await restart(record);
+        return;
+      }
       if (record.phase !== 'stopping' || record.exitCheckObserved) record.phase = 'exited';
       notify(record);
       pruneRecords();
     };
-    record.handle.done.then(finish, () => finish(null));
+    void record.handle.done.then(finish, () => finish(null)).catch(() => {});
   }
 
   async function terminateHandle(record) {
@@ -613,13 +744,23 @@ export function createLocalRuntimeService(options) {
 
   async function stopRecord(record) {
     if (record.stopPromise) return record.stopPromise;
+    // An adopted Host is not this process's child, and a restart wait has no
+    // process left to signal: both only end the Shell record.
+    const detachable = record.phase === 'restarting' || record.adopted === true;
     record.phase = 'stopping';
+    record.restartController?.abort();
     notify(record);
     record.stopPromise = (async () => {
       record.startController?.abort();
       await record.startPromise?.catch(() => null);
-      await terminateHandle(record);
-      if (!record.handle) record.phase = 'exited';
+      await record.restartTask?.catch(() => null);
+      if (detachable) {
+        record.handle = null;
+        record.phase = 'exited';
+      } else {
+        await terminateHandle(record);
+        if (!record.handle) record.phase = 'exited';
+      }
       notify(record);
       pruneRecords();
     })();
@@ -698,7 +839,7 @@ export function createLocalRuntimeService(options) {
       cwd: await verifiedCwd(),
       stdio: { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' },
       graceMs,
-      env: webEnvironment(profilesHome),
+      env: webEnvironment(profilesHome, record.id),
       signal,
     });
     watch(record);
@@ -706,6 +847,8 @@ export function createLocalRuntimeService(options) {
     const output = webUrl(record, signal);
     record.outputTask = output.drain;
     record.url = await output.ready;
+    record.port = portOf(record.url);
+    if (Number.isInteger(record.handle?.pid)) record.pid = record.handle.pid;
     return { runtimeId: record.id, url: record.url };
   }
 
@@ -748,10 +891,24 @@ export function createLocalRuntimeService(options) {
         if (record.phase === 'starting' && record.waiters.size === 0) record.startController?.abort();
       };
       let settled = false;
-      record.startPromise.then(
-        (value) => finish(() => resolve(value)),
-        (error) => finish(() => reject(error)),
-      );
+      // A Host that restarted itself answers with the replacement's URL, not
+      // the URL captured when the Shell spawned the dead process.
+      const settle = (value) => {
+        if (record.kind === 'web' && record.phase === 'exited') {
+          finish(() => reject(failure('RUNTIME_NOT_ACTIVE')));
+          return;
+        }
+        if (record.kind === 'web' && record.phase === 'running' && typeof record.url === 'string') {
+          finish(() => resolve({ runtimeId: record.id, url: record.url }));
+          return;
+        }
+        finish(() => resolve(value));
+      };
+      record.startPromise.then((value) => {
+        const pending = record.phase === 'restarting' ? record.restartTask : null;
+        if (pending) pending.catch(() => null).then(() => settle(value));
+        else settle(value);
+      }, (error) => finish(() => reject(error)));
       if (callerSignal?.aborted) cancel();
       else callerSignal?.addEventListener('abort', cancel, { once: true });
     });
@@ -790,6 +947,11 @@ export function createLocalRuntimeService(options) {
       termination: null,
       startController: new AbortController(),
       url: null,
+      pid: null,
+      port: null,
+      adopted: false,
+      restartController: null,
+      restartTask: null,
       exit: undefined,
       doneObserved: false,
       exitCheckObserved: false,
@@ -882,8 +1044,10 @@ export function createLocalRuntimeService(options) {
     const listed = await catalogProfiles();
     const profiles = listed.profiles;
     const warnings = listed.warnings;
+    for (const record of records.values()) await refreshAdopted(record);
+    const discovered = await discoveredRows();
     if (listed.missing) {
-      return { currentProfile: profileContext.name, defaultCwd: profileContext.cwd, profiles: [], currentHost: null, runtimes: publicRuntimes(ownerId), warnings };
+      return { currentProfile: profileContext.name, defaultCwd: profileContext.cwd, profiles: [], currentHost: null, runtimes: [...publicRuntimes(ownerId), ...discovered], warnings };
     }
     const current = profiles.find((profile) => profile.isCurrent) ?? null;
     let currentHost = null;
@@ -897,9 +1061,45 @@ export function createLocalRuntimeService(options) {
       defaultCwd: profileContext.cwd,
       profiles,
       currentHost,
-      runtimes: [...publicRuntimes(ownerId), ...stopped],
+      runtimes: [...publicRuntimes(ownerId), ...stopped, ...discovered],
       warnings,
     };
+  }
+
+  // Valid local cards that no active record owns. They can be attached and
+  // opened, never stopped or upgraded, and their authenticated URL stays
+  // private until `attachDiscovered`.
+  async function discoveredRows() {
+    let listed;
+    try {
+      listed = await hostDiscovery.listHostCards({ home: profilesHome });
+    } catch {
+      return [];
+    }
+    const hosts = Array.isArray(listed?.hosts) ? listed.hosts : [];
+    const active = new Set([...records.values()]
+      .filter((record) => ACTIVE_PHASES.has(record.phase))
+      .map((record) => record.id));
+    const rows = [];
+    for (const host of hosts) {
+      if (!host || typeof host.instanceId !== 'string' || typeof host.profileId !== 'string') continue;
+      // The Desktop profile is never a Guest Web Host. A card there can only
+      // come from an older build that mounted the Guest by mistake; it must not
+      // turn into a manageable row.
+      if (host.profileId === 'desktop') continue;
+      if (active.has(host.hostKey)) continue;
+      rows.push({
+        id: `${DISCOVERED_PREFIX}${host.instanceId}`,
+        kind: 'web',
+        profileId: host.profileId,
+        source: 'discovered',
+        phase: 'running',
+        owned: false,
+        canStop: false,
+        attachable: true,
+      });
+    }
+    return rows;
   }
 
   /**
@@ -942,7 +1142,9 @@ export function createLocalRuntimeService(options) {
         source: 'local',
         phase: record.phase,
         owned: true,
-        ...ownerId !== undefined ? { canStop: record.ownerId === ownerId && ACTIVE_PHASES.has(record.phase) } : {},
+        // An adopted Host is not this process's child: ending the record would
+        // forget a live Host rather than stop it.
+        ...ownerId !== undefined ? { canStop: record.ownerId === ownerId && record.adopted !== true && ACTIVE_PHASES.has(record.phase) } : {},
         ...record.exit ? { exit: record.exit } : {},
       };
       if (record.kind !== 'web') return { ...base, dshVersion: typeof record.dshVersion === 'string' ? record.dshVersion : null };
@@ -955,10 +1157,25 @@ export function createLocalRuntimeService(options) {
     openWeb({ profileId, ownerId, confirmIndependentHost, signal } = {}) {
       return start('web', profileId, ownerId, { confirmIndependentHost, signal });
     },
-    attachWeb({ runtimeId, ownerId } = {}) {
+    async attachWeb({ runtimeId, ownerId } = {}) {
       const record = runtimeById(runtimeId, ownerId, { active: true, kind: 'web' });
+      await refreshAdopted(record);
       if (typeof record.url !== 'string') throw failure('RUNTIME_NOT_ACTIVE');
       return { runtimeId: record.id, url: record.url };
+    },
+    async attachDiscovered({ instanceId, ownerId } = {}) {
+      if (typeof instanceId !== 'string' || !/^[a-f0-9]{32}$/u.test(instanceId)) throw failure('INVALID_INPUT');
+      identifier(ownerId, 'owner');
+      let listed;
+      try {
+        listed = await hostDiscovery.listHostCards({ home: profilesHome });
+      } catch {
+        listed = null;
+      }
+      const host = (Array.isArray(listed?.hosts) ? listed.hosts : [])
+        .find((item) => item?.instanceId === instanceId && typeof item.url === 'string');
+      if (!host) throw failure('RUNTIME_NOT_FOUND');
+      return { runtimeId: `${DISCOVERED_PREFIX}${host.instanceId}`, url: host.url };
     },
     openTui({ profileId, ownerId, cwd, cols, rows, confirmIndependentHost, command, signal } = {}) {
       const size = dimensions(cols, rows);

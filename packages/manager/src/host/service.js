@@ -1,14 +1,25 @@
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
+import { homedir } from 'node:os';
+import path from 'node:path';
 
 import { openRemoteHost, writeStatusPluginPatch } from './open-remote-host.js';
 import { openControllerSession } from './controller-session.js';
-import { buildPluginAlignmentPlan } from './plugin-alignment.js';
+import { buildPluginAlignmentPlan, planPluginSync, shareableLocalPluginNames } from './plugin-alignment.js';
 import { RemoteHostConnection } from './remote-host.js';
-import { syncRemote } from './remote-sync.js';
+import { syncRemote, syncRemoteSettings } from './remote-sync.js';
 import { buildSyncInput, buildSyncPreview, discoverCredentialRefs } from './sync-input.js';
-import { publicError } from './diagnostics.js';
+import { publicError, safeMessage } from './diagnostics.js';
 import { addPortForward, createRemoteDiagnosticReport, listPortForwards, removePortForward } from './service-extensions.js';
+import {
+  appendRemotePatch, planPatchSync, readLocalProfilePatch, readRemoteProfilePatch,
+} from './remote-config.js';
+import { resolveGuestInterpreter, startGuestHost, waitForProfileCard } from './guest-hosts.js';
+import {
+  filterLivePids, forwardedUrl, installRemotePlugin as installRemotePluginOverSsh, planDiscoveredSync, publicHost,
+  readRemoteHostCards, readRemoteProfileDependencies, respawnRemoteProcess,
+  terminateRemoteProcess, waitForReplacementCard,
+} from './remote-hosts.js';
 import { authenticationCallbacks, InteractionBroker, interactiveHostKeyVerifier } from './interactions.js';
 import { DEFAULT_PROFILE_ID, defaultProfiles, instanceRuntimeMatches, matchesProfile, normalizeInstanceList, normalizeProfileId, normalizeProfiles } from './profiles.js';
 import { createLatestVersionCache, isNewerVersion } from './registry.js';
@@ -32,6 +43,87 @@ const UNSAFE_SPEC_URL = /[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s/]+@|[?&](?:access_?tok
 
 function error(code, message, details) {
   return new SshRemoteError(code, message, { details });
+}
+
+const FAILED_APPLICATIONS = new Set(['failed', 'cancelled']);
+
+const SOURCE_INSTALL = /^(?:github:|git:|git\+|file:|link:|https?:\/\/)/iu;
+const CONFIG_SECRET_KEY = /(?:key|token|secret|password|passphrase|credential|authorization|cookie)/iu;
+const CONFIG_LOCAL_PATH = /^(?:\/|~[\\/]|[A-Za-z]:[\\/]|file:|link:)/iu;
+const MAX_CONFIG_ENTRIES = 32;
+const MAX_CONFIG_DEPTH = 6;
+const MAX_CONFIG_KEYS = 64;
+const MAX_CONFIG_ARRAY = 64;
+const MAX_CONFIG_STRING = 2048;
+
+/** The package a config entry belongs to: `@scope/pkg/sub` -> `@scope/pkg`. */
+function pluginOfModuleName(name) {
+  if (typeof name !== 'string' || name.length === 0) return null;
+  if (name.startsWith('@')) {
+    const parts = name.split('/');
+    return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : name;
+  }
+  return name.split('/')[0];
+}
+
+/** Drops secrets and machine-local values before a config block leaves the host. */
+function configValue(value, depth = 0) {
+  if (depth > MAX_CONFIG_DEPTH) return undefined;
+  if (typeof value === 'string') {
+    if (value.length > MAX_CONFIG_STRING) return undefined;
+    return CONFIG_LOCAL_PATH.test(value.trim()) ? undefined : value;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') return value;
+  if (Array.isArray(value)) {
+    return value.slice(0, MAX_CONFIG_ARRAY).map((item) => configValue(item, depth + 1)).filter((item) => item !== undefined);
+  }
+  if (value === null || typeof value !== 'object') return undefined;
+  const result = {};
+  for (const [key, item] of Object.entries(value).slice(0, MAX_CONFIG_KEYS)) {
+    if (CONFIG_SECRET_KEY.test(key)) continue;
+    const cleaned = configValue(item, depth + 1);
+    if (cleaned !== undefined) result[key] = cleaned;
+  }
+  return result;
+}
+
+/** The install spec a remote bundle was installed from, if it reports one. */
+function bundleInstallSource(bundle) {
+  if (typeof bundle?.source === 'string' && bundle.source) return bundle.source;
+  if (typeof bundle?.spec === 'string' && bundle.spec) return bundle.spec;
+  return null;
+}
+
+function remoteInstallFailed(value) {
+  return value?.ok === false || FAILED_APPLICATIONS.has(value?.result?.application);
+}
+
+/**
+ * Installs one plugin on the remote Host and returns the raw response.
+ *
+ * DSH installs the package before it re-enables the plugin row. When the
+ * previous version was removed in the same operation, the first enable can
+ * still resolve the removed bundle and report `application: 'failed'` at stage
+ * `enable` — the package is already on disk by then. One more install of the
+ * same spec re-runs enable against the new package and succeeds, so that case
+ * is retried once. Install-stage failures and pending build approvals are real
+ * verdicts and are returned as they are.
+ */
+async function installRemotePlugin(getClient, { spec, approvedBuilds = null, retryEnableFailure = true }) {
+  // The client is resolved per request: a plugin action can apply through HMR
+  // and replace the connection between the failed attempt and the retry.
+  const request = () => {
+    const client = getClient();
+    if (!client) throw error('UPGRADE_RUNTIME_UNAVAILABLE', 'The remote Host is no longer connected.');
+    return client.post('/api/ssh-remote/plugins/install', {
+      spec,
+      requestId: randomUUID(),
+      ...Array.isArray(approvedBuilds) && approvedBuilds.length > 0 ? { approvedBuilds: approvedBuilds.slice(0, 16) } : {},
+    });
+  };
+  const response = await request();
+  if (!retryEnableFailure || !remoteInstallFailed(response) || response?.result?.stage !== 'enable') return response;
+  return request();
 }
 
 function cleanLocalReturnUrl(value) {
@@ -217,6 +309,7 @@ export class HostSession extends EventEmitter {
     this.alias = options.alias;
     this.channel = null;
     this.controller = null;
+    this.transportMode = 'controller';
     this.installed = null;
     this.artifact = null;
     this.target = null;
@@ -233,7 +326,8 @@ export class HostSession extends EventEmitter {
   }
 
   get connected() {
-    return Boolean(this.channel && !this.channel.closed && this.controller);
+    // Guest transport has no controller: the SSH channel is the whole transport.
+    return Boolean(this.channel && !this.channel.closed && (this.controller || this.transportMode === 'guest'));
   }
 
   get busy() {
@@ -243,7 +337,8 @@ export class HostSession extends EventEmitter {
   attachTransport(session) {
     const previous = this.channel;
     this.channel = session.channel;
-    this.controller = session.controller;
+    this.controller = session.controller ?? null;
+    this.transportMode = session.transportMode ?? (session.controller ? 'controller' : 'guest');
     this.installed = session.installed;
     this.artifact = session.artifact;
     this.target = session.target;
@@ -290,6 +385,23 @@ export class SshRemoteService extends EventEmitter {
     this.settings = options.settings;
     this.credentials = options.credentials;
     this.localBundles = options.localBundles ?? (async () => []);
+    // Guest transport only: the remote machine's own dsh over plain SSH.
+    this.transport = 'guest';
+    this.openGuestChannel = options.openGuestChannel ?? (async (options2) => {
+      const module = await import('./ssh/connection.js');
+      const channel = options2.channel ?? await module.connectSsh(options2.alias, {
+        signal: options2.signal,
+        interactive: options2.interactive,
+        background: options2.background,
+        authCallbacks: options2.authCallbacks,
+        hostKeyVerifier: options2.hostKeyVerifier,
+      });
+      return { channel, controller: null, installed: null, artifact: null, target: null, transportMode: 'guest' };
+    });
+    // The profile on this machine that a foreign Host of the same name should
+    // match. Falls back to the standard DSH home.
+    this.localHome = options.localHome ?? (() => process.env.DSH_HOME ?? path.join(homedir(), '.dsh'));
+    this.configEditor = options.configEditor ?? null;
     this.listConfiguredSshHosts = options.listConfiguredSshHosts ?? (async (input) => {
       const module = await import('./ssh/hosts.js');
       return module.listConfiguredSshHosts(input);
@@ -594,6 +706,20 @@ export class SshRemoteService extends EventEmitter {
     const record = this.store.require(hostId);
     const session = this.session(hostId);
     const runtime = this.runtime(hostId);
+    if (this.transport === 'guest') {
+      if (session.connected) await this.refreshGuestProfiles(session);
+      const hosts = await this.guestProfileHosts(hostId);
+      return {
+        ok: true,
+        profiles: session.profiles?.length ? session.profiles : defaultProfiles(),
+        profilesSource: session.profiles?.length ? 'remote' : 'default',
+        connected: session.connected,
+        hosts,
+        latestDshVersion: null,
+        upgrade: null,
+        hostAlias: record.hostAlias,
+      };
+    }
     if (session.connected) await this.refreshProfiles(session);
     await this.refreshLatestDshVersion(runtime);
     this.prepareUpgradeReport(runtime);
@@ -611,8 +737,64 @@ export class SshRemoteService extends EventEmitter {
     };
   }
 
+  /** Turns one live card into an attachable Host through a loopback forward. */
+  async adoptGuestHost(hostId, card, { signal } = {}) {
+    const existing = listPortForwards(this, hostId)
+      .find((forward) => forward.state === 'active' && forward.remotePort === card.port && forward.remoteHost === '127.0.0.1');
+    const forward = existing ?? await addPortForward(this, hostId, {
+      name: `guest-${card.instanceId.slice(0, 8)}`,
+      remotePort: card.port,
+    });
+    if (!forward || !Number.isInteger(forward.localPort) || forward.localPort < 1) {
+      throw error('TUNNEL_FAILED', 'The port forward did not become active.');
+    }
+    return {
+      ok: true,
+      guest: true,
+      instanceId: card.instanceId,
+      profileId: card.profileId,
+      profileName: card.profileId,
+      state: 'running',
+      url: forwardedUrl(card.url, forward.localPort),
+    };
+  }
+
+  /**
+   * The guest path for opening a profile: adopt a Host that already reports
+   * itself, or start one with the remote machine's own `dsh`. Returns null when
+   * this Host cannot be served this way (no channel, no dsh, version mismatch),
+   * which keeps the controller path as the fallback until it is removed.
+   */
+  async guestProfileHost(hostId, profileId, { signal, reuseOnly = false } = {}) {
+    const runtime = this.runtime(hostId);
+    if (!runtime.channel || runtime.channel.closed) return null;
+    const { hosts } = await readRemoteHostCards(runtime.channel, { signal }).catch(() => ({ hosts: [] }));
+    const candidates = hosts.filter((card) => card.profileId === profileId && card.supervised !== true);
+    if (candidates.length) {
+      const alive = await filterLivePids(runtime.channel, candidates.map((card) => card.pid), { signal });
+      const live = candidates.filter((card) => alive.has(card.pid))
+        .sort((left, right) => Date.parse(right.startedAt) - Date.parse(left.startedAt))[0];
+      if (live) return this.adoptGuestHost(hostId, live, { signal });
+    }
+    if (reuseOnly) return null;
+    const interpreter = await resolveGuestInterpreter(runtime.channel, { profileId, signal }).catch(() => null);
+    if (!interpreter?.version) return null;
+    let local = null;
+    try { local = await this.localVersion(); } catch { local = null; }
+    // A version we cannot vouch for is refused here; the controller fallback
+    // can still pin its own runtime for hosts that need one.
+    if (typeof local === 'string' && local && interpreter.version !== local) return null;
+    const workspace = (() => {
+      try { return runtime.session?.installed?.home ?? null; } catch { return null; }
+    })();
+    await startGuestHost(runtime.channel, { interpreter, profileId, workspace: workspace ?? '/tmp' }, { signal });
+    const card = await waitForProfileCard(runtime.channel, { profileId }, { signal });
+    if (!card) throw error('REMOTE_HOST_START_FAILED', 'The Host did not report itself after starting.');
+    return this.adoptGuestHost(hostId, card, { signal });
+  }
+
   /** Opens or reuses the single healthy Host of one Web profile. */
-  webOpen(hostId, { profileId = DEFAULT_PROFILE_ID, profileName, signal, reuseOnly = false } = {}) {
+  async webOpen(hostId, { profileId = DEFAULT_PROFILE_ID, profileName, signal, reuseOnly = false } = {}) {
     const id = normalizeProfileId(profileId);
     this.store.require(hostId);
     if (this.closed) return Promise.reject(error('SERVICE_DISPOSED', 'The SSH Remote service is disposed.'));
@@ -623,6 +805,24 @@ export class SshRemoteService extends EventEmitter {
     }
     const runtime = this.profileRuntime(hostId, id, profileName ?? known?.name);
     if (runtime.phase === 'stopping') return Promise.reject(error('HOST_BUSY', 'The Web Host is stopping.'));
+    // Guest path: the Host reports itself; we adopt it instead of starting a
+    // second, controller-managed one.
+    // The channel lives on the Host runtime, not on the per-profile record.
+    const hostRuntime = this.runtime(hostId);
+    if (hostRuntime.channel && !hostRuntime.channel.closed && !runtime.start) {
+      // Only a "cannot serve this way" answer falls back; a real failure (the
+      // Host did not come back) is reported instead of being papered over.
+      const guest = await this.guestProfileHost(hostId, id, { signal, reuseOnly });
+      if (guest) return guest;
+    }
+    if (this.transport === 'guest') {
+      throw error('REMOTE_HOST_START_FAILED', 'No remote dsh was found to start this Web Host (guest transport).', { profileId: id });
+    }
+    return this.openViaController(hostId, id, runtime, { signal, reuseOnly });
+  }
+
+  /** The controller-managed start path, kept as the fallback until it is removed. */
+  openViaController(hostId, id, runtime, { signal, reuseOnly = false } = {}) {
     if (runtime.start) return runtime.start.join(signal);
     if (runtime.host && !runtime.host.closed && runtime.phase === 'running') {
       return Promise.resolve(this.publicWebHost(runtime));
@@ -637,6 +837,182 @@ export class SshRemoteService extends EventEmitter {
   }
 
   /** Returns the private Guest URL only for a Host this manager already holds. */
+  /**
+   * Hosts on the remote machine that were not started by this manager. The
+   * cards are read over SSH; only validated ones are returned, and never with
+   * their authenticated URL.
+   */
+  async discoveredHosts(hostId, { signal } = {}) {
+    this.store.require(hostId);
+    const runtime = this.runtime(hostId);
+    if (!runtime.channel || runtime.channel.closed) {
+      throw error('HOST_NOT_CONNECTED', 'The SSH host is not connected.');
+    }
+    const { hosts, skipped } = await readRemoteHostCards(runtime.channel, { signal });
+    // Controller-started Hosts write cards too, and a card outlives its process
+    // when the Host is killed. Neither belongs in "other hosts": the first is
+    // already a row of its own, the second is not running at all.
+    const managed = new Set(this.profileHosts(hostId).map((host) => host.instanceId).filter(Boolean));
+    const candidates = hosts.filter((card) => card.supervised !== true && !managed.has(card.instanceId));
+    const alive = await filterLivePids(runtime.channel, candidates.map((card) => card.pid), { signal });
+    return {
+      ok: true,
+      hosts: candidates.filter((card) => alive.has(card.pid)).map(publicHost),
+      skipped: [...skipped, ...hosts.filter((card) => card.supervised === true).map((card) => ({ instanceId: card.instanceId, code: 'HOST_CARD_SUPERVISED' }))],
+    };
+  }
+
+  /** Shared guard: the card must exist, be alive, and not be controller-managed. */
+  async requireDiscoveredCard(hostId, instanceId, signal) {
+    const runtime = this.runtime(hostId);
+    if (!runtime.channel || runtime.channel.closed) {
+      throw error('HOST_NOT_CONNECTED', 'The SSH host is not connected.');
+    }
+    if (typeof instanceId !== 'string' || !/^[a-f0-9]{32}$/u.test(instanceId)) {
+      throw error('INVALID_REQUEST', 'instanceId is required.');
+    }
+    const { hosts } = await readRemoteHostCards(runtime.channel, { signal });
+    const card = hosts.find((host) => host.instanceId === instanceId);
+    if (!card || card.supervised === true) {
+      throw error('REMOTE_INSTANCE_UNAVAILABLE', 'The discovered Host is no longer available.');
+    }
+    const alive = await filterLivePids(runtime.channel, [card.pid], { signal });
+    if (!alive.has(card.pid)) throw error('REMOTE_INSTANCE_UNAVAILABLE', 'The discovered Host is no longer running.');
+    return { runtime, card };
+  }
+
+  /** Stops a reported Host by signalling its process after the card check. */
+  async stopDiscovered(hostId, { instanceId, signal } = {}) {
+    this.store.require(hostId);
+    const { runtime, card } = await this.requireDiscoveredCard(hostId, instanceId, signal);
+    const stopped = await terminateRemoteProcess(runtime.channel, card.pid, { signal });
+    if (!stopped) throw error('REMOTE_OPERATION_FAILED', 'The discovered Host did not stop.');
+    return { ok: true, instanceId: card.instanceId, profileId: card.profileId, stopped: true };
+  }
+
+  /**
+   * Restarts a reported Host with its own command line. The card carries argv
+   * and cwd, so the replacement is exactly what the user started — no guessed
+   * runtime, no controller involvement.
+   */
+  async restartDiscovered(hostId, { instanceId, signal } = {}) {
+    this.store.require(hostId);
+    const { runtime, card } = await this.requireDiscoveredCard(hostId, instanceId, signal);
+    return this.restartDiscoveredCard(runtime, card, { signal });
+  }
+
+  /** Stops and replays one already-validated card. */
+  async restartDiscoveredCard(runtime, card, { signal } = {}) {
+    const stopped = await terminateRemoteProcess(runtime.channel, card.pid, { signal });
+    if (!stopped) throw error('REMOTE_OPERATION_FAILED', 'The discovered Host did not stop.');
+    const spawned = await respawnRemoteProcess(runtime.channel, { argv: card.argv, cwd: card.cwd }, { signal });
+    if (!spawned) throw error('REMOTE_OPERATION_FAILED', 'The discovered Host command could not be started.');
+    const replacement = await waitForReplacementCard(runtime.channel, {
+      hostKey: card.hostKey, profileId: card.profileId, previousInstanceId: card.instanceId,
+    }, { signal });
+    if (!replacement) throw error('REMOTE_OPERATION_FAILED', 'The discovered Host did not come back.');
+    return {
+      ok: true,
+      instanceId: replacement.instanceId,
+      previousInstanceId: card.instanceId,
+      profileId: replacement.profileId,
+      pid: replacement.pid,
+      port: replacement.port,
+    };
+  }
+
+  /**
+   * Brings a reported Host's profile in line with this machine using the remote
+   * `dsh` the Host was started with — no bundled runtime, no controller.
+   * Only missing plugins and genuine upgrades are installed; a newer remote
+   * plugin, a local path spec, and Desktop-only packages are left alone.
+   */
+  async syncDiscovered(hostId, { instanceId, signal } = {}) {
+    this.store.require(hostId);
+    const { runtime, card } = await this.requireDiscoveredCard(hostId, instanceId, signal);
+    const remoteDependencies = await readRemoteProfileDependencies(runtime.channel, card.profileId, { signal });
+    const localBundles = await this.localBundles().catch(() => []);
+    const plan = planDiscoveredSync({ localBundles, remoteDependencies });
+    const items = [];
+    for (const entry of plan.install) {
+      const result = await installRemotePluginOverSsh(runtime.channel, {
+        argv: card.argv, profileId: card.profileId, spec: entry.spec,
+      }, { signal }).catch((cause) => ({ ok: false, code: null, detail: safeMessage(cause) }));
+      items.push({ name: entry.name, spec: entry.spec, reason: entry.reason, ok: result.ok, detail: result.detail || '' });
+    }
+    // Configuration: append what the same-name local profile declares and the
+    // remote lacks. Existing remote entries are never rewritten.
+    let config = { appended: [], backup: null, error: null };
+    try {
+      const home = this.localHome() ?? process.env.DSH_HOME ?? path.join(homedir(), '.dsh');
+      const localText = await readLocalProfilePatch(home, card.profileId).catch(() => '');
+      const remoteText = await readRemoteProfilePatch(runtime.channel, card.profileId, { signal });
+      const plan = planPatchSync({ localText, remoteText });
+      config = { appended: [], skipped: plan.skipped, backup: null, error: null };
+      if (plan.append.length) {
+        const applied = await appendRemotePatch(runtime.channel, {
+          argv: card.argv, profileId: card.profileId, remoteText, entries: plan.append, signal,
+        });
+        config = { ...config, ...applied, skipped: plan.skipped };
+      }
+    } catch (cause) {
+      config = { appended: [], backup: null, error: safeMessage(cause) };
+    }
+    const changed = items.some((item) => item.ok) || config.appended.length > 0;
+    let restarted = null;
+    if (changed) restarted = await this.restartDiscoveredCard(runtime, card, { signal }).catch(() => null);
+    return {
+      ok: true,
+      profileId: card.profileId,
+      items,
+      skipped: plan.skipped,
+      config,
+      restarted: restarted ? { instanceId: restarted.instanceId, pid: restarted.pid, port: restarted.port } : null,
+      changed,
+    };
+  }
+
+  /**
+   * Opens one discovered Host through a loopback forward: the card's URL is
+   * rewritten onto the local port so the page keeps its token and its origin
+   * shape. Repeated attaches reuse an existing forward for the same port.
+   */
+  async attachDiscovered(hostId, { instanceId, signal } = {}) {
+    this.store.require(hostId);
+    const runtime = this.runtime(hostId);
+    if (!runtime.channel || runtime.channel.closed) {
+      throw error('HOST_NOT_CONNECTED', 'The SSH host is not connected.');
+    }
+    if (typeof instanceId !== 'string' || !/^[a-f0-9]{32}$/u.test(instanceId)) {
+      throw error('INVALID_REQUEST', 'instanceId is required.');
+    }
+    const { hosts } = await readRemoteHostCards(runtime.channel, { signal });
+    const card = hosts.find((host) => host.instanceId === instanceId);
+    if (!card || card.supervised === true) throw error('REMOTE_INSTANCE_UNAVAILABLE', 'The discovered Host is no longer running.');
+    const alive = await filterLivePids(runtime.channel, [card.pid], { signal });
+    if (!alive.has(card.pid)) throw error('REMOTE_INSTANCE_UNAVAILABLE', 'The discovered Host is no longer running.');
+    // A managed instance already has an attach path; do not shadow it.
+    if (this.profileHosts(hostId).some((host) => host.instanceId === instanceId)) {
+      throw error('REMOTE_INSTANCE_UNAVAILABLE', 'That Host is managed by this connection; attach it through its row.');
+    }
+    const existing = listPortForwards(this, hostId)
+      .find((forward) => forward.state === 'active' && forward.remotePort === card.port && forward.remoteHost === '127.0.0.1');
+    const forward = existing ?? await addPortForward(this, hostId, {
+      name: `workspace-host-${instanceId.slice(0, 8)}`,
+      remotePort: card.port,
+    });
+    if (!forward || !Number.isInteger(forward.localPort) || forward.localPort < 1) {
+      throw error('TUNNEL_FAILED', 'The port forward did not become active.');
+    }
+    return {
+      ok: true,
+      instanceId: card.instanceId,
+      profileId: card.profileId,
+      url: forwardedUrl(card.url, forward.localPort),
+      forwardId: forward.id,
+    };
+  }
+
   async webAttach(hostId, { instanceId } = {}) {
     this.store.require(hostId);
     if (typeof instanceId !== 'string' || instanceId.length === 0) {
@@ -645,6 +1021,19 @@ export class SshRemoteService extends EventEmitter {
     const runtime = this.profileRuntimeByInstance(hostId, instanceId);
     if (runtime?.host && !runtime.host.closed && runtime.phase === 'running') {
       return this.publicWebHost(runtime);
+    }
+    // A Host started through the guest path has no controller runtime; its card
+    // is the only record, and a forward is all it needs to be attached again.
+    if (!runtime) {
+      const source = this.runtime(hostId);
+      if (source.channel && !source.channel.closed) {
+        const { hosts } = await readRemoteHostCards(source.channel, {}).catch(() => ({ hosts: [] }));
+        const card = hosts.find((item) => item.instanceId === instanceId && item.supervised !== true);
+        if (card) {
+          const alive = await filterLivePids(source.channel, [card.pid], {});
+          if (alive.has(card.pid)) return this.adoptGuestHost(hostId, card, {});
+        }
+      }
     }
     const known = runtime?.profileId ?? null;
     const adoptable = known
@@ -836,15 +1225,29 @@ export class SshRemoteService extends EventEmitter {
   }
 
   /** Stops one profile Host; other profile Hosts of the same SSH connection stay up. */
+  /** Stops a guest-started Host by signalling the process behind its card. */
+  async stopGuestHost(hostId, instanceId) {
+    const source = this.runtime(hostId);
+    if (source.channel && !source.channel.closed) {
+      const { hosts } = await readRemoteHostCards(source.channel, {}).catch(() => ({ hosts: [] }));
+      const card = hosts.find((item) => item.instanceId === instanceId && item.supervised !== true);
+      if (card) {
+        const stopped = await terminateRemoteProcess(source.channel, card.pid, {});
+        if (!stopped) throw error('REMOTE_OPERATION_FAILED', 'The Host did not stop.');
+        return { ok: true, instanceId: card.instanceId, profileId: card.profileId, stopped: true };
+      }
+    }
+    throw error('REMOTE_INSTANCE_UNAVAILABLE', 'The requested Web Host is not managed by this manager.', { instanceId });
+  }
+
   webStop(hostId, { instanceId } = {}) {
     this.store.require(hostId);
     if (typeof instanceId !== 'string' || instanceId.length === 0) {
       return Promise.reject(error('INVALID_REQUEST', 'instanceId is required.'));
     }
     const runtime = this.profileRuntimeByInstance(hostId, instanceId);
-    if (!runtime) {
-      return Promise.reject(error('REMOTE_INSTANCE_UNAVAILABLE', 'The requested Web Host is not managed by this manager.', { instanceId }));
-    }
+    // Guest-started Hosts have no controller runtime; their card is the record.
+    if (!runtime) return this.stopGuestHost(hostId, instanceId);
     if (runtime.stopPromise) return runtime.stopPromise;
     if (runtime.phase === 'starting') return Promise.reject(error('HOST_BUSY', 'The Web Host is still starting.'));
     runtime.phase = 'stopping';
@@ -890,6 +1293,9 @@ export class SshRemoteService extends EventEmitter {
    */
   async upgradeHost({ hostId, profileId } = {}) {
     const record = this.store.require(hostId);
+    if (this.transport === 'guest') {
+      throw error('UPGRADE_RUNTIME_UNAVAILABLE', 'Guest transport has no bundled runtime; use plugin sync on the Host instead.');
+    }
     if (this.closed) throw error('SERVICE_DISPOSED', 'The SSH Remote service is disposed.');
     const id = normalizeProfileId(profileId ?? DEFAULT_PROFILE_ID);
     const runtime = this.runtime(hostId);
@@ -1040,7 +1446,8 @@ export class SshRemoteService extends EventEmitter {
         .map((entry) => ({ name: entry.name, builds: entry.pendingBuilds.slice(0, 8) }))
         .slice(0, 16);
       const failed = report.items.find((item) => item.ok !== true);
-      const errorCode = failed?.error?.code ?? report.error?.code ?? null;
+      const errorCode = failed?.error?.code ?? report.error?.code
+        ?? (report.config?.ok === false ? 'UPGRADE_CONFIG_FAILED' : null);
       runtime.upgrade = {
         phase: errorCode ? 'failed' : 'done',
         step: 'plugins',
@@ -1089,6 +1496,10 @@ export class SshRemoteService extends EventEmitter {
     for (const bundle of bundles.slice(0, MAX_UPGRADE_PLUGINS)) {
       const name = registryUpgradeName(bundle);
       if (!name) continue;
+      // A git/file install reports no spec, but its source names the origin.
+      // Those bundles are synced by their exact spec, never by npm latest.
+      const installSource = bundleInstallSource(bundle);
+      if (installSource && SOURCE_INSTALL.test(installSource)) continue;
       const fromVersion = typeof bundle.version === 'string' ? bundle.version : null;
       let latest = null;
       try {
@@ -1098,7 +1509,17 @@ export class SshRemoteService extends EventEmitter {
       }
       if (typeof latest !== 'string' || latest.length === 0) continue;
       if (fromVersion && !isNewerVersion(latest, fromVersion)) continue;
-      plan.push({ name, fromVersion, toVersion: latest });
+      plan.push({ kind: 'npm', name, fromVersion, toVersion: latest });
+    }
+    // Local plugins the remote profile does not have yet, or has at an older
+    // version. Only registry and public source installs qualify; link:, file:
+    // and tarball installs stay on this machine.
+    const localBundles = await this.localBundles().catch(() => []);
+    if (Array.isArray(localBundles) && localBundles.length > 0) {
+      const sync = planPluginSync({ localBundles, remoteBundles: bundles });
+      for (const operation of sync.operations.slice(0, MAX_UPGRADE_PLUGINS)) {
+        plan.push({ kind: 'sync', ...operation });
+      }
     }
     return plan;
   }
@@ -1121,6 +1542,133 @@ export class SshRemoteService extends EventEmitter {
     }
   }
 
+  /** Shareable local plugins that the remote profile has installed too. */
+  async sharedPluginNames(profileRuntime) {
+    const localBundles = await this.localBundles().catch(() => []);
+    const local = shareableLocalPluginNames(localBundles);
+    if (local.size === 0) return local;
+    const listed = await profileRuntime.host?.client?.post('/api/ssh-remote/plugins/list', {}).catch(() => null);
+    const remote = new Set(
+      (Array.isArray(listed?.bundles) ? listed.bundles : [])
+        .filter((bundle) => bundle?.installed === true && typeof bundle.name === 'string')
+        .map((bundle) => bundle.name),
+    );
+    return new Set([...local].filter((name) => remote.has(name)));
+  }
+
+  /** Config blocks of the given plugins, read from the local profile. */
+  async collectPluginConfigEntries(names) {
+    let editor = this.configEditor;
+    if (typeof editor === 'function') {
+      try {
+        editor = editor();
+      } catch {
+        editor = null;
+      }
+    }
+    if (!editor || typeof editor.configuration !== 'function' || names.size === 0) return [];
+    let rows;
+    try {
+      rows = editor.configuration();
+    } catch {
+      return [];
+    }
+    if (!Array.isArray(rows)) return [];
+    const entries = [];
+    for (const row of rows) {
+      const options = row?.entry?.options ?? row?.entry ?? {};
+      const id = typeof options.id === 'string' ? options.id : null;
+      const name = typeof options.name === 'string' ? options.name : null;
+      if (!name || !names.has(pluginOfModuleName(name))) continue;
+      const config = configValue(row?.override);
+      if (!config || Object.keys(config).length === 0) continue;
+      entries.push({ ...(id ? { id } : {}), name, config });
+      if (entries.length >= MAX_CONFIG_ENTRIES) break;
+    }
+    return entries;
+  }
+
+  /** Settings namespaces that belong to the given plugins. */
+  async pluginSettings(names, hostId) {
+    if (names.size === 0) return [];
+    const record = this.store.require(hostId);
+    const bundles = await this.localBundles().catch(() => []);
+    const input = await buildSyncInput(record, {
+      descriptors: this.settings.describe({ redactSecrets: true }),
+      resolveCredential: async () => null,
+      describeCredential: (ref) => this.credentials.describe?.(ref),
+      includeCredentialValues: false,
+      bundles,
+    });
+    return (Array.isArray(input.settings) ? input.settings : [])
+      .filter((setting) => names.has(pluginOfModuleName(setting.ns)))
+      .slice(0, MAX_CONFIG_ENTRIES);
+  }
+
+  /**
+   * Pushes the configuration of the plugins this upgrade touched: their config
+   * entries and their settings namespaces. Only plugins in `names` are sent, so
+   * unrelated local configuration never reaches the remote profile.
+   */
+  async syncPluginConfig(runtime, profileRuntime, { names } = {}) {
+    const client = profileRuntime.host?.client;
+    if (!client || !(names instanceof Set) || names.size === 0) return null;
+    const report = { ok: true };
+    try {
+      const entries = await this.collectPluginConfigEntries(names);
+      if (entries.length > 0) {
+        const result = await client.post('/api/ssh-remote/plugins/config', { entries });
+        report.entries = Array.isArray(result?.items)
+          ? { ok: result.ok === true, items: result.items, restartRequired: result?.restartRequired === true }
+          : { ok: true, items: [] };
+        if (result && result.ok === false && Array.isArray(result.items)) report.ok = true; // per-entry misses are not a failed sync
+      }
+    } catch (cause) {
+      report.entries = { ok: false, error: publicError(cause) };
+      report.ok = false;
+    }
+    try {
+      const settings = await this.pluginSettings(names, runtime.hostId);
+      if (settings.length > 0) {
+        const result = await syncRemoteSettings(client, settings);
+        report.settings = { ok: result.ok, items: result.items };
+        if (!result.ok) report.ok = false;
+      }
+    } catch (cause) {
+      report.settings = { ok: false, error: publicError(cause) };
+      report.ok = false;
+    }
+    return report;
+  }
+
+  /**
+   * Installs one planned plugin on the remote profile. A plugin that replaces
+   * an existing version is removed first; the old version is restored when the
+   * replacement fails, so the profile is never left without the plugin.
+   */
+  async installRemotePluginPlan(profileRuntime, { name, spec, fromVersion, fromSpec = null, approvedBuilds = null }) {
+    const client = () => profileRuntime.host?.client;
+    if (!client()) throw error('UPGRADE_RUNTIME_UNAVAILABLE', 'The remote Host is no longer connected.');
+    if (!fromVersion && !fromSpec) return installRemotePlugin(client, { spec, approvedBuilds });
+    const restored = fromSpec ?? `${name}@${fromVersion}`;
+    const removed = await client().post('/api/ssh-remote/plugins/remove', { name });
+    if (removed?.ok === false) throw error('UPGRADE_PLUGIN_FAILED', 'The remote plugin could not be replaced.');
+    const restore = () => installRemotePlugin(client, { spec: restored, approvedBuilds, retryEnableFailure: false }).catch(() => {});
+    let response;
+    try {
+      response = await installRemotePlugin(client, { spec, approvedBuilds });
+    } catch (cause) {
+      // A transport failure leaves the profile without the plugin just as a
+      // rejected application does; put the previous version back either way.
+      await restore();
+      throw cause;
+    }
+    if (!remoteInstallFailed(response)) return response;
+    // Roll back to the exact spec that was installed before, including a git pin.
+    await restore();
+    return response;
+  }
+
   async upgradeRemotePlugins(runtime, { profileId, approvedBuildsByPlugin = null, signal = new AbortController().signal } = {}) {
     const profileRuntime = this.profileRuntime(runtime.hostId, profileId);
     const initial = profileRuntime.host && !profileRuntime.host.closed ? profileRuntime.host : null;
@@ -1129,10 +1677,19 @@ export class SshRemoteService extends EventEmitter {
     const bundles = Array.isArray(listed?.bundles) ? listed.bundles : [];
     const items = [];
     let restartRequired = false;
+    // Resolve every npm latest first: a bundle installed from a git or file
+    // source reports no spec, so it looks like a plain registry install until
+    // npm has no dist-tag for it. When nothing resolves at all the registry is
+    // unreachable and that is a real failure; when only some do, the misses are
+    // non-npm installs and are left untouched.
+    const candidates = [];
     for (const bundle of bundles.slice(0, MAX_UPGRADE_PLUGINS)) {
-      signal.throwIfAborted();
       const name = registryUpgradeName(bundle);
       if (!name) continue;
+      // A git/file install reports no spec, but its source names the origin.
+      // Those bundles are synced by their exact spec, never by npm latest.
+      const installSource = bundleInstallSource(bundle);
+      if (installSource && SOURCE_INSTALL.test(installSource)) continue;
       const fromVersion = typeof bundle.version === 'string' ? bundle.version : null;
       let latest = null;
       try {
@@ -1140,8 +1697,15 @@ export class SshRemoteService extends EventEmitter {
       } catch {
         latest = null;
       }
-      if (typeof latest !== 'string' || latest.length === 0) {
-        items.push({ name, fromVersion, toVersion: null, ok: false, error: { code: 'UPGRADE_REGISTRY_UNAVAILABLE' } });
+      candidates.push({ name, fromVersion, latest: typeof latest === 'string' && latest.length > 0 ? latest : null });
+    }
+    const npmReachable = candidates.some((entry) => entry.latest !== null);
+    for (const { name, fromVersion, latest } of candidates) {
+      signal.throwIfAborted();
+      if (latest === null) {
+        if (!npmReachable) {
+          items.push({ name, fromVersion, toVersion: null, ok: false, error: { code: 'UPGRADE_REGISTRY_UNAVAILABLE' } });
+        }
         continue;
       }
       if (fromVersion && !isNewerVersion(latest, fromVersion)) continue;
@@ -1150,10 +1714,10 @@ export class SshRemoteService extends EventEmitter {
         const client = profileRuntime.host?.client;
         if (!client) throw error('UPGRADE_RUNTIME_UNAVAILABLE', 'The remote Host is no longer connected.');
         const approved = approvedBuildsByPlugin instanceof Map ? approvedBuildsByPlugin.get(name) : null;
-        const installAt = (version) => client.post('/api/ssh-remote/plugins/install', {
+        const installAt = (version, options = {}) => installRemotePlugin(() => profileRuntime.host?.client, {
           spec: `${name}@${version}`,
-          requestId: randomUUID(),
-          ...Array.isArray(approved) && approved.length > 0 ? { approvedBuilds: approved.slice(0, 16) } : {},
+          approvedBuilds: approved,
+          ...options,
         });
         let response;
         if (fromVersion) {
@@ -1171,7 +1735,9 @@ export class SshRemoteService extends EventEmitter {
             failure = cause;
           }
           if (failure) {
-            await installAt(fromVersion).catch(() => {});
+            // The rollback is a single attempt: the target version already
+            // failed its enable, so retrying it is not a fresh verdict.
+            await installAt(fromVersion, { retryEnableFailure: false }).catch(() => {});
             if (failure instanceof Error) throw failure;
           }
         } else {
@@ -1205,6 +1771,56 @@ export class SshRemoteService extends EventEmitter {
         items.push({ ...item, error: { code: 'UPGRADE_PLUGIN_FAILED' } });
       }
     }
+    if (items.length < MAX_UPGRADE_ITEMS) {
+      // Local plugins the remote profile is missing. The local install spec is
+      // reused as-is, so the remote ends up with the same plugin set the local
+      // Host reports for registry and public source installs.
+      const localBundles = await this.localBundles().catch(() => []);
+      if (Array.isArray(localBundles) && localBundles.length > 0) {
+        const fresh = await profileRuntime.host?.client?.post('/api/ssh-remote/plugins/list', {}).catch(() => null);
+        const remoteBundles = Array.isArray(fresh?.bundles) ? fresh.bundles : bundles;
+        const sync = planPluginSync({ localBundles, remoteBundles });
+        for (const operation of sync.operations) {
+          signal.throwIfAborted();
+          if (items.length >= MAX_UPGRADE_ITEMS) break;
+          const item = {
+            name: operation.name,
+            fromVersion: operation.fromVersion,
+            toVersion: operation.toVersion ?? null,
+            ok: false,
+          };
+          try {
+            const approved = approvedBuildsByPlugin instanceof Map ? approvedBuildsByPlugin.get(operation.name) : null;
+            const response = await this.installRemotePluginPlan(profileRuntime, {
+              name: operation.name,
+              spec: operation.spec,
+              fromVersion: operation.fromVersion,
+              fromSpec: operation.fromSpec ?? null,
+              approvedBuilds: approved,
+            });
+            const result = response?.result ?? {};
+            const pendingBuilds = (Array.isArray(result.pendingBuilds) ? result.pendingBuilds : [])
+              .filter((value) => typeof value === 'string' && value.length > 0).slice(0, 16);
+            if (pendingBuilds.length > 0) {
+              items.push({ ...item, error: { code: 'PLUGIN_BUILD_APPROVAL_REQUIRED' }, pendingBuilds });
+              continue;
+            }
+            if (remoteInstallFailed(response)) {
+              items.push({ ...item, error: { code: 'UPGRADE_PLUGIN_FAILED' } });
+              continue;
+            }
+            if (result.application === 'restart-required') restartRequired = true;
+            items.push({
+              ...item,
+              ok: true,
+              application: typeof result.application === 'string' ? result.application.slice(0, 64) : 'applied',
+            });
+          } catch {
+            items.push({ ...item, error: { code: 'UPGRADE_PLUGIN_FAILED' } });
+          }
+        }
+      }
+    }
     let restarted = false;
     let restartError = null;
     if (restartRequired && items.some((item) => item.ok)) {
@@ -1215,13 +1831,57 @@ export class SshRemoteService extends EventEmitter {
         restartError = { code: safeErrorCode(cause, 'UPGRADE_RUNTIME_UNAVAILABLE') };
       }
     }
+    // Plugins present on both sides plus the ones this run installed: their
+    // config entries and settings follow. Local-only and Desktop-only plugins
+    // stay out, so unrelated configuration never reaches the remote.
+    const touched = new Set(items.filter((item) => item.ok === true).map((item) => item.name));
+    const shared = await this.sharedPluginNames(profileRuntime);
+    for (const name of shared) touched.add(name);
+    let config = null;
+    if (touched.size > 0 && profileRuntime.host && !profileRuntime.host.closed) {
+      try {
+        config = await this.syncPluginConfig(runtime, profileRuntime, { names: touched });
+      } catch (cause) {
+        config = { ok: false, error: publicError(cause) };
+      }
+    }
+    if (config?.entries?.restartRequired === true && !restartError) {
+      // A patch entry this sync created only activates after the Host reloads
+      // its configuration.
+      try {
+        await this.restartHostForUpgrade(runtime, profileId);
+        restarted = true;
+      } catch (cause) {
+        restartError = { code: safeErrorCode(cause, 'UPGRADE_RUNTIME_UNAVAILABLE') };
+      }
+    }
     return {
-      ok: items.every((item) => item.ok) && !restartError,
+      ok: items.every((item) => item.ok) && !restartError && config?.ok !== false,
       items,
       restartRequired,
       restarted,
       ...restartError ? { error: restartError } : {},
+      ...config ? { config } : {},
     };
+  }
+
+  /**
+   * Uploads the local plugin snapshot the remote plugin page lists as "local".
+   * The snapshot lives in the remote Host's memory, so a replaced or restarted
+   * Host starts with an empty list until the manager sends it again. A failure
+   * here never blocks the connection: the remote page just has no local list.
+   */
+  async refreshLocalPluginInventory(client) {
+    if (!client || typeof client.post !== 'function') return false;
+    try {
+      const bundles = await this.localBundles();
+      if (!Array.isArray(bundles) || bundles.length === 0) return false;
+      const { createLocalPluginSnapshot } = await import('./plugin-share.js');
+      await this.uploadLocalPluginSnapshot(client, createLocalPluginSnapshot(bundles));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async restartHostForUpgrade(runtime, profileId) {
@@ -1230,6 +1890,7 @@ export class SshRemoteService extends EventEmitter {
     if (!original) throw error('UPGRADE_RUNTIME_UNAVAILABLE', 'The upgraded remote Host is unavailable.');
     profileRuntime.session = profileRuntime.session ?? this.sessions.get(runtime.hostId) ?? null;
     const replacement = await this.restartHost(profileRuntime, original, { profile: true });
+    await this.refreshLocalPluginInventory(replacement.client);
     if (profileId === DEFAULT_PROFILE_ID) {
       this.syncDefaultProfileHost(runtime, profileId, replacement, profileRuntime.session);
       await this.store.markConnected(runtime.hostId, {
@@ -1266,14 +1927,12 @@ export class SshRemoteService extends EventEmitter {
     }
   }
 
-  async openSessionTransport(session, record, { version, interactive, background, signal }) {
-    const opened = await this.openControllerSession({
+  async openSessionTransport(session, record, { interactive, background, signal }) {
+    const opened = await this.openGuestChannel({
       alias: record.hostAlias,
-      catalog: this.catalog,
-      version,
-      signal,
       interactive,
       background,
+      signal,
       authCallbacks: authenticationCallbacks(this.interactions, session.hostId),
       hostKeyVerifier: interactiveHostKeyVerifier(this.interactions, session.hostId),
     });
@@ -1455,184 +2114,114 @@ export class SshRemoteService extends EventEmitter {
     };
   }
 
-  async performConnect(runtime, options) {
-    const { signal, background } = options;
-    const profileId = normalizeProfileId(options.profileId);
-    const record = this.store.require(runtime.hostId);
-    // The local Desktop DSH version only orders catalog preferences. The
-    // remote runtime version comes from the runtime package bundled with this
-    // plugin, so a local version change does not force a remote upgrade.
-    const preferredVersion = await this.localVersion();
-
-    // A Host this manager already holds is reused only when it runs the runtime
-    // package this manager installed. A Host of another runtime is a separate
-    // instance owned by another Desktop and is never stopped here.
-    const active = runtime.host && !runtime.host.closed && runtime.phase === 'connected' ? runtime.host : null;
-    const sessionConnected = this.sessions.get(runtime.hostId)?.connected === true;
-    // Only a held Host or an open transport can change which runtime this
-    // manager should use; the first connection lets the session select it.
-    const expectedArtifact = active || sessionConnected ? await this.selectExpectedArtifact(runtime, preferredVersion) : null;
-    const activeArtifact = expectedArtifact ?? runtime.artifact ?? this.sessions.get(runtime.hostId)?.artifact ?? null;
-    if (active) {
-      const reusable = Boolean(activeArtifact)
-        && active.version === activeArtifact.dshVersion
-        && active.buildId === activeArtifact.buildId
-        && (!active.runtimeId || active.runtimeId === activeArtifact.runtimeId)
-        && this.sessions.get(runtime.hostId)?.connected;
-      if (reusable) {
-        this.transition(runtime, 'switching');
-        this.transition(runtime, 'connected');
-        return browserResult(this, runtime);
-      }
+  /**
+   * Removes what the old controller transport left on the remote machine:
+   * bundled runtimes, instance records, leases and logs. Refuses while a
+   * controller-managed Host is still running — its supervisor owns that.
+   */
+  async cleanupRemoteRuntime(hostId, { signal } = {}) {
+    this.store.require(hostId);
+    const runtime = this.runtime(hostId);
+    if (!runtime.channel || runtime.channel.closed) {
+      throw error('HOST_NOT_CONNECTED', 'The SSH host is not connected.');
     }
+    const { hosts } = await readRemoteHostCards(runtime.channel, { signal }).catch(() => ({ hosts: [] }));
+    const alive = await filterLivePids(runtime.channel, hosts.filter((card) => card.supervised === true).map((card) => card.pid), { signal })
+      .catch(() => new Set());
+    if (alive.size > 0) {
+      throw error('REMOTE_RUNTIME_IN_USE', 'A controller-managed Host is still running; stop it before cleaning up.');
+    }
+    const sizeRun = await runtime.channel.exec({
+      command: 'sh',
+      args: ['-c', 'du -sk "$HOME/.dsh/ssh-remote" 2>/dev/null | cut -f1'],
+      signal,
+    }).catch(() => ({ stdout: '' }));
+    const kilobytes = Number(String(sizeRun.stdout).trim()) || 0;
+    const removed = await runtime.channel.exec({
+      command: 'sh',
+      args: ['-c', 'cd "$HOME/.dsh/ssh-remote" 2>/dev/null || exit 0; rm -rf servers instances locks logs tmp; printf "%s\\n" "$HOME/.dsh/ssh-remote"'],
+      signal,
+    });
+    if (removed.code !== 0) throw error('REMOTE_RUNTIME_CLEANUP_FAILED', 'The remote runtime directory could not be cleaned up.');
+    return { ok: true, freedBytes: kilobytes * 1024, root: String(removed.stdout).trim() || null };
+  }
 
+  /** Guest transport: open the SSH channel and stop there — no runtime, no controller. */
+  async performGuestConnect(runtime, { signal, background = false } = {}) {
     this.transition(runtime, 'installing');
-    let session;
-    let opened;
-    let selectedArtifact;
-    let detached = false;
     try {
-      const shared = this.session(runtime.hostId);
-      // Reopening the controller on the existing channel installs the bundled
-      // runtime before any Host is stopped and keeps other profile Hosts on
-      // this SSH connection online.
-      if (!shared.connected || (expectedArtifact && shared.artifact?.runtimeId !== expectedArtifact.runtimeId)) {
-        session = await this.openControllerSession({
-          ...shared.connected ? { channel: shared.channel } : {},
-          alias: record.hostAlias,
-          catalog: this.catalog,
-          version: preferredVersion,
-          signal,
-          interactive: !background,
-          background,
-          authCallbacks: authenticationCallbacks(this.interactions, runtime.hostId),
-          hostKeyVerifier: interactiveHostKeyVerifier(this.interactions, runtime.hostId),
-        });
-        shared.attachTransport(session);
-      }
-      session = {
-        channel: shared.channel,
-        controller: shared.controller,
-        installed: shared.installed,
-        artifact: shared.artifact,
-        target: shared.target,
-      };
-      signal.throwIfAborted();
-      selectedArtifact = session.artifact;
-      if (!selectedArtifact?.dshVersion) throw error('REMOTE_INSTALL_FAILED', 'The remote runtime package is unavailable.');
-      const targetVersion = selectedArtifact.dshVersion;
-      const targetVersionChanged = Boolean(record.lastServerVersion && record.lastServerVersion !== targetVersion);
-      if (targetVersionChanged) this.transition(runtime, 'upgrading');
-      // The list is scoped to this manager's runtime identity. Instances of
-      // another runtime package are separate instances and stay untouched.
-      const listed = await session.controller.list({ version: targetVersion, buildId: selectedArtifact.buildId, profileId });
-      signal.throwIfAborted();
-      const savedId = options.reconnectInstanceId ?? record.lastInstanceId;
-      const previous = listed.instances.find((entry) => entry.instance?.instanceId === savedId
-        && matchesProfile(entry, profileId));
-      const exact = previous?.instance?.dshVersion === targetVersion
-        && previous?.instance?.buildId === selectedArtifact.buildId
-        && instanceRuntimeMatches(previous?.instance, selectedArtifact.runtimeId);
-
-      // The matching runtime is installed: only now detach this manager's own
-      // previous Host. Its remote instance keeps running for other clients and
-      // expires by its idle timeout.
-      if (active) {
-        await this.detachActiveHost(runtime, active);
-        detached = true;
-      }
-
-      if (exact && isHealthy(previous)) {
-        const host = await this.attachExisting(runtime, session, previous.instance.instanceId, profileId);
-        runtime.host = host;
-        runtime.channel = session.channel;
-        runtime.controller = session.controller;
-        runtime.installed = session.installed;
-        runtime.artifact = session.artifact;
-        this.observeHost(runtime, host);
-      } else {
-        this.transition(runtime, targetVersionChanged ? 'upgrading' : 'installing');
-        opened = await this.openRemoteHost({
-          alias: record.hostAlias,
-          channel: session.channel,
-          artifactPath: selectedArtifact.artifactPath,
-          sha256: selectedArtifact.sha256,
-          version: targetVersion,
-          buildId: selectedArtifact.buildId,
-          runtimeId: selectedArtifact.runtimeId,
-          localReturnUrl: this.localReturnUrl,
-          profileId,
-          ...this.interactiveOptions(runtime, background, signal),
-        });
-        opened.artifact = selectedArtifact;
-      }
-
-      if (opened) {
-        runtime.host = opened.host;
-        runtime.channel = opened.channel;
-        runtime.controller = opened.controller;
-        runtime.installed = opened.installed;
-        runtime.artifact = opened.artifact;
-        this.observeHost(runtime, opened.host);
-      }
-      signal.throwIfAborted();
-
-      runtime.pluginAlignment = await this.alignRemotePlugins(runtime, { profileId });
-      signal.throwIfAborted();
-      if (!runtime.host) {
-        // Plugin alignment can restart the Host; a failed restart leaves no
-        // instance to report as connected.
-        throw error('REMOTE_INSTANCE_UNAVAILABLE', 'The remote Host is unavailable after plugin alignment.', {
-          pluginAlignment: publicPluginAlignment(runtime.pluginAlignment),
-        });
-      }
-
-      let sync;
-      if (!background && !record.lastConnectedAt) {
-        try {
-          sync = await this.performSync(runtime, signal, { initial: true, profileId });
-        } catch (cause) {
-          if (!runtime.host) throw cause;
-          sync = { ok: false, error: publicError(cause) };
-          runtime.sync = sync;
-        }
-      }
-      const connected = await this.store.markConnected(runtime.hostId, {
-        instanceId: runtime.host.instanceId,
-        version: targetVersion,
-        buildId: runtime.artifact.buildId,
-      });
-      runtime.reconnectAttempts = 0;
-      this.adoptDefaultWebHost(runtime, profileId);
-      this.transition(runtime, 'ready');
-      this.transition(runtime, 'switching');
+      const session = await this.ensureProfileTransport(runtime.hostId, { background });
+      signal?.throwIfAborted?.();
       this.transition(runtime, 'connected');
-      const alignment = publicPluginAlignment(runtime.pluginAlignment);
-      return {
-        ...browserResult(this, runtime, sync),
-        ...alignment ? { pluginAlignment: alignment } : {},
-        host: { ...this.publicConnection(runtime.hostId), ...connected, phase: 'connected' },
-      };
+      return { ok: true, host: this.publicConnection(runtime.hostId), browserUrl: null };
     } catch (cause) {
-      this.interactions.cancelHost(runtime.hostId);
-      if (active && runtime.host === active && !active.closed && !detached) {
-        // The matching runtime could not be installed: keep the working Host
-        // and its shared transport.
-        this.transition(runtime, 'connected', cause);
-      } else {
-        if (runtime.host) await this.releaseRuntime(runtime);
-        this.transition(runtime, 'failed', cause);
-      }
+      this.transition(runtime, 'failed', cause);
       throw cause;
     }
   }
 
-  /**
-   * Releases this manager's connection to one Host after its replacement
-   * runtime is installed, without closing the shared SSH channel other profile
-   * Hosts use and without stopping the remote instance. The detached instance
-   * keeps running for other clients and expires by its idle timeout.
-   */
+  /** Web profiles the remote machine declares, read from its profile manifests. */
+  async refreshGuestProfiles(session) {
+    try {
+      const listed = await session.channel.exec({
+        command: 'sh',
+        args: ['-c', 'ls -1 "$HOME/.dsh/profiles" 2>/dev/null || true'],
+        maxStdoutBytes: 64 * 1024,
+      });
+      const ids = String(listed.stdout).split('\n').map((line) => line.trim())
+        .filter((line) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(line)).slice(0, 64);
+      const profiles = [];
+      for (const id of ids) {
+        const manifest = await session.channel.exec({
+          command: 'sh',
+          args: ['-c', `cat "$HOME/.dsh/profiles/${id}/package.json" 2>/dev/null || true`],
+          maxStdoutBytes: 256 * 1024,
+        }).catch(() => ({ stdout: '' }));
+        let bundles = [];
+        try {
+          const value = JSON.parse(String(manifest.stdout));
+          bundles = Array.isArray(value?.dsh?.profile?.bundles) ? value.dsh.profile.bundles : [];
+        } catch { continue; }
+        if (!bundles.includes('@deepseek-ai/dsh-web-app')) continue;
+        profiles.push({ id, name: id, web: true });
+      }
+      session.profiles = profiles.length ? profiles : null;
+    } catch {
+      session.profiles = session.profiles ?? null;
+    }
+    return session.profiles ?? null;
+  }
+
+  /** One running row per profile, built from the Host cards. */
+  async guestProfileHosts(hostId, { signal } = {}) {
+    const runtime = this.runtime(hostId);
+    if (!runtime.channel || runtime.channel.closed) return [];
+    const { hosts } = await readRemoteHostCards(runtime.channel, { signal }).catch(() => ({ hosts: [] }));
+    if (!hosts.length) return [];
+    const alive = await filterLivePids(runtime.channel, hosts.map((card) => card.pid), { signal }).catch(() => new Set());
+    const byProfile = new Map();
+    for (const card of hosts) {
+      if (!alive.has(card.pid)) continue;
+      const current = byProfile.get(card.profileId);
+      if (!current || Date.parse(card.startedAt) > Date.parse(current.startedAt)) byProfile.set(card.profileId, card);
+    }
+    return [...byProfile.values()].sort((left, right) => left.profileId.localeCompare(right.profileId)).map((card) => ({
+      instanceId: card.instanceId,
+      profileId: card.profileId,
+      profileName: card.profileId,
+      state: 'running',
+      phase: 'running',
+      health: { healthy: true, connected: true, hostAlive: true, supervisorAlive: false },
+      views: 0,
+      dshVersion: card.guestVersion ?? null,
+      connected: true,
+    }));
+  }
+
+  async performConnect(runtime, options) {
+    return this.performGuestConnect(runtime, options);
+  }
+
   async detachActiveHost(runtime, host) {
     this.closingHosts.add(host);
     await host.close().catch(() => {});
@@ -1708,10 +2297,7 @@ export class SshRemoteService extends EventEmitter {
               remote: removed?.result?.error?.code ?? null,
             });
           }
-          const installed = await client.post('/api/ssh-remote/plugins/install', {
-            spec: operation.spec,
-            requestId: randomUUID(),
-          });
+          const installed = await installRemotePlugin(() => runtime.host?.client, { spec: operation.spec });
           const result = installed?.result ?? {};
           if (installed?.ok === false || result.application === 'failed' || result.application === 'cancelled') {
             throw error('REMOTE_PLUGIN_ALIGNMENT_FAILED', 'The remote plugin installation failed.', {
@@ -2107,10 +2693,26 @@ export class SshRemoteService extends EventEmitter {
       }
       report = { ...report, restarted: true, previousInstanceId: oldInstanceId, instanceId: replacement.instanceId };
     }
+    // Plugin configuration follows the plugins both sides share: entries and
+    // settings are pushed for those, unrelated local configuration stays local.
+    let pluginConfig = null;
+    try {
+      const shared = await this.sharedPluginNames({ host: runtime.host });
+      if (shared.size > 0) pluginConfig = await this.syncPluginConfig(runtime, { host: runtime.host }, { names: shared });
+      if (pluginConfig?.entries?.restartRequired === true) {
+        const oldInstanceId = runtime.host.instanceId;
+        const replacement = await this.restartConnectedHost(runtime, runtime.host);
+        report = { ...report, restarted: true, previousInstanceId: oldInstanceId, instanceId: replacement.instanceId };
+        pluginConfig = { ...pluginConfig, restarted: true };
+      }
+    } catch (cause) {
+      pluginConfig = { ok: false, error: publicError(cause) };
+    }
     report = {
       ...report,
       ok: report.ok && sharingSucceeded(pluginSharing),
       pluginSharing,
+      ...pluginConfig ? { pluginConfig } : {},
       backup,
       requiresMerge,
       mergeReasons,

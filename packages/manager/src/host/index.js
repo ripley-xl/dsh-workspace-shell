@@ -1,9 +1,13 @@
+import { appendFile, stat, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import path from 'node:path';
+
 import { ConnectionStore } from './store.js';
 import { RuntimeCatalog } from './runtime-catalog.js';
 import { SshRemoteService } from './service.js';
 import { DEFAULT_PROFILE_ID, normalizeProfileId } from './profiles.js';
 import { SshRemoteError } from './ssh/errors.js';
-import { publicError } from './diagnostics.js';
+import { publicError, safeMessage } from './diagnostics.js';
 
 const JSON_HEADERS = { 'cache-control': 'no-store' };
 const MAX_BODY_BYTES = 128 * 1024;
@@ -23,6 +27,36 @@ function httpStatus(code) {
   if (code === 'OPERATION_TIMEOUT') return 504;
   if (code?.startsWith('SSH_') || code?.startsWith('REMOTE_') || code === 'CREDENTIAL_UNAVAILABLE') return 502;
   return 400;
+}
+
+const ERROR_LOG = path.join(homedir(), '.dsh', 'ssh-remote', 'logs', 'manager-errors.log');
+const ERROR_LOG_MAX_BYTES = 512 * 1024;
+
+/**
+ * Records every failed route call: HTTP method, path, error code, message and
+ * stack. The client only maps a fixed set of codes, so a code it does not know
+ * shows up as the generic "request failed" banner; both the code and the stack
+ * are needed to tell which call broke.
+ */
+async function recordRouteFailure(request, cause) {
+  // Unit tests mount the real routes; their expected failures must not land in
+  // the user's diagnostics log.
+  if (String(cause?.stack ?? '').includes('node:internal/test_runner')) return;
+  const line = JSON.stringify({
+    time: new Date().toISOString(),
+    method: request.method,
+    path: new URL(request.url).pathname,
+    code: typeof cause?.code === 'string' ? safeMessage(cause.code).slice(0, 64) : null,
+    message: safeMessage(cause).slice(0, 600),
+    stack: cause instanceof Error ? String(cause.stack ?? '').slice(0, 2000) : null,
+  }) + '\n';
+  try {
+    const info = await stat(ERROR_LOG).catch(() => null);
+    if (info && info.size > ERROR_LOG_MAX_BYTES) await writeFile(ERROR_LOG, line);
+    else await appendFile(ERROR_LOG, line);
+  } catch {
+    // Diagnostics never change the response.
+  }
 }
 
 function errorResponse(cause) {
@@ -157,18 +191,26 @@ function sse(service, request, onClose) {
   });
 }
 
-export const inject = ['connection', 'pluginManager', 'settings', 'credentials', 'storageDomain'];
+export const inject = ['connection', 'pluginManager', 'settings', 'credentials', 'storageDomain', 'profileContext'];
 
-export async function apply(ctx) {
+export async function apply(ctx, config = {}) {
   const store = await new ConnectionStore(ctx.storageDomain).open();
   const service = new SshRemoteService({
     store,
     catalog: new RuntimeCatalog(),
     localVersion: () => dshVersion(ctx),
     localBundles: () => ctx.pluginManager.listBundles(),
+    // Guest transport by default: the remote machine's own dsh. Set
+    // `transport: controller` in the plugin config to keep the bundled runtime.
+    transport: process.env.DSH_SSH_TRANSPORT === 'controller' || config?.transport === 'controller'
+      ? 'controller'
+      : 'guest',
+    localHome: () => ctx.profileContext?.home ?? (process.env.DSH_HOME ?? null),
     localReturnUrl: ctx.get('webApp')?.getAdvertisedUrl() ?? 'http://127.0.0.1:54542',
     settings: ctx.settings,
     credentials: ctx.credentials,
+    // Read lazily: the config editor may load after this plugin does.
+    configEditor: () => ctx.get?.('configEditor') ?? null,
   });
   let eventClients = 0;
 
@@ -186,6 +228,7 @@ export async function apply(ctx) {
         try {
           return json(await handler(request));
         } catch (cause) {
+          await recordRouteFailure(request, cause);
           return errorResponse(cause);
         }
       },
@@ -262,6 +305,44 @@ export async function apply(ctx) {
       signal: request.signal,
     });
     return { ok: true, instanceId: host.instanceId, url: host.url, profileId: host.profileId };
+  });
+  // Hosts on the remote machine that this manager did not start. Read-only:
+  // the card's authenticated URL is only handed out by the attach route.
+  route('/api/ssh-remote/web/discovered', ['POST'], async (request) => {
+    const input = await body(request);
+    return service.discoveredHosts(hostId(input), { signal: request.signal });
+  });
+  route('/api/ssh-remote/web/discovered/stop', ['POST'], async (request) => {
+    const input = await body(request);
+    return service.stopDiscovered(hostId(input), {
+      instanceId: typeof input.instanceId === 'string' ? input.instanceId : '',
+      signal: request.signal,
+    });
+  });
+  route('/api/ssh-remote/cleanup-runtime', ['POST'], async (request) => {
+    const input = await body(request);
+    return service.cleanupRemoteRuntime(hostId(input), { signal: request.signal });
+  });
+  route('/api/ssh-remote/web/discovered/sync', ['POST'], async (request) => {
+    const input = await body(request);
+    return service.syncDiscovered(hostId(input), {
+      instanceId: typeof input.instanceId === 'string' ? input.instanceId : '',
+      signal: request.signal,
+    });
+  });
+  route('/api/ssh-remote/web/discovered/restart', ['POST'], async (request) => {
+    const input = await body(request);
+    return service.restartDiscovered(hostId(input), {
+      instanceId: typeof input.instanceId === 'string' ? input.instanceId : '',
+      signal: request.signal,
+    });
+  });
+  route('/api/ssh-remote/web/discovered/attach', ['POST'], async (request) => {
+    const input = await body(request);
+    return service.attachDiscovered(hostId(input), {
+      instanceId: typeof input.instanceId === 'string' ? input.instanceId : '',
+      signal: request.signal,
+    });
   });
   route('/api/ssh-remote/web/attach', ['POST'], async (request) => {
     const input = await body(request);

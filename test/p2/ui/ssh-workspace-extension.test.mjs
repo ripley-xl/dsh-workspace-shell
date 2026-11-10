@@ -104,6 +104,21 @@ test('request surface rejects arbitrary paths, sanitizes errors and propagates c
   await assert.rejects(request('/status'), { code: 'OPERATION_CANCELLED' });
   assert.equal(calls, 1);
 });
+test('the request surface allows the upgrade endpoints used by the launcher', async (t) => {
+  const seen = [];
+  const lifetime = new AbortController();
+  const request = createSshRequest(async (url, options) => {
+    seen.push([new URL(url, 'http://localhost').pathname, options?.method]);
+    return Response.json({ ok: true, result: { started: true } });
+  }, lifetime.signal);
+  await request('/upgrade', { body: { hostId: 'c1', profileId: 'web' } });
+  await request('/upgrade/approve', { body: { hostId: 'c1', profileId: 'web' } });
+  assert.deepEqual(seen, [
+    ['/api/ssh-remote/upgrade', 'POST'],
+    ['/api/ssh-remote/upgrade/approve', 'POST'],
+  ]);
+});
+
 test('a remote Host upgrade connects without an upgrade prompt', async (t) => {
   const f = fixture(t, () => ({ ok: true, connections: [] }));
   const modal = [];

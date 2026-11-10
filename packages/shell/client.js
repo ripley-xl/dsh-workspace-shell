@@ -3994,7 +3994,7 @@ function createWorkspaceClient(deps) {
     const step = UPGRADE_STEPS.has(value.step) ? value.step : null;
     const errorCode = typeof value.error === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(value.error) ? value.error : null;
     const ignoredBuilds = Array.isArray(value.ignoredBuilds)
-      ? value.ignoredBuilds.filter((name) => typeof name === 'string' && /^[A-Za-z0-9@/._#+-]{1,160}$/.test(name)).slice(0, 32)
+      ? value.ignoredBuilds.filter((name) => typeof name === 'string' && /^[A-Za-z0-9@/._#%+:~-]{1,512}$/.test(name)).slice(0, 32)
       : [];
     return Object.freeze({
       phase: value.phase,

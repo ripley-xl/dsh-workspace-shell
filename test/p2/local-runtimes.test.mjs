@@ -226,7 +226,7 @@ test('Web reuses only the same owner Host and rejects cross-owner URL access', a
   const first = await service.openWeb({ profileId: 'web', ownerId: 'owner', confirmIndependentHost: true });
   const again = await service.openWeb({ profileId: 'web', ownerId: 'owner' });
   assert.deepEqual(again, first);
-  assert.deepEqual(service.attachWeb({ runtimeId: first.runtimeId, ownerId: 'owner' }), first);
+  assert.deepEqual(await service.attachWeb({ runtimeId: first.runtimeId, ownerId: 'owner' }), first);
   await expectCode(() => service.attachWeb({ runtimeId: first.runtimeId, ownerId: 'other-owner' }), 'RUNTIME_OWNER_MISMATCH');
   await expectCode(() => service.openWeb({ profileId: 'web', ownerId: 'other-owner' }), 'PROFILE_HOST_CONFLICT');
   assert.equal(subprocess.calls.spawn.filter((spec) => !spec.argv.includes('--version')).length, 1);

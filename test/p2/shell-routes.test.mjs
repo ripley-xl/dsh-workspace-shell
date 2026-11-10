@@ -12,7 +12,7 @@ import { registerWorkspaceRuntimeTool } from '../../packages/shell/src/host/runt
 const PREFIX = '/api/workspace-shell';
 const SECRET = 'private-token-never-appear';
 const POST_ROUTES = [
-  '/catalog', '/web/open', '/web/attach', '/tui/open', '/terminal/read', '/terminal/write', '/terminal/resize', '/runtime/stop', '/runtime/close-owner', '/hosts/upgrade',
+  '/catalog', '/web/open', '/web/attach', '/web/attach-discovered', '/tui/open', '/terminal/read', '/terminal/write', '/terminal/resize', '/runtime/stop', '/runtime/close-owner', '/hosts/upgrade',
   '/tab-order/get', '/tab-order/set', '/tab-appearance/get', '/tab-appearance/set',
 ];
 const GET_ROUTES = ['/terminal', '/assets/xterm.js', '/assets/addon-fit.js', '/assets/terminal-document.js', '/assets/xterm.css'];
@@ -35,6 +35,7 @@ function fakeService(overrides = {}) {
     async catalog(input) { return record('catalog', input, { currentProfile: 'current', defaultCwd: '/work/default', profiles: [], runtimes: [] }); },
     async openWeb(input) { return record('openWeb', input, { runtimeId: 'runtime-web' }); },
     async attachWeb(input) { return record('attachWeb', input, { runtimeId: 'runtime-web' }); },
+    async attachDiscovered(input) { return record('attachDiscovered', input, { runtimeId: 'host:abc', url: 'http://127.0.0.1:1/?token=t' }); },
     async openTui(input) { return record('openTui', input, { runtimeId: 'runtime-tui' }); },
     async readTerminal(input) { return record('readTerminal', input, { chunks: [], firstSeq: 0, nextSeq: 0, loss: false, phase: 'running' }); },
     async writeTerminal(input) { return record('writeTerminal', input); },
@@ -113,7 +114,7 @@ async function responseJson(response) {
   return response.json();
 }
 
-test('registers exactly nineteen routes with the real connection method/body contract', async (t) => {
+test('registers exactly twenty routes with the real connection method/body contract', async (t) => {
   const state = setup(t);
   assert.deepEqual([...state.routes.keys()].sort(), [...POST_ROUTES, ...GET_ROUTES].map((path) => PREFIX + path).sort());
   for (const path of POST_ROUTES) {
@@ -135,6 +136,7 @@ test('POST routes project known kwargs and preserve the Request signal instead o
     ['/catalog', { ownerId: 'owner' }],
     ['/web/open', { profileId: 'web', ownerId: 'owner', confirmIndependentHost: 'true', signal: SECRET }, controller.signal],
     ['/web/attach', { runtimeId: 'runtime-web', ownerId: 'owner' }],
+    ['/web/attach-discovered', { instanceId: 'a'.repeat(32), ownerId: 'owner' }],
     ['/tui/open', { profileId: 'tui', ownerId: 'owner', cwd: '/work', cols: 80, rows: 24, confirmIndependentHost: true }],
     ['/terminal/read', { runtimeId: 'runtime-tui', ownerId: 'owner', afterSeq: 4 }],
     ['/terminal/write', { runtimeId: 'runtime-tui', ownerId: 'owner', data: 'abc' }],
@@ -151,7 +153,7 @@ test('POST routes project known kwargs and preserve the Request signal instead o
     assert.equal(response.status, 200);
     assert.equal((await responseJson(response)).ok, true);
   }
-  assert.deepEqual(state.service.calls.map((call) => call.method), ['catalog', 'openWeb', 'attachWeb', 'openTui', 'readTerminal', 'writeTerminal', 'resizeTerminal', 'stop', 'upgrade']);
+  assert.deepEqual(state.service.calls.map((call) => call.method), ['catalog', 'openWeb', 'attachWeb', 'attachDiscovered', 'openTui', 'readTerminal', 'writeTerminal', 'resizeTerminal', 'stop', 'upgrade']);
   for (const call of state.service.calls) assert.equal('unknownKwarg' in call.input, false);
   const open = state.service.calls[1].input;
   assert.equal(open.signal, actualRequestSignal);
@@ -395,7 +397,7 @@ test('dispose is idempotent, awaits asynchronous unregister, and removes every r
   const pending = dispose();
   assert.equal(dispose(), pending);
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(state.released.length, 19);
+  assert.equal(state.released.length, 20);
   assert.equal(firstFinished, false);
   assert.equal(secondFinished, false);
   first.resolve();
@@ -405,7 +407,7 @@ test('dispose is idempotent, awaits asynchronous unregister, and removes every r
   assert.equal(secondFinished, true);
   assert.equal(state.routes.size, 0);
   await dispose();
-  assert.equal(state.released.length, 19);
+  assert.equal(state.released.length, 20);
 });
 
 test('one rejected unregister does not block other cleanup or leak its error', async (t) => {
@@ -420,7 +422,7 @@ test('one rejected unregister does not block other cleanup or leak its error', a
     assert.equal(JSON.stringify(error).includes(SECRET), false);
     return true;
   });
-  assert.equal(state.released.length, 19);
+  assert.equal(state.released.length, 20);
   assert.equal(state.routes.size, 1);
   assert.equal(state.routes.has(`${PREFIX}/catalog`), true);
 });

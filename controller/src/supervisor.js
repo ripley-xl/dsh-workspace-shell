@@ -112,7 +112,10 @@ export async function runSupervisor(options, dependencies = {}) {
     env: {
       ...process.env,
       PATH: [resolve(options.runtimeRoot, "bin"), process.env.PATH ?? ""].filter(Boolean).join(delimiter),
-      DSH_HOME: resolveDshHome(options.dshHome)
+      DSH_HOME: resolveDshHome(options.dshHome),
+      // The supervisor owns this Host's lifetime; the Guest must not restart it
+      // out from under the controller (see docs/host-restart-design.md).
+      DSH_WORKSPACE_SUPERVISED: "1"
     },
     detached: false,
     stdio: ["ignore", "pipe", "pipe"]

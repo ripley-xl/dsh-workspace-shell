@@ -38,7 +38,7 @@ async function host(routes) {
 test('web routes exist with the agreed paths and reject bad input safely', async (t) => {
   const { routes } = await routesFixture(t);
   assert.ok(inject.includes('storageDomain'));
-  for (const path of ['/api/ssh-remote/web/list', '/api/ssh-remote/web/open', '/api/ssh-remote/web/attach', '/api/ssh-remote/web/stop', '/api/ssh-remote/autoconnect']) {
+  for (const path of ['/api/ssh-remote/web/list', '/api/ssh-remote/web/open', '/api/ssh-remote/web/attach', '/api/ssh-remote/web/stop', '/api/ssh-remote/web/discovered', '/api/ssh-remote/web/discovered/attach', '/api/ssh-remote/web/discovered/stop', '/api/ssh-remote/web/discovered/restart', '/api/ssh-remote/web/discovered/sync', '/api/ssh-remote/cleanup-runtime', '/api/ssh-remote/autoconnect']) {
     assert.equal(typeof routes.get(path)?.fetch, 'function', path);
   }
   const saved = await host(routes);

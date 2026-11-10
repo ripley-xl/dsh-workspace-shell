@@ -35,6 +35,9 @@ export function registerShellRoutes(ctx, service, { assetRoot = new URL('../../a
     '/catalog': (input) => service.catalog({ ownerId: input.ownerId }),
     '/web/open': (input, signal) => service.openWeb({ profileId: input.profileId, ownerId: input.ownerId, confirmIndependentHost: input.confirmIndependentHost === true, signal }),
     '/web/attach': (input) => service.attachWeb({ runtimeId: input.runtimeId, ownerId: input.ownerId }),
+    // A Host discovered through its card was not spawned by this Desktop; its
+    // authenticated URL is resolved on demand instead of living in the catalog.
+    '/web/attach-discovered': (input) => service.attachDiscovered({ instanceId: input.instanceId, ownerId: input.ownerId }),
     '/tui/open': (input, signal) => service.openTui({ profileId: input.profileId, ownerId: input.ownerId, cwd: input.cwd, cols: input.cols, rows: input.rows, confirmIndependentHost: input.confirmIndependentHost === true, command: input.command, signal }),
     '/terminal/read': (input) => service.readTerminal({ runtimeId: input.runtimeId, ownerId: input.ownerId, afterSeq: input.afterSeq }),
     '/terminal/write': (input) => service.writeTerminal({ runtimeId: input.runtimeId, ownerId: input.ownerId, data: input.data }),

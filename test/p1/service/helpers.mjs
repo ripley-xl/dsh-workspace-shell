@@ -221,6 +221,11 @@ export class FakeRemoteHost extends EventEmitter {
         if (path === '/api/ssh-remote/settings/update' && state.failSettingsUpdate) {
           throw Object.assign(new Error('simulated settings write failure'), { code: 'CONFIG_SYNC_PARTIAL' });
         }
+        if (path === '/api/ssh-remote/plugins/config') {
+          if (state.failPluginConfig) throw Object.assign(new Error('simulated config sync failure'), { code: 'REMOTE_OPERATION_FAILED' });
+          const entries = Array.isArray(body?.entries) ? body.entries : [];
+          return { ok: true, backup: null, items: entries.map((entry) => ({ name: entry.name, ok: true })) };
+        }
         if (path === '/api/ssh-remote/plugins/list') {
           return { ok: true, bundles: state.remotePlugins ?? [] };
         }
@@ -246,7 +251,9 @@ export class FakeRemoteHost extends EventEmitter {
         if (path === '/api/ssh-remote/plugins/install') {
           const name = packageName(body?.spec ?? '');
           state.pluginInstalls.push({ spec: body?.spec, requestId: body?.requestId, name });
-          const custom = state.pluginInstallResults?.[name];
+          // A queue lets a test model an operation that succeeds on retry.
+          const configured = state.pluginInstallResults?.[name];
+          const custom = Array.isArray(configured) ? (configured.length > 1 ? configured.shift() : configured[0]) : configured;
           if (custom) return { ok: custom.ok !== false, result: custom };
           if (state.pluginBuildBlockedSpecs?.includes(body?.spec) === true) {
             return { ok: false, result: { changed: false, application: 'failed', pendingBuilds: ['bun@1.4.4'], error: { code: 'operation-error' } } };
@@ -284,7 +291,9 @@ export class FakeRemoteHost extends EventEmitter {
 
 export async function serviceFixture({
   version = '1.0.0', runtimeVersion = version ?? '1.0.0', controllerVersion = null, remotePlugins = [], shareLocalPlugins,
-  uploadLocalPluginSnapshot, localBundles, autoConnectOnStart = false, pluginLatest = {},
+  // The fixture drives the controller transport; guest-transport tests opt in.
+  transport = 'controller', openGuestChannel = null,
+  uploadLocalPluginSnapshot, localBundles, autoConnectOnStart = false, pluginLatest = {}, configEditor = null,
 } = {}) {
   const store = await createStore();
   const state = remoteState();
@@ -324,6 +333,8 @@ export async function serviceFixture({
     };
   };
   const service = new SshRemoteService({
+    transport,
+    ...(openGuestChannel ? { openGuestChannel } : {}),
     store,
     autoConnectOnStart,
     catalog: {
@@ -338,6 +349,7 @@ export async function serviceFixture({
     localVersion: () => localVersion,
     localReturnUrl: 'http://127.0.0.1:54542/?tkn=local-secret',
     settings: { describe: () => descriptors },
+    ...configEditor ? { configEditor } : {},
     credentials: {
       async resolve(ref) {
         credentialCalls.push(ref);

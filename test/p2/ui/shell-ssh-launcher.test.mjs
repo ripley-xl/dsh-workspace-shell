@@ -42,6 +42,7 @@ function harness(options = {}) {
       { alias: 'ops', hostName: 'ops.internal' },
     ] }),
     '/web/list': () => webList(),
+    '/web/discovered': () => ({ ok: true, hosts: [] }),
     '/hosts': () => ({ ok: true, host: { id: 'a', name: 'Alpha', hostAlias: 'alpha', autoConnect: true } }),
     '/connect': () => ({ ok: true, host: { id: 'a', name: 'Alpha', hostAlias: 'alpha', phase: 'connected', instanceId: 'inst-a' } }),
     '/disconnect': () => ({ ok: true, host: { id: 'a', name: 'Alpha', hostAlias: 'alpha', phase: 'idle' } }),
@@ -264,7 +265,8 @@ test('module shape: factory, css tokens, no imports or ambient I/O', async () =>
 
 test('initial load reads status only and selection expands without connecting or starting a Host', async (t) => {
   const h = await mountLauncher(t);
-  assert.deepEqual(h.calls.map((call) => call.path), ['/status', '/web/list']);
+  // The Host list and its discovered-Host probe are loaded together.
+  assert.deepEqual(h.calls.map((call) => call.path), ['/status', '/web/list', '/web/discovered']);
   assert.equal(h.of('/status')[0].input.autoConnect, undefined);
   // Both rows render; Alpha is selected first and its profiles are shown.
   assert.ok(button(h.view.root, 'Alpha'));
@@ -325,7 +327,7 @@ test('more menu exposes settings, restart, disconnect and delete; Escape restore
   const menu = h.view.root.find((node) => node.props.role === 'menu');
   assert.equal(menu.props['aria-label'], 'More actions: Alpha');
   const items = h.view.root.findAll((node) => node.props.role === 'menuitem').map((node) => text(node));
-  assert.deepEqual(items, ['Settings', 'Restart connection', 'Disconnect', 'Delete']);
+  assert.deepEqual(items, ['Settings', 'Restart connection', 'Clean up remote runtime', 'Disconnect', 'Delete']);
   let event = { key: 'Escape', prevented: false, stopped: false, preventDefault() { this.prevented = true; }, stopPropagation() { this.stopped = true; } };
   await flushEffects(() => menu.props.onKeyDown(event));
   assert.equal(event.prevented, true);
@@ -560,8 +562,8 @@ test('Web Host rows show the DSH version and offer Upgrade only for a newer bund
   const work = rows.find((node) => text(node).includes('work'));
   assert.match(text(web), /DSH version: 1\.0\.0/);
   assert.match(text(work), /DSH version: 2\.0\.0/);
-  assert.equal(web.findAll((node) => node.type === 'button' && text(node) === 'Upgrade').length, 1);
-  assert.equal(work.findAll((node) => node.type === 'button' && text(node) === 'Upgrade').length, 0);
+  assert.equal(web.findAll((node) => node.type === 'button' && text(node) === 'Sync & upgrade').length, 1);
+  assert.equal(work.findAll((node) => node.type === 'button' && text(node) === 'Sync & upgrade').length, 0);
 });
 
 test('clicking Upgrade starts one request and disables the button with the fixed step copy', async (t) => {
@@ -576,7 +578,7 @@ test('clicking Upgrade starts one request and disables the button with the fixed
   });
   const row = h.view.root.findAll((node) => node.type === 'li' && node.props['data-state'] === 'running')
     .find((node) => text(node).includes('work'));
-  const upgrade = row.findAll((node) => node.type === 'button' && text(node) === 'Upgrade')[0];
+  const upgrade = row.findAll((node) => node.type === 'button' && text(node) === 'Sync & upgrade')[0];
   await flushEffects(() => upgrade.props.onClick({ currentTarget: null }));
   const calls = h.of('/upgrade');
   assert.deepEqual(calls.map((call) => call.input), [{ hostId: 'a', profileId: 'work' }]);
@@ -608,7 +610,7 @@ test('a failed upgrade poll shows the safe error code copy and clears the runnin
   });
   const row = h.view.root.findAll((node) => node.type === 'li' && node.props['data-state'] === 'running')
     .find((node) => text(node).includes('work'));
-  await flushEffects(() => row.findAll((node) => node.type === 'button' && text(node) === 'Upgrade')[0].props.onClick({ currentTarget: null }));
+  await flushEffects(() => row.findAll((node) => node.type === 'button' && text(node) === 'Sync & upgrade')[0].props.onClick({ currentTarget: null }));
   assert.match(text(h.view.toJSON()), /Upgrading runtime…/);
   await flushEffects(() => new Promise((resolve) => setTimeout(resolve, 40)));
   const body = text(h.view.toJSON());
@@ -634,7 +636,7 @@ test('an up-to-date answer from Upgrade shows the no-op notice', async (t) => {
   await clickImmediate(h.view.root.findAll((node) => node.type === 'button' && text(node) === 'Refresh Web Hosts')[0]);
   const row = h.view.root.findAll((node) => node.type === 'li' && node.props['data-state'] === 'running')
     .find((node) => text(node).includes('work'));
-  await flushEffects(() => row.findAll((node) => node.type === 'button' && text(node) === 'Upgrade')[0].props.onClick({ currentTarget: null }));
+  await flushEffects(() => row.findAll((node) => node.type === 'button' && text(node) === 'Sync & upgrade')[0].props.onClick({ currentTarget: null }));
   assert.match(text(h.view.toJSON()), /already runs the newest bundled runtime/);
 });
 
@@ -843,7 +845,8 @@ test('autoConnect is not triggered on mount: everything stays passive until an a
   assert.equal(h.of('/web/open').length, 0);
   assert.equal(h.of('/web/attach').length, 0);
   assert.equal(h.of('/web/stop').length, 0);
-  assert.deepEqual(h.calls.map((call) => call.path), ['/status', '/web/list']);
+  // The Host list and its discovered-Host probe are loaded together.
+  assert.deepEqual(h.calls.map((call) => call.path), ['/status', '/web/list', '/web/discovered']);
 });
 
 test('narrow layout and keyboard affordances exist in the stylesheet', () => {

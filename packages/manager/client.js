@@ -39,11 +39,28 @@ function createSshLauncher(React, deps = {}) {
       detailFailed: 'Web Hosts could not be loaded.', detailStale: 'The Web Host list may be out of date.',
       emptyProfiles: 'This connection has no Web profiles.', emptyProfilesHint: 'Profiles are read after the SSH connection is ready.',
       noHosts: 'No Web Host is running for this connection.',
+      discoveredTitle: 'Other Web Hosts on this machine',
+      discoveredHint: 'Started outside this manager; they report themselves through their Host card.',
+      discoveredEmpty: 'No other Web Host reported itself.',
+      discoveredOpen: 'Open', discoveredMeta: (pid, port) => `pid ${pid} · port ${port}`,
+      discoveredRestart: 'Restart', discoveredStop: 'Stop', discoveredSync: 'Sync & update',
+      confirmSyncDiscovered: 'Sync this Web Host profile', syncDiscoveredMessage: 'Installs plugins this machine has and the Host lacks (upgrades only, never downgrades), then restarts the Host.',
+      discoveredSynced: (plugins, configs) => `${plugins} plugin(s) installed, ${configs} config entr${configs === 1 ? 'y' : 'ies'} aligned; the Host restarted.`,
+      discoveredSyncedNone: 'Nothing to install or align; the profile already matches.',
+      discoveredSyncFailed: (count) => `${count} plugin install(s) failed.`,
+      menuCleanupRuntime: 'Clean up remote runtime',
+      confirmCleanupRuntime: 'Clean up the remote runtime', cleanupRuntimeMessage: 'Removes the bundled runtimes, instance records, leases and logs the old controller left on this machine. Refused while a controller-managed Host is running.',
+      cleanupRuntimeDone: (size) => `Remote runtime cleaned up, ${size} freed.`,
+      cleanupRuntimeNone: 'Nothing to clean up on the remote machine.',
+      menuCleanupRuntimeBusy: 'Runtime cleanup is blocked while a managed Host runs.',
+      confirmStopDiscovered: 'Stop this Web Host', stopDiscoveredMessage: 'The process is signalled and its card disappears. It will not come back on its own.',
+      discoveredRestarted: 'Web Host restarted.', discoveredStopped: 'Web Host stopped.',
+      operation_restart: 'Restarting…',
       connections: 'Connections', hostsTitle: 'Web Hosts and profiles', hostCountUnit: 'Host', viewsUnit: 'views',
       connected: 'Connected', disconnected: 'Not connected', connectionState: 'Connection state', hostAlias: 'OpenSSH alias',
       displayName: 'Display name', resolvedHost: 'Resolved host', port: 'Port', user: 'User', identityFile: 'Identity file',
       remoteVersion: 'Remote version', instance: 'Instance', source: 'Source', state: 'State',
-      dshVersion: 'DSH version', upgrade: 'Upgrade', upgradeHint: 'Install the newest bundled runtime and upgrade remote plugins.',
+      dshVersion: 'DSH version', upgrade: 'Sync & upgrade', upgradeHint: 'Install the newest bundled runtime and bring the remote plugins in line with this machine.',
       upgradeStep_runtime: 'Upgrading runtime…', upgradeStep_plugins: 'Upgrading plugins…',
       upgradeStarted: 'Remote Host upgrade started.', upgradeDone: 'Remote Host upgraded.', upgradeUpToDate: 'That Host already runs the newest bundled runtime.',
       buildApprovalPending: 'Pending build approval: ', approveBuilds: 'Approve & retry', approveStarted: 'Build scripts approved; retrying the upgrade.',
@@ -116,11 +133,28 @@ function createSshLauncher(React, deps = {}) {
       detailFailed: '无法加载 Web Host。', detailStale: 'Web Host 列表可能不是最新。',
       emptyProfiles: '这个连接没有可用的 Web profile。', emptyProfilesHint: 'SSH 连接就绪后才会读取 profile 列表。',
       noHosts: '这个连接没有运行中的 Web Host。',
+      discoveredTitle: '这台机器上的其他 Web Host',
+      discoveredHint: '不是本管理器启动的宿主，靠 Host 卡片主动上报。',
+      discoveredEmpty: '没有其他 Web Host 上报。',
+      discoveredOpen: '打开', discoveredMeta: (pid, port) => `pid ${pid} · 端口 ${port}`,
+      discoveredRestart: '重启', discoveredStop: '停止', discoveredSync: '同步并更新',
+      confirmSyncDiscovered: '同步这个 Web Host 的 profile', syncDiscoveredMessage: '安装本机有、宿主缺的插件（只升不降），然后重启宿主。',
+      discoveredSynced: (plugins, configs) => `已安装 ${plugins} 个插件、对齐 ${configs} 项配置，宿主已重启。`,
+      discoveredSyncedNone: '没有需要安装的插件或配置，profile 已对齐。',
+      discoveredSyncFailed: (count) => `${count} 个插件安装失败。`,
+      menuCleanupRuntime: '清理远端运行包',
+      confirmCleanupRuntime: '清理远端运行包', cleanupRuntimeMessage: '删除旧 controller 在远端留下的运行包、实例记录、租约和日志。还有受管宿主在跑时会拒绝。',
+      cleanupRuntimeDone: (size) => `远端运行包已清理，释放 ${size}。`,
+      cleanupRuntimeNone: '远端没有可清理的内容。',
+      menuCleanupRuntimeBusy: '有受管宿主运行时不能清理。',
+      confirmStopDiscovered: '停止这个 Web Host', stopDiscoveredMessage: '会向进程发信号，卡片随后消失；它不会自己回来。',
+      discoveredRestarted: 'Web Host 已重启。', discoveredStopped: 'Web Host 已停止。',
+      operation_restart: '重启中…',
       connections: '连接', hostsTitle: 'Web Host 与 profile', hostCountUnit: 'Host', viewsUnit: '个视图',
       connected: '已连接', disconnected: '未连接', connectionState: '连接状态', hostAlias: 'OpenSSH 别名',
       displayName: '显示名称', resolvedHost: '解析后的主机', port: '端口', user: '用户', identityFile: '身份文件',
       remoteVersion: '远端版本', instance: '实例', source: '来源', state: '状态',
-      dshVersion: 'DSH 版本', upgrade: '升级', upgradeHint: '安装最新的内置运行包，并把远端插件升级到最新版本。',
+      dshVersion: 'DSH 版本', upgrade: '同步并升级', upgradeHint: '安装最新的内置运行包，把远端插件同步到与本机一致。',
       upgradeStep_runtime: '正在升级运行包…', upgradeStep_plugins: '正在升级插件…',
       upgradeStarted: '远端 Host 升级已开始。', upgradeDone: '远端 Host 已升级。', upgradeUpToDate: '这个 Host 已经是最新运行包版本。',
       buildApprovalPending: '待批准构建：', approveBuilds: '批准并重试', approveStarted: '已批准构建脚本，正在重试升级。',
@@ -178,6 +212,8 @@ function createSshLauncher(React, deps = {}) {
       errorUpgradeUnsupported: '这个 profile 不是 Web profile。',
       errorUpgradeProfileUnavailable: '远端 Web profile 不可用。',
       errorPluginBuildApproval: '远端插件需要先批准构建脚本才能升级。',
+      errorRemoteOperation: '远端操作失败，详细错误已记录在 ~/.dsh/ssh-remote/logs/manager-errors.log。',
+      errorUpgradeConfig: '插件已安装，但插件配置同步失败。',
       errorAliasExists: '这个 OpenSSH 别名已经保存。', errorServiceDisposed: 'SSH Remote 服务不可用。',
       errorInvalidProfile: 'Web profile 无效。', errorCancelled: '操作已取消。',
       pluginsAligned: (count) => `已把远端插件对齐到本机版本：${count} 个`,
@@ -196,10 +232,11 @@ function createSshLauncher(React, deps = {}) {
     UPGRADE_REGISTRY_UNAVAILABLE: 'errorUpgradeRegistry', UPGRADE_INSTALL_FAILED: 'errorUpgradeFailed',
     UPGRADE_PLUGIN_FAILED: 'errorUpgradeFailed', UPGRADE_BACKUP_FAILED: 'errorUpgradeFailed',
     UPGRADE_RESTORE_FAILED: 'errorUpgradeFailed', UPGRADE_VALIDATION_FAILED: 'errorUpgradeFailed',
-    UPGRADE_NPM_FAILED: 'errorUpgradeFailed', UPGRADE_UNSUPPORTED_PROFILE: 'errorUpgradeUnsupported',
+    UPGRADE_NPM_FAILED: 'errorUpgradeFailed', UPGRADE_CONFIG_FAILED: 'errorUpgradeConfig', UPGRADE_UNSUPPORTED_PROFILE: 'errorUpgradeUnsupported',
     UPGRADE_PROFILE_UNAVAILABLE: 'errorUpgradeProfileUnavailable',
     PLUGIN_BUILD_APPROVAL_REQUIRED: 'errorPluginBuildApproval',
     HOST_ALIAS_EXISTS: 'errorAliasExists', SERVICE_DISPOSED: 'errorServiceDisposed',
+    REMOTE_OPERATION_FAILED: 'errorRemoteOperation', SSH_REMOTE_REQUEST_FAILED: 'errorRemoteOperation',
     INVALID_PROFILE_ID: 'errorInvalidProfile', INVALID_WEB_URL: 'invalidWebUrl', INVALID_RESPONSE: 'invalidResponse',
     OPERATION_CANCELLED: 'errorCancelled', ALIAS_REQUIRED: 'aliasRequired', PROFILE_NOT_WEB: 'disabledNotWeb',
   };
@@ -486,9 +523,12 @@ function createSshLauncher(React, deps = {}) {
   }
   function statusTextFor(t, notice) {
     const code = typeof notice === 'string' ? notice : notice?.code;
-    if (!code) return t('requestFailed');
+    const detail = typeof notice === 'object' && typeof notice?.detail === 'string' ? notice.detail : '';
+    if (!code) return detail ? `${t('requestFailed')} (${detail})` : t('requestFailed');
     const key = NOTICE_KEYS[code] ?? ERROR_KEYS[code];
-    if (!key) return t('requestFailed');
+    // An unmapped code still has to be readable: the raw code, and the message
+    // the caller carried, are the only way to tell which failure happened.
+    if (!key) return detail ? `${t('requestFailed')} (${code}: ${detail})` : `${t('requestFailed')} (${code})`;
     const count = typeof notice === 'object' && Number.isSafeInteger(notice?.count) ? notice.count : undefined;
     return t(key, count);
   }
@@ -503,8 +543,24 @@ function createSshLauncher(React, deps = {}) {
     return t(key ?? 'hostState_unknown');
   }
   function emptyDetail(hostId = '') {
-    return { hostId, phase: 'idle', refreshing: false, profiles: [], hosts: [], profilesSource: 'default', connected: false, error: null };
+    return { hostId, phase: 'idle', refreshing: false, profiles: [], hosts: [], discovered: [], profilesSource: 'default', connected: false, error: null };
   }
+  function normalizeDiscovered(raw) {
+    const list = Array.isArray(raw?.hosts) ? raw.hosts : [];
+    return list.slice(0, 64).map((item) => {
+      const instanceId = firstString(item?.instanceId);
+      if (!instanceId || !/^[a-f0-9]{32}$/u.test(instanceId)) return null;
+      return {
+        instanceId,
+        profileId: firstString(item?.profileId),
+        pid: Number.isSafeInteger(item?.pid) ? item.pid : null,
+        port: Number.isSafeInteger(item?.port) ? item.port : null,
+        supervised: item?.supervised === true,
+        startedAt: firstString(item?.startedAt),
+      };
+    }).filter(Boolean);
+  }
+
   function profileRows(detail) {
     const profiles = new Map();
     for (const profile of detail.profiles) profiles.set(profile.id, { ...profile });
@@ -814,7 +870,7 @@ function createSshLauncher(React, deps = {}) {
         h(Button, { kind: 'danger', onClick: () => onStop(host), disabled: actions.stopDisabled, title: actions.stopHint }, t(stopping ? 'operation_stop' : 'stop'))));
   }
 
-  function DetailPane({ connection, detail, loading, busy, operation, viewMap, notice, onDismissNotice, onConnect, onCancel, onRefresh, onOpen, onStop, onUpgrade, onApprove, onDismiss, t }) {
+  function DetailPane({ connection, detail, loading, busy, operation, viewMap, notice, onDismissNotice, onConnect, onCancel, onRefresh, onOpen, onStop, onUpgrade, onApprove, onOpenDiscovered, onRestartDiscovered, onSyncDiscovered, onStopDiscovered, onDismiss, t }) {
     if (!connection) {
       return h('section', { className: 'wsh-ssh-detail wsh-ssh-empty', role: 'status' },
         h('strong', null, t('noConnections')), h('p', { className: 'wsh-ssh-muted' }, t('noConnectionsHint')));
@@ -839,6 +895,41 @@ function createSshLauncher(React, deps = {}) {
           h('p', { className: 'wsh-ssh-muted' }, t('emptyProfilesHint'))) : null,
       rows.length && detail.connected && !detail.hosts.length
         ? h('p', { className: 'wsh-ssh-status', role: 'status' }, t('noHosts'))
+        : null,
+      detail.connected
+        ? h('section', { className: 'wsh-ssh-discovered', 'data-discovered': '', 'aria-label': t('discoveredTitle') },
+          h('h3', null, t('discoveredTitle')),
+          h('p', { className: 'wsh-ssh-muted' }, t('discoveredHint')),
+          detail.discovered?.length
+            ? h('ul', { className: 'wsh-ssh-hosts wsh-ssh-discovered-list' }, detail.discovered.map((card) => h('li', {
+              key: card.instanceId, className: 'wsh-ssh-host wsh-ssh-discovered-row', 'data-discovered-instance': card.instanceId,
+            },
+              h('div', { className: 'wsh-ssh-host-main' },
+                h('strong', { className: 'wsh-ssh-host-title' }, card.profileId || card.instanceId.slice(0, 8)),
+                h('span', { className: 'wsh-ssh-muted' }, ` · ${t('discoveredMeta', card.pid ?? '—', card.port ?? '—')}`)),
+              h('div', { className: 'wsh-ssh-host-actions' },
+                h(Button, {
+                  onClick: () => onOpenDiscovered?.(card),
+                  disabled: Boolean(busy),
+                  'data-launcher-action': 'open-discovered',
+                }, t('discoveredOpen')),
+                h(Button, {
+                  onClick: () => onRestartDiscovered?.(card),
+                  disabled: Boolean(busy),
+                  'data-launcher-action': 'restart-discovered',
+                }, t('discoveredRestart')),
+                h(Button, {
+                  onClick: () => onSyncDiscovered?.(card),
+                  disabled: Boolean(busy),
+                  'data-launcher-action': 'sync-discovered',
+                }, t('discoveredSync')),
+                h(Button, {
+                  kind: 'danger',
+                  onClick: () => onStopDiscovered?.(card),
+                  disabled: Boolean(busy),
+                  'data-launcher-action': 'stop-discovered',
+                }, t('discoveredStop'))))))
+            : h('p', { className: 'wsh-ssh-status', role: 'status' }, t('discoveredEmpty')))
         : null);
   }
 
@@ -999,12 +1090,19 @@ function createSshLauncher(React, deps = {}) {
     const api = async (path, input, signal) => {
       const value = await apiRaw(path, input, signal);
       if (value && typeof value === 'object' && value.ok === false) {
-        throw Object.assign(new Error('The request failed.'), { code: safeError(value.error ?? value).code });
+        const reason = typeof value.error?.message === 'string' && value.error.message.trim()
+          ? value.error.message.trim().slice(0, 200) : 'The request failed.';
+        throw Object.assign(new Error(reason), { code: safeError(value.error ?? value).code });
       }
       return value;
     };
     const abortable = () => (typeof globalThis.AbortController === 'function' ? new globalThis.AbortController() : null);
-    const failure = (cause) => ({ kind: 'error', code: safeError(cause).code });
+    // Keep a short, bounded copy of the cause so an unmapped failure still
+    // says what went wrong; React renders it as text, never as markup.
+    const failure = (cause) => {
+      const message = typeof cause?.message === 'string' ? cause.message.trim().slice(0, 160) : '';
+      return { kind: 'error', code: safeError(cause).code, ...message ? { detail: message } : {} };
+    };
     const putNotice = (scope, notice) => setNotices((current) => ({ ...current, [scope]: notice }));
     const dropNotice = (scope) => setNotices((current) => {
       if (!Object.hasOwn(current, scope)) return current;
@@ -1091,7 +1189,12 @@ function createSshLauncher(React, deps = {}) {
       detailTokens.current.set(hostId, token);
       setDetails((current) => ({ ...current, [hostId]: { ...(current[hostId] ?? emptyDetail(hostId)), refreshing: true } }));
       try {
-        const value = normalizeWebList(await api('/web/list', { hostId }, controller?.signal));
+        const [value, discovered] = await Promise.all([
+          api('/web/list', { hostId }, controller?.signal).then(normalizeWebList),
+          // A host without cards support answers an empty list; discovery must
+          // never fail the Web Host list itself.
+          api('/web/discovered', { hostId }, controller?.signal).then(normalizeDiscovered, () => []),
+        ]);
         if (!alive.current || detailTokens.current.get(hostId) !== token) return null;
         setDetails((current) => {
           const before = current[hostId] ?? emptyDetail(hostId);
@@ -1099,7 +1202,7 @@ function createSshLauncher(React, deps = {}) {
             ...current,
             [hostId]: {
               hostId, refreshing: false, stale: false, error: null,
-              profiles: value.profiles, hosts: value.hosts, profilesSource: value.profilesSource,
+              profiles: value.profiles, hosts: value.hosts, discovered, profilesSource: value.profilesSource,
               connected: value.connected,
               phase: value.connected ? 'connected' : CONNECTED_PHASES.has(before.phase) ? 'idle' : before.phase,
             },
@@ -1448,6 +1551,25 @@ function createSshLauncher(React, deps = {}) {
       return true;
     }
 
+    async function cleanupRuntime(connection) {
+      if (!alive.current || busy || !connection) return false;
+      setBusy(`cleanup:${connection.id}`);
+      dropNotice(`host:${connection.id}`);
+      try {
+        const result = await api('/cleanup-runtime', { hostId: connection.id });
+        if (!alive.current) return false;
+        const freed = Number(result?.freedBytes) || 0;
+        notifySafely(freed > 0 ? t('cleanupRuntimeDone', `${(freed / (1024 * 1024)).toFixed(1)} MB`) : t('cleanupRuntimeNone'));
+        await loadDetail(connection.id);
+        return true;
+      } catch (cause) {
+        if (alive.current) putNotice(`host:${connection.id}`, failure(cause));
+        return false;
+      } finally {
+        if (alive.current) clearBusy(`cleanup:${connection.id}`);
+      }
+    }
+
     function openWeb(connection, profile) {
       if (!alive.current || busy || !connection) return;
       setBusy(`open:${connection.id}`);
@@ -1455,6 +1577,84 @@ function createSshLauncher(React, deps = {}) {
       dropNotice(`host:${connection.id}`);
       api('/web/open', { hostId: connection.id, profileId: profile.id }).then((value) => {
         if (alive.current) handoffWeb(connection, profile, value, 'open');
+      }, (cause) => {
+        if (alive.current) putNotice(`host:${connection.id}`, failure(cause));
+      }).finally(() => {
+        if (alive.current) clearBusy(`open:${connection.id}`);
+      });
+    }
+
+    async function restartDiscovered(connection, card) {
+      if (!alive.current || busy || !connection || !card?.instanceId) return false;
+      setBusy(`restart:${connection.id}`);
+      dropNotice(`host:${connection.id}`);
+      try {
+        await api('/web/discovered/restart', { hostId: connection.id, instanceId: card.instanceId });
+        if (!alive.current) return false;
+        notifySafely('discoveredRestarted');
+        await loadDetail(connection.id);
+        return true;
+      } catch (cause) {
+        if (alive.current) putNotice(`host:${connection.id}`, failure(cause));
+        return false;
+      } finally {
+        if (alive.current) clearBusy(`restart:${connection.id}`);
+      }
+    }
+
+    async function syncDiscovered(connection, card) {
+      if (!alive.current || busy || !connection || !card?.instanceId) return false;
+      setBusy(`sync:${connection.id}`);
+      dropNotice(`host:${connection.id}`);
+      try {
+        const result = await api('/web/discovered/sync', { hostId: connection.id, instanceId: card.instanceId });
+        if (!alive.current) return false;
+        const items = Array.isArray(result.items) ? result.items : [];
+        const failed = items.filter((item) => item.ok !== true).length;
+        const installed = items.filter((item) => item.ok === true).length;
+        const aligned = Array.isArray(result.config?.appended) ? result.config.appended.length : 0;
+        const configError = result.config?.error ? String(result.config.error) : '';
+        notifySafely(
+          failed ? t('discoveredSyncFailed', failed)
+            : configError ? configError
+              : installed || aligned ? t('discoveredSynced', installed, aligned)
+                : t('discoveredSyncedNone'),
+        );
+        await loadDetail(connection.id);
+        return true;
+      } catch (cause) {
+        if (alive.current) putNotice(`host:${connection.id}`, failure(cause));
+        return false;
+      } finally {
+        if (alive.current) clearBusy(`sync:${connection.id}`);
+      }
+    }
+
+    async function stopDiscovered(connection, card) {
+      if (!alive.current || busy || !connection || !card?.instanceId) return false;
+      setBusy(`stop:${connection.id}`);
+      dropNotice(`host:${connection.id}`);
+      try {
+        await api('/web/discovered/stop', { hostId: connection.id, instanceId: card.instanceId });
+        if (!alive.current) return false;
+        notifySafely('discoveredStopped');
+        await loadDetail(connection.id);
+        return true;
+      } catch (cause) {
+        if (alive.current) putNotice(`host:${connection.id}`, failure(cause));
+        return false;
+      } finally {
+        if (alive.current) clearBusy(`stop:${connection.id}`);
+      }
+    }
+
+    function openDiscovered(connection, card) {
+      if (!alive.current || busy || !connection || !card?.instanceId) return;
+      setBusy(`open:${connection.id}`);
+      dropNotice(`host:${connection.id}`);
+      api('/web/discovered/attach', { hostId: connection.id, instanceId: card.instanceId }).then((value) => {
+        if (!alive.current) return;
+        handoffWeb(connection, { id: firstString(value?.profileId, card.profileId) }, value, 'open');
       }, (cause) => {
         if (alive.current) putNotice(`host:${connection.id}`, failure(cause));
       }).finally(() => {
@@ -1577,6 +1777,7 @@ function createSshLauncher(React, deps = {}) {
       if (!connection) return;
       if (action === 'settings') { setPortNotice(null); setDialog({ type: 'settings', hostId: connection.id }); void loadDetail(connection.id); }
       else if (action === 'restart') void requestConnect(connection, { regenerate: true });
+      else if (action === 'cleanup-runtime') { dropNotice('confirm'); setDialog({ type: 'cleanup-runtime', hostId: connection.id }); }
       else if (action === 'disconnect') void disconnect(connection);
       else if (action === 'delete') { dropNotice('confirm'); setDialog({ type: 'delete', hostId: connection.id }); }
     }
@@ -1585,6 +1786,7 @@ function createSshLauncher(React, deps = {}) {
     const menuItems = [
       { action: 'settings', label: t('menuSettings') },
       { action: 'restart', label: t('menuRestart'), disabled: Boolean(busy) || !menuConnected },
+      { action: 'cleanup-runtime', label: t('menuCleanupRuntime'), disabled: Boolean(busy) || !menuConnected },
       { action: 'disconnect', label: t('menuDisconnect'), disabled: Boolean(busy) || !menuConnected },
       { action: 'delete', label: t('menuDelete'), disabled: Boolean(busy), danger: true },
     ];
@@ -1610,6 +1812,32 @@ function createSshLauncher(React, deps = {}) {
           message: t('deleteMessage'), confirmLabel: 'confirmDelete', busyLabel: 'deleting',
           busy: dialogBusy, danger: true, error: notices.confirm ?? null,
           onConfirm: () => { void deleteConnection(dialogConnection); },
+          onCancel: () => { if (!busy) setDialog(null); }, t,
+        }));
+    } else if (dialog?.type === 'sync-discovered' && dialogConnection) {
+      const card = dialog.card;
+      modal = h(Dialog, { title: `${t('confirmSyncDiscovered')}: ${card?.profileId ?? ''}`, onClose: () => { if (!busy) setDialog(null); }, busy: dialogBusy, t },
+        h(ConfirmPanel, {
+          message: t('syncDiscoveredMessage'), confirmLabel: 'discoveredSync', busyLabel: 'busyOpening',
+          busy: dialogBusy, danger: false,
+          onConfirm: () => { const connection = dialogConnection; setDialog(null); void syncDiscovered(connection, card); },
+          onCancel: () => { if (!busy) setDialog(null); }, t,
+        }));
+    } else if (dialog?.type === 'cleanup-runtime' && dialogConnection) {
+      modal = h(Dialog, { title: `${t('confirmCleanupRuntime')}: ${dialogConnection.name}`, onClose: () => { if (!busy) setDialog(null); }, busy: dialogBusy, t },
+        h(ConfirmPanel, {
+          message: t('cleanupRuntimeMessage'), confirmLabel: 'menuCleanupRuntime', busyLabel: 'busyOpening',
+          busy: dialogBusy, danger: true,
+          onConfirm: () => { const connection = dialogConnection; setDialog(null); void cleanupRuntime(connection); },
+          onCancel: () => { if (!busy) setDialog(null); }, t,
+        }));
+    } else if (dialog?.type === 'stop-discovered' && dialogConnection) {
+      const card = dialog.card;
+      modal = h(Dialog, { title: `${t('confirmStopDiscovered')}: ${card?.profileId ?? ''}`, onClose: () => { if (!busy) setDialog(null); }, busy: dialogBusy, t },
+        h(ConfirmPanel, {
+          message: t('stopDiscoveredMessage'), confirmLabel: 'discoveredStop', busyLabel: 'operation_stop',
+          busy: dialogBusy, danger: true,
+          onConfirm: () => { const connection = dialogConnection; setDialog(null); void stopDiscovered(connection, card); },
           onCancel: () => { if (!busy) setDialog(null); }, t,
         }));
     } else if (dialog?.type === 'stop' && dialogConnection) {
@@ -1655,6 +1883,10 @@ function createSshLauncher(React, deps = {}) {
           onStop: (host) => { if (selected && host) setDialog({ type: 'stop', hostId: selected.id, host }); },
           onUpgrade: (profile) => { if (selected) void upgradeHost(selected, profile); },
           onApprove: (profile) => { if (selected) void approveHost(selected, profile); },
+          onOpenDiscovered: (card) => { if (selected) openDiscovered(selected, card); },
+          onRestartDiscovered: (card) => { if (selected) void restartDiscovered(selected, card); },
+          onSyncDiscovered: (card) => { if (selected) setDialog({ type: 'sync-discovered', hostId: selected.id, card }); },
+          onStopDiscovered: (card) => { if (selected) setDialog({ type: 'stop-discovered', hostId: selected.id, card }); },
           onDismiss: () => dropNotice(`host:${selectedId}`), t,
         })),
       modal);
@@ -1731,7 +1963,12 @@ return { createSshLauncher };
 const { createSshRequest, createSshWorkspaceExtension, createSshComponentPlugin } = (() => {
 function createSshRequest(fetcher, lifetime) {
   const getPaths = new Set(['/status', '/ssh-hosts']);
-  const postPaths = new Set(['/hosts', '/connect', '/disconnect', '/sync/preview', '/sync', '/stop', '/interaction', '/ports', '/diagnostics', '/web/list', '/web/open', '/web/attach', '/web/stop']);
+  const postPaths = new Set([
+    '/hosts', '/connect', '/disconnect', '/sync/preview', '/sync', '/stop', '/interaction', '/ports', '/diagnostics',
+    '/web/list', '/web/open', '/web/attach', '/web/stop', '/web/discovered', '/web/discovered/attach',
+    '/web/discovered/stop', '/web/discovered/restart', '/web/discovered/sync', '/cleanup-runtime',
+    '/upgrade', '/upgrade/approve',
+  ]);
   const error = (code) => Object.assign(new Error(code), { code });
   return async (path, { body = {}, signal } = {}) => {
     if (!getPaths.has(path) && !postPaths.has(path)) throw error('WORKSPACE_INVALID_REQUEST');

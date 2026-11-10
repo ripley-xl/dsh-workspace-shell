@@ -6,7 +6,8 @@ import { Readable } from 'node:stream';
 import test from 'node:test';
 
 import {
-  createProfileUpgradeService, isDesktopCli, parseIgnoredBuilds, patchPnpmCommand,
+  applyBuildApprovals, approveBuildNames, createProfileUpgradeService, isDesktopCli, parseIgnoredBuilds,
+  patchPnpmCommand,
 } from '../../../packages/shell/src/host/profile-upgrade.js';
 
 const TEMP_PREFIX = path.join(os.tmpdir(), 'dsh-profile-upgrade-');
@@ -246,23 +247,152 @@ test('successful align upgrades DSH, dependencies, bundles and patch config with
 test('parseIgnoredBuilds keeps bounded safe package identities only', () => {
   assert.deepEqual(parseIgnoredBuilds('[ERR_PNPM_IGNORED_BUILDS] Ignored build scripts: a@1.0.0, @s/b@2.0.0'), ['a@1.0.0', '@s/b@2.0.0']);
   assert.deepEqual(parseIgnoredBuilds('Ignored build scripts: bad name!, ok@1'), ['ok@1']);
+  assert.deepEqual(parseIgnoredBuilds('Ignored build scripts: dep@file:../dep-1.0.0.tgz, x@https://codeload.github.com/u/r/tar.gz/abc#sha'),
+    ['dep@file:../dep-1.0.0.tgz', 'x@https://codeload.github.com/u/r/tar.gz/abc#sha']);
+  assert.deepEqual(parseIgnoredBuilds(`Ignored build scripts: ${'a'.repeat(513)}`), []);
   assert.deepEqual(parseIgnoredBuilds('nothing to approve'), []);
   assert.deepEqual(parseIgnoredBuilds(null), []);
 });
 
-test('ignored build-script approvals complete the upgrade instead of rolling it back', async (t) => {
+test('approveBuildNames keys registry packages by name and keeps linked specs whole', () => {
+  assert.deepEqual(approveBuildNames(['@jackwener/opencli@2.0.0', 'esbuild@0.25.1', 'esbuild']), ['@jackwener/opencli', 'esbuild']);
+  assert.deepEqual(approveBuildNames(['pkg@1.2.3-rc.1+sha.1']), ['pkg']);
+  assert.deepEqual(approveBuildNames(['dep@file:../dep-1.0.0.tgz', 'pkg@link:../pkg', 'x@github:u/r#abc']),
+    ['dep@file:../dep-1.0.0.tgz', 'pkg@link:../pkg', 'x@github:u/r#abc'],
+    'pnpm matches git/file/link builds by the full spec, not the bare name');
+  assert.deepEqual(approveBuildNames(['bad name!', '@scope/x', '']), ['@scope/x']);
+  assert.deepEqual(approveBuildNames(null), []);
+  assert.deepEqual(approveBuildNames([1, null, 'ok']), ['ok']);
+});
+
+test('applyBuildApprovals extends allowBuilds and leaves declared denials alone', () => {
+  const source = 'packages:\n  - .\nallowBuilds:\n  "@google/genai": true\n  koffi: false\n';
+  const extended = applyBuildApprovals(source, ['koffi', 'esbuild']);
+  assert.deepEqual(extended.added, ['esbuild']);
+  assert.equal(extended.text, `${source}  "esbuild": true\n`);
+
+  assert.deepEqual(applyBuildApprovals('', ['esbuild']), { text: 'allowBuilds:\n  "esbuild": true\n', added: ['esbuild'] });
+  assert.deepEqual(applyBuildApprovals('packages:\n  - .\n', ['esbuild']), {
+    text: 'packages:\n  - .\nallowBuilds:\n  "esbuild": true\n', added: ['esbuild'],
+  });
+  assert.deepEqual(applyBuildApprovals(null, []), { text: '', added: [] });
+  assert.deepEqual(applyBuildApprovals(source, ['@google/genai', 'koffi']).added, []);
+});
+
+test('applyBuildApprovals never appends a duplicate key for flow-style or CRLF files', () => {
+  for (const source of ['allowBuilds: {}\n', 'allowBuilds: []\n', 'allowBuilds: {"a": true}\n', 'allowBuilds: # none\npackages:\n  - .\n']) {
+    const result = applyBuildApprovals(source, ['esbuild']);
+    assert.deepEqual(result.added, [], `no approval is written for ${JSON.stringify(source)}`);
+    assert.equal(result.text, source, 'the file is never left with two allowBuilds keys');
+  }
+  const crlf = 'packages:\r\n  - .\r\nallowBuilds:\r\n  esbuild: true\r\n';
+  const result = applyBuildApprovals(crlf, ['opencli', 'esbuild']);
+  assert.deepEqual(result.added, ['opencli']);
+  assert.match(result.text, /^packages:\r\n {2}- \.\r\nallowBuilds:\r\n {2}esbuild: true\r\n {2}"opencli": true/u);
+  assert.equal((result.text.match(/allowBuilds:/gu) ?? []).length, 1);
+});
+
+test('a versioned allowBuilds entry does not mask a pending bare-name approval', () => {
+  const source = 'allowBuilds:\n  esbuild@0.25.1: true\n';
+  const result = applyBuildApprovals(source, ['esbuild']);
+  assert.deepEqual(result.added, ['esbuild']);
+  assert.equal(result.text, 'allowBuilds:\n  esbuild@0.25.1: true\n  "esbuild": true\n');
+});
+
+const IGNORED_BUILD_OUTPUT = [
+  '[ERR_PNPM_IGNORED_BUILDS] Ignored build scripts: @jackwener/opencli@2.0.0',
+  '',
+  'Run "pnpm approve-builds" to pick which dependencies should be allowed to run scripts.',
+  '',
+].join('\n');
+
+test('ignored build scripts are approved by the upgrade and installed on retry', async (t) => {
   const fixtureValue = await fixture(t, {
     subprocess: {
-      pnpmExit: 1,
-      pnpmStdout: '[ERR_PNPM_IGNORED_BUILDS] Ignored build scripts: @jackwener/opencli@2.0.0\n\nRun "pnpm approve-builds" to pick which dependencies should be allowed to run scripts.\n',
+      pnpmExit: (call) => call === 1 ? 1 : 0,
+      pnpmStdout: (call) => call === 1 ? IGNORED_BUILD_OUTPUT : '',
     },
   });
   fixtureValue.service.start({ profileId: 'web', dshVersion: '0.2.1-rc.5' });
   const final = await waitForState(fixtureValue.service, { profileId: 'web' });
-  assert.deepEqual(final, { phase: 'done', step: 'validate', ignoredBuilds: ['@jackwener/opencli@2.0.0'] });
+  assert.deepEqual(final, { phase: 'done', step: 'validate' }, 'no pending approval is reported');
+  const workspace = await fs.readFile(path.join(fixtureValue.webDir, 'pnpm-workspace.yaml'), 'utf8');
+  assert.equal(workspace, 'allowBuilds:\n  "@jackwener/opencli": true\n');
+  assert.deepEqual(fixtureValue.fake.pnpmCalls.map((call) => call.argv), [[PNPM, 'install'], [PNPM, 'install']],
+    'the install is retried once the build is approved');
   const manifest = JSON.parse(await fs.readFile(path.join(fixtureValue.webDir, 'package.json'), 'utf8'));
   assert.equal(manifest.dependencies['dsh-extra'], '2.0.0', 'the dependency rewrite is kept');
   assert.equal(fixtureValue.fake.dumpCount, 2, 'dump-config still validates the installed tree');
+});
+
+test('a build the profile explicitly denies stays pending', async (t) => {
+  const fixtureValue = await fixture(t, {
+    subprocess: { pnpmExit: 1, pnpmStdout: '[ERR_PNPM_IGNORED_BUILDS] Ignored build scripts: koffi@3.0.0\n' },
+  });
+  const workspacePath = path.join(fixtureValue.webDir, 'pnpm-workspace.yaml');
+  const original = 'packages:\n  - .\nallowBuilds:\n  koffi: false\n';
+  await fs.writeFile(workspacePath, original);
+  fixtureValue.service.start({ profileId: 'web', dshVersion: '0.2.1-rc.5' });
+  const final = await waitForState(fixtureValue.service, { profileId: 'web' });
+  assert.deepEqual(final, { phase: 'done', step: 'validate', ignoredBuilds: ['koffi@3.0.0'] });
+  assert.equal(await fs.readFile(workspacePath, 'utf8'), original, 'a denial is never flipped to true');
+  assert.deepEqual(fixtureValue.fake.pnpmCalls.map((call) => call.argv), [[PNPM, 'install']],
+    'a denied build is not retried');
+});
+
+test('a linked dependency is approved by its full spec, not its bare name', async (t) => {
+  const identity = 'dsh-workspace-guest@file:../guest/dsh-workspace-guest-0.5.27.tgz';
+  const fixtureValue = await fixture(t, {
+    subprocess: {
+      pnpmExit: (call) => call === 1 ? 1 : 0,
+      pnpmStdout: (call) => call === 1 ? `[ERR_PNPM_IGNORED_BUILDS] Ignored build scripts: ${identity}\n` : '',
+    },
+  });
+  fixtureValue.service.start({ profileId: 'web', dshVersion: '0.2.1-rc.5' });
+  const final = await waitForState(fixtureValue.service, { profileId: 'web' });
+  assert.deepEqual(final, { phase: 'done', step: 'validate' });
+  const workspace = await fs.readFile(path.join(fixtureValue.webDir, 'pnpm-workspace.yaml'), 'utf8');
+  assert.equal(workspace, `allowBuilds:\n  "${identity}": true\n`);
+  assert.deepEqual(fixtureValue.fake.pnpmCalls.map((call) => call.argv), [[PNPM, 'install'], [PNPM, 'install']]);
+});
+
+test('an allowBuilds file the approval created is removed again on rollback', async (t) => {
+  const fixtureValue = await fixture(t, {
+    subprocess: {
+      pnpmExit: (call) => call === 1 ? 1 : 0,
+      pnpmStdout: (call) => call === 1 ? IGNORED_BUILD_OUTPUT : '',
+      dumpFailure: (count) => count === 2,
+    },
+  });
+  const workspacePath = path.join(fixtureValue.webDir, 'pnpm-workspace.yaml');
+  await assert.rejects(fs.stat(workspacePath));
+  const before = await originalFiles(fixtureValue);
+  fixtureValue.service.start({ profileId: 'web', dshVersion: '0.2.1-rc.5' });
+  const final = await waitForState(fixtureValue.service, { profileId: 'web' });
+  assert.equal(final.phase, 'failed');
+  assert.equal(final.error, 'UPGRADE_VALIDATION_FAILED');
+  await assert.rejects(fs.stat(workspacePath), 'the file the upgrade created is gone again');
+  assert.deepEqual(await originalFiles(fixtureValue), before);
+});
+
+test('a failed retry restores the allowBuilds map the upgrade added', async (t) => {
+  const fixtureValue = await fixture(t, {
+    subprocess: {
+      pnpmExit: (call) => call === 1 ? 1 : call === 2 ? 1 : 0,
+      pnpmStdout: (call) => call === 1 ? IGNORED_BUILD_OUTPUT : '',
+    },
+  });
+  const workspacePath = path.join(fixtureValue.webDir, 'pnpm-workspace.yaml');
+  const original = 'packages:\n  - .\n';
+  await fs.writeFile(workspacePath, original);
+  const before = await originalFiles(fixtureValue);
+  fixtureValue.service.start({ profileId: 'web', dshVersion: '0.2.1-rc.5' });
+  const final = await waitForState(fixtureValue.service, { profileId: 'web' });
+  assert.equal(final.phase, 'failed');
+  assert.equal(await fs.readFile(workspacePath, 'utf8'), original);
+  assert.deepEqual(await originalFiles(fixtureValue), before);
+  assert.deepEqual(fixtureValue.fake.pnpmCalls.map((call) => call.argv),
+    [[PNPM, 'install'], [PNPM, 'install'], [PNPM, 'install', '--frozen-lockfile']]);
 });
 
 test('profiles without a desktop profile only move registry dependencies to latest', async (t) => {

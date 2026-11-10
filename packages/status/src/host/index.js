@@ -1,5 +1,6 @@
 import { registerPluginSharingRoutes } from './plugin-sharing.js';
 import { registerSyncBackupRoute } from './sync-backup.js';
+import { registerPluginConfigRoute } from './plugin-config.js';
 
 const JSON_HEADERS = { 'cache-control': 'no-store' };
 const MAX_BODY_BYTES = 64 * 1024;
@@ -116,6 +117,7 @@ export function apply(ctx, config) {
 
   registerPluginSharingRoutes(ctx, (path, methods, handler) => route(ctx, path, methods, handler), body);
   registerSyncBackupRoute(ctx, (path, methods, handler) => route(ctx, path, methods, handler), body);
+  registerPluginConfigRoute(ctx, (path, methods, handler) => route(ctx, path, methods, handler), body);
 
   route(ctx, '/api/ssh-remote/settings/describe', ['POST'], async () => ({
     ok: true,

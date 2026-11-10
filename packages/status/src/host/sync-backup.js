@@ -19,7 +19,7 @@ function entryIdentity(entry) {
   return result;
 }
 
-function profileDirectory(prepared, configEditor) {
+export function profileDirectory(prepared, configEditor) {
   const directory = prepared?.profileDir ?? prepared?.dir ?? prepared?.profile?.dir;
   const documentPath = (typeof prepared === 'string' ? prepared : undefined)
     ?? prepared?.documentPath ?? prepared?.path ?? prepared?.document?.path ?? configEditor.documentPath;

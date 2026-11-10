@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { buildPluginAlignmentPlan } from '../../../packages/manager/src/host/plugin-alignment.js';
+import {
+  buildPluginAlignmentPlan, DESKTOP_ONLY_PLUGINS, planPluginSync,
+} from '../../../packages/manager/src/host/plugin-alignment.js';
+import { EXCLUDED_PACKAGES } from '../../../packages/shell/src/host/desktop-align.js';
 import { serviceFixture } from './helpers.mjs';
 
 const CODEX = '@deepseek-ai/dsh-subagent-codex';
@@ -264,4 +267,97 @@ test('a profile Host aligns its own plugins and restarts only when required', as
   const stoppedProfileInstances = fixture.state.instances
     .filter((entry) => entry.instance.profileId === 'work' && entry.health.healthy === false);
   assert.equal(stoppedProfileInstances.length, 1);
+});
+
+test('planPluginSync installs local registry plugins the remote profile lacks', () => {
+  const plan = planPluginSync({
+    localBundles: [
+      { name: 'dsh-meme', version: '0.1.80', source: 'dsh-meme@0.1.80', installed: true, official: false, availability: 'profile' },
+      { name: 'dsh-carbon', version: '1.0.0', installTarget: { spec: 'dsh-carbon@1.0.0' }, installed: true, official: false, availability: 'profile' },
+      { name: '@acme/code', version: '2.0.0', source: 'github:acme/code#abc', installed: true, official: false, availability: 'profile' },
+    ],
+    remoteBundles: [{ name: 'dsh-context', version: '0.83.1', installed: true, official: false, availability: 'profile' }],
+  });
+  assert.deepEqual(plan.operations.map((item) => [item.name, item.action, item.spec]), [
+    ['dsh-meme', 'install', 'dsh-meme@0.1.80'],
+    ['dsh-carbon', 'install', 'dsh-carbon@1.0.0'],
+    ['@acme/code', 'install', 'github:acme/code#abc'],
+  ]);
+  assert.deepEqual(plan.skipped, []);
+});
+
+test('the manager desktop-only list stays identical to the shell alignment exclusions', () => {
+  assert.deepEqual([...DESKTOP_ONLY_PLUGINS].sort(), [...EXCLUDED_PACKAGES].sort(),
+    'a plugin excluded from the local web profile must not reach a remote web profile either');
+});
+
+test('planPluginSync skips every desktop-only plugin even when it has a registry spec', () => {
+  const plan = planPluginSync({
+    localBundles: DESKTOP_ONLY_PLUGINS.map((name, index) => ({
+      name, version: '1.0.0', source: `${name}@1.0.0`, installed: true, official: false, availability: 'profile',
+    })),
+    remoteBundles: [],
+  });
+  assert.deepEqual(plan.operations, []);
+});
+
+test('planPluginSync ignores local-only installs, official bundles and matching versions', () => {
+  const plan = planPluginSync({
+    localBundles: [
+      { name: 'dsh-subagent-model', version: '0.1.1', source: 'link:/Users/me/plugins/model', installed: true, official: false, availability: 'profile' },
+      { name: 'local-shell', version: '0.5.31', source: 'file:/Users/me/shell.tgz', installed: true, official: false, availability: 'profile' },
+      { name: 'local-tar', version: '1.0.0', installTarget: { spec: 'file:../local-tar-1.0.0.tgz' }, installed: true, official: false, availability: 'profile' },
+      { name: '@deepseek-ai/dsh-web-app', version: '0.2.2-rc.1', installed: true, official: true, availability: 'profile' },
+      { name: 'dsh-context', version: '0.83.1', source: 'dsh-context@0.83.1', installed: true, official: false, availability: 'profile' },
+      { name: '@local/dsh-ssh-remote', version: '0.3.14', source: 'file:../manager.tgz', installed: true, official: false, availability: 'profile' },
+    ],
+    remoteBundles: [{ name: 'dsh-context', version: '0.83.1', installed: true, official: false, availability: 'profile' }],
+  });
+  assert.deepEqual(plan.operations, []);
+  assert.deepEqual(plan.skipped.map((item) => item.name).sort(), ['dsh-subagent-model', 'local-shell', 'local-tar'].sort());
+});
+
+test('planPluginSync upgrades a remote plugin that is older than the local one', () => {
+  const plan = planPluginSync({
+    localBundles: [{ name: 'dsh-context', version: '0.83.1', source: 'dsh-context@0.83.1', installed: true, official: false, availability: 'profile' }],
+    remoteBundles: [{ name: 'dsh-context', version: '0.83.0', installed: true, official: false, availability: 'profile' }],
+  });
+  assert.deepEqual(plan.operations, [{
+    name: 'dsh-context', action: 'upgrade', spec: 'dsh-context@0.83.1', fromVersion: '0.83.0', toVersion: '0.83.1',
+  }]);
+});
+
+test('planPluginSync reinstalls a git install whose spec changed even at the same version', () => {
+  const plan = planPluginSync({
+    localBundles: [{
+      name: 'dsh-codex-cua', version: '0.1.0', source: 'github:owner/cua#newsha', installed: true, official: false, availability: 'profile',
+    }],
+    remoteBundles: [{
+      name: 'dsh-codex-cua', version: '0.1.0', source: 'github:owner/cua#oldsha', installed: true, official: false, availability: 'profile',
+    }],
+  });
+  assert.deepEqual(plan.operations, [{
+    name: 'dsh-codex-cua', action: 'upgrade', spec: 'github:owner/cua#newsha',
+    fromVersion: '0.1.0', toVersion: '0.1.0', fromSpec: 'github:owner/cua#oldsha',
+  }]);
+});
+
+test('planPluginSync leaves a git install alone when the spec is unchanged', () => {
+  const plan = planPluginSync({
+    localBundles: [{
+      name: 'dsh-codex-cua', version: '0.1.0', source: 'github:owner/cua#same', installed: true, official: false, availability: 'profile',
+    }],
+    remoteBundles: [{
+      name: 'dsh-codex-cua', version: '0.1.0', source: 'github:owner/cua#same', installed: true, official: false, availability: 'profile',
+    }],
+  });
+  assert.deepEqual(plan.operations, []);
+});
+
+test('planPluginSync keeps a remote plugin that is newer than the local copy', () => {
+  const plan = planPluginSync({
+    localBundles: [{ name: 'dsh-context', version: '0.83.0', source: 'dsh-context@0.83.0', installed: true, official: false, availability: 'profile' }],
+    remoteBundles: [{ name: 'dsh-context', version: '0.83.1', installed: true, official: false, availability: 'profile' }],
+  });
+  assert.deepEqual(plan.operations, []);
 });

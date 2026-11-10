@@ -57,3 +57,20 @@ test('a bounded connect timeout transitions to failed', async (t) => {
   await assert.rejects(fixture.service.connect(record.id), (error) => error.code === 'OPERATION_TIMEOUT');
   assert.equal(fixture.service.publicConnection(record.id).phase, 'failed');
 });
+
+test('a returning connection uploads the local plugin snapshot for the remote plugin page', async (t) => {
+  const localBundles = [
+    { name: 'dsh-meme', version: '0.1.80', official: false, availability: 'profile' },
+    { name: 'dsh-composer-plus', version: '1.25.0', official: false, availability: 'profile' },
+  ];
+  const fixture = await serviceFixture({ localBundles: async () => localBundles });
+  t.after(fixture.close);
+  const record = await fixture.store.upsert({ hostAlias: 'p0-test', syncPolicy: { appearance: false } });
+  // A second Desktop start finds lastConnectedAt set and skips the initial
+  // sync, so only the connect-time snapshot upload can fill the remote list.
+  await fixture.store.markConnected(record.id, { instanceId: 'previous', version: '1.0.0', buildId: 'build-previous' });
+  await fixture.service.connect(record.id);
+  const uploads = fixture.state.calls.filter((call) => call.path === '/api/ssh-remote/plugins/local-inventory');
+  assert.equal(uploads.length, 1);
+  assert.deepEqual(uploads[0].body.snapshot.bundles.map((bundle) => bundle.name), ['dsh-meme', 'dsh-composer-plus']);
+});

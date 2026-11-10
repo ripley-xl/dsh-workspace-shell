@@ -23,7 +23,7 @@ function snapshot(bundles = [bundle('@official/example')]) {
   return { schemaVersion: 1, bundles };
 }
 
-function fixture(remote = [], { enableError = null } = {}) {
+function fixture(remote = [], { enableError = null, configEditor = null } = {}) {
   const routes = new Map();
   const calls = [];
   const state = { remote };
@@ -51,6 +51,7 @@ function fixture(remote = [], { enableError = null } = {}) {
       },
       async setVersionExemption() { throw new Error('Version exemptions must not be granted.'); },
     },
+    ...configEditor ? { configEditor } : {},
     settings: { describe: () => [], async update() {} },
     credentials: { async describe() { return { configured: false, writable: true }; }, async set() {} },
     effect(callback) { callback(); },
@@ -221,4 +222,76 @@ test('validateLocalPluginSnapshot returns a canonical white-listed clone', () =>
   assert.deepEqual(validated, input);
   assert.notEqual(validated, input);
   assert.notEqual(validated.bundles[0], input.bundles[0]);
+});
+
+test('plugin config sync edits only the entries it was given and drops secrets', async (t) => {
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const profileDir = await mkdtemp(join(tmpdir(), 'dsh-plugin-config-'));
+  t.after(() => rm(profileDir, { recursive: true, force: true }));
+  const edits = [];
+  const configEditor = {
+    documentPath: join(profileDir, 'cordis.patch.yml'),
+    configuration: () => [],
+    prepareDocument: async () => ({ profileDir }),
+    entries: () => [
+      { options: { id: 'meme-settings', name: 'dsh-meme' } },
+      { options: { id: 'other-settings', name: 'dsh-other' } },
+    ],
+    async edit(entry, change) {
+      edits.push({ id: entry.options.id, value: change({}, {}) });
+    },
+  };
+  const { routes } = fixture([], { configEditor });
+  const result = await post(routes, '/api/ssh-remote/plugins/config', {
+    entries: [{ id: 'meme-settings', name: 'dsh-meme', config: { theme: 'cat', apiKey: 'SECRET', path: '/Users/me/file' } }],
+  });
+  assert.equal(result.response.status, 200);
+  assert.equal(result.value.ok, true);
+  assert.deepEqual(result.value.items, [{ id: 'meme-settings', name: 'dsh-meme', ok: true }]);
+  assert.deepEqual(edits, [{ id: 'meme-settings', value: { theme: 'cat' } }], 'secrets and local paths never reach the entry');
+  assert.ok(result.value.backup?.path?.startsWith(profileDir), 'the profile is backed up before the edit');
+
+  const missing = await post(routes, '/api/ssh-remote/plugins/config', {
+    entries: [{ id: 'gone', name: 'dsh-gone', config: { theme: 'cat' } }],
+  });
+  assert.equal(missing.value.ok, false);
+  assert.deepEqual(missing.value.items, [{ id: 'gone', name: 'dsh-gone', ok: false, error: 'entry-missing' }]);
+  assert.equal(edits.length, 1, 'a missing entry edits nothing');
+
+  const invalid = await post(routes, '/api/ssh-remote/plugins/config', { entries: [] });
+  assert.equal(invalid.response.status, 400);
+});
+
+test('a config entry the remote lacks is created once the plugin is installed', async (t) => {
+  const { mkdtemp, readFile, writeFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const profileDir = await mkdtemp(join(tmpdir(), 'dsh-plugin-config-create-'));
+  t.after(() => rm(profileDir, { recursive: true, force: true }));
+  await writeFile(join(profileDir, 'cordis.patch.yml'), '# patch\n- id: ui-theme\n  name: "@deepseek-ai/dsh-client-ui-theme"\n');
+  const configEditor = {
+    documentPath: join(profileDir, 'cordis.patch.yml'),
+    configuration: () => [],
+    prepareDocument: async () => ({ profileDir }),
+    entries: () => [],
+    async edit() { throw new Error('nothing to edit'); },
+  };
+  const { routes } = fixture([bundle('dsh-meme', { official: false, optional: false })], { configEditor });
+  const created = await post(routes, '/api/ssh-remote/plugins/config', {
+    entries: [{ id: 'meme-settings', name: 'dsh-meme', config: { theme: 'cat' } }],
+  });
+  assert.equal(created.response.status, 200);
+  assert.deepEqual(created.value.items, [{ id: 'meme-settings', name: 'dsh-meme', ok: true, created: true }]);
+  assert.equal(created.value.restartRequired, true, 'a new entry only applies after a reload');
+  const patch = await readFile(join(profileDir, 'cordis.patch.yml'), 'utf8');
+  assert.match(patch, /- id: meme-settings\n {2}name: "dsh-meme"\n {2}config: \{"theme":"cat"\}\n/u);
+
+  const unknown = await post(routes, '/api/ssh-remote/plugins/config', {
+    entries: [{ id: 'gone-settings', name: 'dsh-absent', config: { theme: 'cat' } }],
+  });
+  assert.deepEqual(unknown.value.items, [{ id: 'gone-settings', name: 'dsh-absent', ok: false, error: 'entry-missing' }]);
+  assert.equal(unknown.value.restartRequired, false);
+  assert.equal((await readFile(join(profileDir, 'cordis.patch.yml'), 'utf8')).includes('gone-settings'), false);
 });

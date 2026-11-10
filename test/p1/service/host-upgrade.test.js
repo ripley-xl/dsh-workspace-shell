@@ -185,6 +185,101 @@ test('one failing plugin is reported without rolling back the successful ones', 
   assert.equal(fixture.state.pluginInstalls.some((item) => item.spec === '@acme/two@2.0.0'), true);
 });
 
+test('an upgrade pushes config only for the plugins it touched', async (t) => {
+  const localBundles = [
+    { name: 'dsh-meme', version: '0.1.80', source: 'dsh-meme@0.1.80', installed: true, official: false, availability: 'profile' },
+  ];
+  const configEditor = {
+    configuration: () => [
+      { entry: { options: { id: 'meme-settings', name: 'dsh-meme' } }, override: { theme: 'cat', apiKey: 'SECRET', path: '/Users/me/file' } },
+      { entry: { options: { id: 'pet-settings', name: 'dsh-pet' } }, override: { theme: 'dog' } },
+    ],
+  };
+  const { fixture, record } = await connectedFixture(t, { localBundles: async () => localBundles, configEditor });
+  await fixture.service.webList(record.id);
+  await waitFor(() => fixture.service.profileHosts(record.id).find((item) => item.profileId === 'web')?.pluginsUpgradable === true);
+  fixture.state.calls.length = 0;
+  await fixture.service.upgradeHost({ hostId: record.id, profileId: 'web' });
+  const upgrade = await waitForUpgradeEnd(fixture, record.id);
+  assert.equal(upgrade.phase, 'done');
+  const call = fixture.state.calls.find((entry) => entry.path === '/api/ssh-remote/plugins/config');
+  assert.ok(call, 'the touched plugin config is sent');
+  assert.deepEqual(call.body.entries, [{
+    id: 'meme-settings', name: 'dsh-meme', config: { theme: 'cat' },
+  }], 'secrets and local paths stay home; unrelated plugins are not sent');
+});
+
+test('a failed config sync is reported without losing the installed plugin', async (t) => {
+  const localBundles = [
+    { name: 'dsh-meme', version: '0.1.80', source: 'dsh-meme@0.1.80', installed: true, official: false, availability: 'profile' },
+  ];
+  const configEditor = { configuration: () => [{ entry: { options: { id: 'meme-settings', name: 'dsh-meme' } }, override: { theme: 'cat' } }] };
+  const { fixture, record } = await connectedFixture(t, { localBundles: async () => localBundles, configEditor });
+  fixture.state.failPluginConfig = true;
+  await fixture.service.webList(record.id);
+  await waitFor(() => fixture.service.profileHosts(record.id).find((item) => item.profileId === 'web')?.pluginsUpgradable === true);
+  await fixture.service.upgradeHost({ hostId: record.id, profileId: 'web' });
+  const upgrade = await waitForUpgradeEnd(fixture, record.id);
+  assert.equal(upgrade.phase, 'failed');
+  assert.equal(upgrade.error.code, 'UPGRADE_CONFIG_FAILED');
+  assert.equal(upgrade.items.find((item) => item.name === 'dsh-meme').ok, true, 'the plugin install itself is kept');
+});
+
+test('a changed git spec reinstalls the remote plugin even at the same version', async (t) => {
+  const localBundles = [{
+    name: 'dsh-codex-cua', version: '0.1.0', source: 'github:owner/cua#newsha', installed: true, official: false, availability: 'profile',
+  }];
+  const { fixture, record } = await connectedFixture(t, {
+    localBundles: async () => localBundles,
+    remotePlugins: [{
+      name: 'dsh-codex-cua', version: '0.1.0', source: 'github:owner/cua#oldsha', installed: true, official: false, availability: 'profile',
+    }],
+  });
+  await fixture.service.webList(record.id);
+  await waitFor(() => fixture.service.profileHosts(record.id).find((item) => item.profileId === 'web')?.pluginsUpgradable === true);
+  await fixture.service.upgradeHost({ hostId: record.id, profileId: 'web' });
+  const upgrade = await waitForUpgradeEnd(fixture, record.id);
+  assert.equal(upgrade.phase, 'done');
+  assert.deepEqual(fixture.state.pluginRemovals, ['dsh-codex-cua']);
+  assert.deepEqual(fixture.state.pluginInstalls.map((item) => item.spec), ['github:owner/cua#newsha']);
+});
+
+test('a failed git reinstall puts the previous pinned spec back', async (t) => {
+  const localBundles = [{
+    name: 'dsh-codex-cua', version: '0.1.0', source: 'github:owner/cua#newsha', installed: true, official: false, availability: 'profile',
+  }];
+  const { fixture, record } = await connectedFixture(t, {
+    localBundles: async () => localBundles,
+    remotePlugins: [{
+      name: 'dsh-codex-cua', version: '0.1.0', source: 'github:owner/cua#oldsha', installed: true, official: false, availability: 'profile',
+    }],
+  });
+  fixture.state.failPluginInstallSpecs = ['github:owner/cua#newsha'];
+  await fixture.service.upgradeHost({ hostId: record.id, profileId: 'web' });
+  const upgrade = await waitForUpgradeEnd(fixture, record.id);
+  assert.equal(upgrade.phase, 'failed');
+  assert.deepEqual(fixture.state.pluginInstalls.map((item) => item.spec),
+    ['github:owner/cua#newsha', 'github:owner/cua#oldsha'], 'the old pin is reinstalled after the failure');
+});
+
+test('a bundle with no npm dist-tag is left alone instead of failing the upgrade', async (t) => {
+  const { fixture, record } = await connectedFixture(t, {
+    pluginLatest: { '@acme/one': '1.5.0' },
+    remotePlugins: [
+      { name: '@acme/one', version: '1.0.0', spec: '@acme/one@1.0.0', official: false },
+      // A github: install has no spec in the remote inventory and no npm dist-tag.
+      { name: 'dsh-codex-cua', version: '0.1.0', spec: null, official: false },
+    ],
+  });
+  fixture.setLatestRuntimeVersion('2.0.0');
+  await fixture.service.upgradeHost({ hostId: record.id, profileId: 'web' });
+  const upgrade = await waitForUpgradeEnd(fixture, record.id);
+  assert.equal(upgrade.phase, 'done');
+  assert.equal(upgrade.items.some((item) => item.name === 'dsh-codex-cua'), false, 'not an npm package, no verdict');
+  assert.equal(upgrade.items.find((item) => item.name === '@acme/one').ok, true);
+  assert.equal(fixture.state.pluginInstalls.some((item) => item.name === 'dsh-codex-cua'), false);
+});
+
 test('an unresolved registry version is reported as UPGRADE_REGISTRY_UNAVAILABLE', async (t) => {
   const { fixture, record } = await connectedFixture(t, {
     remotePlugins: [{ name: '@acme/unknown', version: '1.0.0', spec: '@acme/unknown@1.0.0', official: false }],
@@ -296,6 +391,105 @@ test('an installed plugin behind latest is removed then reinstalled at latest', 
   assert.deepEqual(fixture.state.pluginRemovals, ['@acme/one'], 'an existing version must be removed first');
   assert.deepEqual(fixture.state.pluginInstalls.map((item) => item.spec), ['@acme/one@1.5.0']);
   assert.equal(upgrade.items.find((item) => item.name === '@acme/one').ok, true);
+});
+
+test('a missing local plugin that needs a build approval is recorded and retried after approval', async (t) => {
+  const localBundles = [
+    { name: 'dsh-meme', version: '0.1.80', source: 'dsh-meme@0.1.80', installed: true, official: false, availability: 'profile' },
+  ];
+  const { fixture, record } = await connectedFixture(t, { localBundles: async () => localBundles });
+  fixture.state.pluginBuildBlockedSpecs = ['dsh-meme@0.1.80'];
+  await fixture.service.webList(record.id);
+  await waitFor(() => fixture.service.profileHosts(record.id).find((item) => item.profileId === 'web')?.pluginsUpgradable === true);
+  await fixture.service.upgradeHost({ hostId: record.id, profileId: 'web' });
+  const failed = await waitForUpgradeEnd(fixture, record.id);
+  const item = failed.items.find((entry) => entry.name === 'dsh-meme');
+  assert.equal(item.error.code, 'PLUGIN_BUILD_APPROVAL_REQUIRED');
+  const host = fixture.service.profileHosts(record.id).find((entry) => entry.profileId === 'web');
+  assert.deepEqual(host.buildApprovals, [{ name: 'dsh-meme', builds: ['bun@1.4.4'] }]);
+
+  fixture.state.pluginBuildBlockedSpecs = [];
+  fixture.state.calls.length = 0;
+  await fixture.service.approveUpgrades({ hostId: record.id, profileId: 'web' });
+  const retried = await waitForUpgradeEnd(fixture, record.id);
+  assert.equal(retried.phase, 'done');
+  const install = fixture.state.calls.find((call) => call.path === '/api/ssh-remote/plugins/install');
+  assert.deepEqual(install.body.approvedBuilds, ['bun@1.4.4'], 'the approval travels with the synced plugin');
+});
+
+test('a local plugin missing on the remote marks the Host upgradable and is installed', async (t) => {
+  const localBundles = [
+    { name: 'dsh-meme', version: '0.1.80', source: 'dsh-meme@0.1.80', installed: true, official: false, availability: 'profile' },
+    { name: 'dsh-subagent-model', version: '0.1.1', source: 'link:/Users/me/plugins/model', installed: true, official: false, availability: 'profile' },
+  ];
+  const { fixture, record } = await connectedFixture(t, { localBundles: async () => localBundles });
+  await fixture.service.webList(record.id);
+  let host = null;
+  await waitFor(() => {
+    host = fixture.service.profileHosts(record.id).find((item) => item.profileId === 'web');
+    return host?.pluginsUpgradable === true;
+  });
+  assert.equal(host.pluginsUpgradable, true, 'a missing local plugin is a difference worth a sync');
+  const started = await fixture.service.upgradeHost({ hostId: record.id, profileId: 'web' });
+  assert.equal(started.started, true);
+  const upgrade = await waitForUpgradeEnd(fixture, record.id);
+  assert.equal(upgrade.phase, 'done');
+  assert.deepEqual(fixture.state.pluginInstalls.map((item) => item.spec), ['dsh-meme@0.1.80']);
+  assert.equal(upgrade.items.some((item) => item.name === 'dsh-meme' && item.ok === true), true);
+  assert.equal(fixture.state.pluginInstalls.some((item) => item.name === 'dsh-subagent-model'), false,
+    'a link: install never travels to the remote');
+});
+
+test('a Host restarted by an upgrade gets the local plugin snapshot again', async (t) => {
+  const localBundles = [{ name: 'dsh-meme', version: '0.1.80', official: false, availability: 'profile' }];
+  const { fixture, record } = await connectedFixture(t, {
+    localBundles: async () => localBundles,
+    pluginLatest: { '@acme/one': '1.5.0' },
+    remotePlugins: [{ name: '@acme/one', version: '1.0.0', spec: '@acme/one@1.0.0', official: false }],
+  });
+  fixture.state.pluginInstallResults = { '@acme/one': { application: 'restart-required', pendingBuilds: [] } };
+  fixture.state.calls.length = 0;
+  await fixture.service.upgradeHost({ hostId: record.id, profileId: 'web' });
+  const upgrade = await waitForUpgradeEnd(fixture, record.id);
+  assert.equal(upgrade.phase, 'done');
+  assert.equal(fixture.state.stops.length, 1, 'the plugin restart replaced the Host');
+  const uploads = fixture.state.calls.filter((call) => call.path === '/api/ssh-remote/plugins/local-inventory');
+  assert.equal(uploads.length, 1, 'the replacement Host receives the snapshot before it is used');
+  assert.deepEqual(uploads[0].body.snapshot.bundles.map((bundle) => bundle.name), ['dsh-meme']);
+});
+
+test('an enable failure right after removal is retried instead of failing the upgrade', async (t) => {
+  const { fixture, record } = await connectedFixture(t, {
+    pluginLatest: { '@acme/one': '1.5.0' },
+    remotePlugins: [{ name: '@acme/one', version: '1.0.0', spec: '@acme/one@1.0.0', official: false }],
+  });
+  fixture.state.pluginInstallResults = {
+    '@acme/one': [
+      { ok: false, stage: 'enable', application: 'failed', changed: true, error: { code: 'operation-error', diagnostic: 'failed to import' } },
+      { stage: 'install', application: 'applied', changed: false },
+    ],
+  };
+  await fixture.service.upgradeHost({ hostId: record.id, profileId: 'web' });
+  const upgrade = await waitForUpgradeEnd(fixture, record.id);
+  assert.equal(upgrade.phase, 'done');
+  assert.equal(upgrade.items.find((entry) => entry.name === '@acme/one').ok, true);
+  assert.deepEqual(fixture.state.pluginInstalls.map((entry) => entry.spec), ['@acme/one@1.5.0', '@acme/one@1.5.0']);
+  assert.deepEqual(fixture.state.pluginRemovals, ['@acme/one'], 'the plugin is removed only once');
+});
+
+test('a persistent enable failure still rolls back to the previous version', async (t) => {
+  const { fixture, record } = await connectedFixture(t, {
+    pluginLatest: { '@acme/one': '1.5.0' },
+    remotePlugins: [{ name: '@acme/one', version: '1.0.0', spec: '@acme/one@1.0.0', official: false }],
+  });
+  const failure = { ok: false, stage: 'enable', application: 'failed', changed: true, error: { code: 'operation-error', diagnostic: 'failed to import' } };
+  fixture.state.pluginInstallResults = { '@acme/one': [{ ...failure }, { ...failure }] };
+  await fixture.service.upgradeHost({ hostId: record.id, profileId: 'web' });
+  const upgrade = await waitForUpgradeEnd(fixture, record.id);
+  assert.equal(upgrade.phase, 'failed');
+  assert.deepEqual(fixture.state.pluginInstalls.map((entry) => entry.spec),
+    ['@acme/one@1.5.0', '@acme/one@1.5.0', '@acme/one@1.0.0']);
+  assert.equal(upgrade.items.find((entry) => entry.name === '@acme/one').ok, false);
 });
 
 test('a failed plugin upgrade restores the previous version instead of dropping it', async (t) => {

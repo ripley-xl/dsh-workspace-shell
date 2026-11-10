@@ -67,13 +67,14 @@
 3. 计算插件目标集合：
    - 目标 profile 是 `web` 且 desktop profile 可读：执行下面的对齐规则。
    - 其它情况：只把现有 registry 依赖升到 latest，官方包跟新 DSH 版本。
-4. 备份 `package.json`、`cordis.patch.yml`、`pnpm-lock.yaml` 到 `<profile>/.host-upgrades/<时间戳>/`，权限 0600，写入失败即中止。
+4. 备份 `package.json`、`cordis.patch.yml`、`pnpm-lock.yaml`、`pnpm-workspace.yaml` 到 `<profile>/.host-upgrades/<时间戳>/`，权限 0600，写入失败即中止。
 5. 若 DSH 有新版本：`npm install -g @deepseek-ai/dsh@<版本>`。用 PATH 上解析到的 `npm`；解析失败或退出码非 0 即失败。
 6. 停止该 profile 的运行中 Host（当前 Host 与未运行的 profile 除外，见下）。先停再写：运行中的 Host 会热加载 patch 文件，边写边重载会读到还没装好的插件。
 7. 写 `package.json`：依赖集合与 `dsh.profile.bundles`；保持 pnpm-workspace 和其它字段不变。
 8. 写 `cordis.patch.yml`：按对齐规则更新条目，保留文件头注释与未涉及条目。
 9. 在 profile 目录运行 pnpm 11 install，不带 `--frozen-lockfile`。pnpm 依次取目标 profile patch 里的 `plugin-manager.pnpmCommand`、`~/.dsh/bin/pnpm11`、app 自带的 `pnpm/bin/pnpm.mjs`；都取不到即失败。
-   pnpm 11 在安装完成但存在未批准的构建脚本时会以退出码 1 结束（`ERR_PNPM_IGNORED_BUILDS`）。这种情况不算安装失败：继续校验，并把依赖名带进 `upgrade.ignoredBuilds`，由界面提示“N 个依赖的构建脚本待批准”。
+   pnpm 11 在安装完成但存在未批准的构建脚本时会以退出码 1 结束（`ERR_PNPM_IGNORED_BUILDS`）。这种情况不算安装失败：升级自己批准这些构建。做法是把 pnpm 报出的身份写进 profile `pnpm-workspace.yaml` 的 `allowBuilds` 映射（`name: true`），然后重跑一次 install，最多 3 轮：registry 依赖用包名（`@jackwener/opencli`），`file:`、`link:`、`git` 依赖用完整 spec（`dsh-workspace-guest@file:../x.tgz`）——pnpm 只按完整 spec 匹配这类依赖，裸名批不下来。已有条目一律不动，显式 `false` 视为用户明确拒绝，不覆盖。`allowBuilds` 是内联映射（`{}`、`[]`、带注释）时不改写文件，避免重复 key。安装集是升级计划算出来的，构建脚本属于其中的依赖，因此不需要再人工点头。
+   只有两种情况仍会把包名带进 `upgrade.ignoredBuilds`、由界面提示“N 个依赖的构建脚本待批准”：profile 显式拒绝该包；或三轮之内 pnpm 仍报同一批包。
 10. 运行 `dsh --profile <p> --dump-config` 校验组合树，退出码非 0 视为失败。
 11. 不自动重启。行消失，提示“已升级，重新打开页签”。
 
@@ -129,8 +130,8 @@ Host 行在“有新运行包”或“插件落后”时显示按钮；`pluginsU
 
 ## 失败处理
 
-- 本机写文件前必须有备份；第 7 至 10 步任一失败，按相反顺序还原三个文件，并用备份的 lockfile 运行一次 `pnpm11 install --frozen-lockfile` 恢复 `node_modules`。还原失败单独报错。
-- `ERR_PNPM_IGNORED_BUILDS` 是唯一不触发还原的安装退出码：依赖已经装好，只是构建脚本等人批准。其余非 0 退出码照常还原。
+- 本机写文件前必须有备份；第 7 至 10 步任一失败，按相反顺序还原四个文件（含第 9 步可能新建的 `pnpm-workspace.yaml`，原本不存在就删掉），并用备份的 lockfile 运行一次 `pnpm11 install --frozen-lockfile` 恢复 `node_modules`。还原失败单独报错。
+- `ERR_PNPM_IGNORED_BUILDS` 是唯一不触发还原的安装退出码：依赖已经装好，只是构建脚本还没批准，升级随后写入 `allowBuilds` 并重试。其余非 0 退出码照常还原；重试仍然失败时按普通失败还原。
 - 第 5 步（全局 npm 升级）失败不回滚文件，直接中止；第 6 步停止 Host 失败也不动文件。
 - 远端运行包安装失败保持原实例不动；插件升级失败只影响该项。
 - 同一 Host 同时只允许一个升级操作；重复点击返回 `UPGRADE_BUSY`。
@@ -185,7 +186,7 @@ POST /api/ssh-remote/upgrade
 → { ok: true, result: { started: true, upgrade: { phase: 'running', step: 'runtime' } } }
 ```
 
-两者都立即返回，进度由 `catalog` / `status` 轮询读取。`upgrade.phase` 取值 `running`、`done`、`failed`；`done` 或 `failed` 在一次轮询后被消费，下次刷新清空并反映新版本。`upgrade.ignoredBuilds` 只在存在待批准的构建脚本时出现。
+两者都立即返回，进度由 `catalog` / `status` 轮询读取。`upgrade.phase` 取值 `running`、`done`、`failed`；`done` 或 `failed` 在一次轮询后被消费，下次刷新清空并反映新版本。`upgrade.ignoredBuilds` 只在升级自己批不下来（profile 显式拒绝或重试后仍被拦）时出现。
 
 `upgrade.step` 取值为 `backup`、`dsh`、`stop`、`write`、`install`、`validate`（本机）与 `runtime`、`plugins`（远端）。客户端按固定文案映射，不直接显示字段值。
 

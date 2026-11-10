@@ -2,6 +2,14 @@
 // the managed Host, rewrite package.json/cordis.patch.yml, pnpm install and
 // dump-config validation, with a reverse-order restore on failure.
 //
+// pnpm 11 stops with ERR_PNPM_IGNORED_BUILDS when a new dependency ships build
+// scripts it has not seen before. A profile upgrade installs the exact
+// dependency set the plan asked for, so those builds are approved by the
+// upgrade itself: the package names are written into `allowBuilds` in the
+// profile's pnpm-workspace.yaml and the install is retried. Only packages the
+// profile explicitly denies (`allowBuilds: name: false`) stay pending, and
+// those are reported through `upgrade.ignoredBuilds` for the UI to surface.
+//
 // The service is deliberately independent of the runtime registry: callers
 // pass the profile id, the version observed for that Host and (for non-current
 // Hosts) a `stopHost` callback. All process access goes through ctx.subprocess.
@@ -18,13 +26,19 @@ import { createLatestVersionCache, isNewerVersion } from './registry.js';
 import { profileIdentifier, readCombineIds, readProfileInventory } from './profile-inventory.js';
 
 const DSH_PACKAGE = '@deepseek-ai/dsh';
-const BACKUP_FILES = Object.freeze(['package.json', 'cordis.patch.yml', 'pnpm-lock.yaml']);
+const BACKUP_FILES = Object.freeze(['package.json', 'cordis.patch.yml', 'pnpm-lock.yaml', 'pnpm-workspace.yaml']);
 const BACKUP_DIRECTORY = '.host-upgrades';
+const WORKSPACE_FILE = 'pnpm-workspace.yaml';
 const MAX_COMMAND_TEXT = 4 * 1024 * 1024;
 const SAFE_COMMAND = /^[^\0\r\n]{1,4096}$/u;
 const IGNORED_BUILDS = /Ignored build scripts:[ \t]*([^\n]+)/u;
 const MAX_IGNORED_BUILDS = 32;
-const IGNORED_BUILD_NAME = /^[A-Za-z0-9@/._#+-]{1,160}$/u;
+// pnpm reports registry packages as `name@1.2.3`, but git/file/link
+// dependencies as `name@file:../x.tgz` or `name@https://…#sha`. Both forms are
+// valid allowBuilds keys, so the charset carries the separators those specs use.
+const IGNORED_BUILD_NAME = /^[A-Za-z0-9@/._#%+:~-]{1,512}$/u;
+const SEMVER_SUFFIX = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?$/u;
+const MAX_APPROVAL_ROUNDS = 3;
 
 const ERRORS = {
   UPGRADE_BUSY: 'Another upgrade is already running for this Host.',
@@ -77,6 +91,72 @@ export function parseIgnoredBuilds(text) {
     if (names.length >= MAX_IGNORED_BUILDS) break;
   }
   return names;
+}
+
+const YAML_ALLOW_BUILDS = /^allowBuilds:(.*)$/u;
+const YAML_ALLOW_BUILD_ENTRY = /^[ \t]+(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([^:#\s][^:]*?))[ \t]*:(?:[ \t]+(.*))?$/u;
+
+/**
+ * allowBuilds keys for pnpm's ignored-build identities. Registry packages are
+ * keyed by bare name (`a@1.0.0` and `@scope/b@2.0.0` become `a` and `@scope/b`),
+ * because pnpm matches those by package name. Git, file and link dependencies
+ * are matched by their full spec (`pkg@file:../x.tgz`, `pkg@https://…#sha`), so
+ * their version suffix is part of the key and must stay. Anything that is not a
+ * safe identity is dropped.
+ */
+export function approveBuildNames(identities) {
+  const names = [];
+  for (const identity of Array.isArray(identities) ? identities : []) {
+    if (typeof identity !== 'string') continue;
+    const at = identity.lastIndexOf('@');
+    const name = at > 0 && SEMVER_SUFFIX.test(identity.slice(at + 1)) ? identity.slice(0, at) : identity;
+    if (!IGNORED_BUILD_NAME.test(name) || names.includes(name)) continue;
+    names.push(name);
+    if (names.length >= MAX_IGNORED_BUILDS) break;
+  }
+  return names;
+}
+
+/**
+ * Inserts `name: true` entries into the profile's `allowBuilds` map without
+ * touching the rest of pnpm-workspace.yaml. Names that already have an entry
+ * keep their value: an explicit `false` is the owner's denial, not an omission.
+ */
+export function applyBuildApprovals(text, names) {
+  const source = typeof text === 'string' ? text : '';
+  const lines = source.split('\n');
+  let header = -1;
+  let end = -1;
+  const declared = new Set();
+  for (let index = 0; index < lines.length; index += 1) {
+    const head = YAML_ALLOW_BUILDS.exec(lines[index].replace(/\r$/u, ''));
+    if (!head) continue;
+    // Only a bare `allowBuilds:` header can take appended block entries. A
+    // flow-style value (`allowBuilds: {…}`, `[]`), an inline scalar or a
+    // trailing comment is left untouched: appending would either duplicate the
+    // key or produce an invalid block, so the caller reports the packages as
+    // pending instead of corrupting the file.
+    if ((head[1] ?? '').trim() !== '') return { text: source, added: [] };
+    header = index;
+    end = index + 1;
+    for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
+      const line = lines[cursor].replace(/\r$/u, '');
+      if (line.trim() === '') continue;
+      if (!/^[ \t]/.test(line)) break;
+      end = cursor + 1;
+      const match = YAML_ALLOW_BUILD_ENTRY.exec(line);
+      if (match) declared.add(match[1] ?? match[2] ?? match[3].trim());
+    }
+    break;
+  }
+  const added = (Array.isArray(names) ? names : []).filter((name) => !declared.has(name));
+  if (added.length === 0) return { text: source, added: [] };
+  const entries = added.map((name) => `  ${JSON.stringify(name)}: true`);
+  if (header < 0) {
+    const separator = source === '' || source.endsWith('\n') ? '' : '\n';
+    return { text: `${source}${separator}allowBuilds:\n${entries.join('\n')}\n`, added };
+  }
+  return { text: [...lines.slice(0, end), ...entries, ...lines.slice(end)].join('\n'), added };
 }
 
 async function collectText(stream, maxBytes) {
@@ -342,6 +422,28 @@ export function createProfileUpgradeService(options = {}) {
     });
   }
 
+  /**
+   * Records pnpm's ignored builds in the profile's `allowBuilds` map and
+   * returns the names this call added. When nothing new can be approved (the
+   * profile denies the package on purpose, or the name was already written)
+   * the caller stops retrying and keeps the pending list for the UI.
+   */
+  async function approveBuildScripts(inventory, identities) {
+    const names = approveBuildNames(identities);
+    if (names.length === 0) return [];
+    const filename = path.join(inventory.dir, WORKSPACE_FILE);
+    let text = '';
+    try {
+      text = await fs.readFile(filename, 'utf8');
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw failure('UPGRADE_INSTALL_FAILED');
+    }
+    const result = applyBuildApprovals(text, names);
+    if (result.added.length === 0) return [];
+    await fs.writeFile(filename, result.text);
+    return result.added;
+  }
+
   async function installDsh(version) {
     if (typeof version !== 'string' || !version) throw failure('UPGRADE_NPM_FAILED');
     const npm = await resolveExecutable(npmCommand, 'UPGRADE_NPM_FAILED');
@@ -399,7 +501,12 @@ export function createProfileUpgradeService(options = {}) {
       wrote = true;
       await writeProfileFiles(inventory, built.plan);
       state.step = 'install';
-      const installed = await runPnpm(inventory, ['install']);
+      let installed = await runPnpm(inventory, ['install']);
+      for (let round = 0; installed.ignoredBuilds?.length && round < MAX_APPROVAL_ROUNDS; round += 1) {
+        const approved = await approveBuildScripts(inventory, installed.ignoredBuilds);
+        if (approved.length === 0) break;
+        installed = await runPnpm(inventory, ['install']);
+      }
       state.ignoredBuilds = installed.ignoredBuilds;
       state.step = 'validate';
       await validateProfile(inventory);

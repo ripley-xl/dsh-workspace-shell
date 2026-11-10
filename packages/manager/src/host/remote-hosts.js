@@ -18,7 +18,10 @@ const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
 const MAX_CARDS = 64;
 const MAX_CARD_BYTES = 64 * 1024;
 const MAX_OUTPUT_BYTES = 256 * 1024;
-const REMOTE_COMMAND = 'for f in "$HOME"/.dsh/workspace-hosts/*.json; do [ -f "$f" ] && cat "$f" && printf "\\n"; done';
+// `exit 0` matters: an empty card directory makes the loop's last test fail,
+// and a restart passes through exactly that window (old card gone, new one not
+// written yet).
+const REMOTE_COMMAND = 'for f in "$HOME"/.dsh/workspace-hosts/*.json; do [ -f "$f" ] && cat "$f" && printf "\\n"; done; exit 0';
 
 function timestamp(value) {
   if (typeof value !== 'string') return null;
@@ -190,6 +193,22 @@ export async function terminateRemoteProcess(channel, pid, { signal, graceMs = 8
 }
 
 /**
+ * The shell line that starts a Host away from the SSH session.
+ *
+ * `nohup cmd &` alone is not enough: the background process stays in the
+ * session's process group, and sshd keeps the exec channel open until the whole
+ * session exits — the launch appears to hang for the client's full timeout even
+ * though the Host is already running. `setsid` gives it its own session, so the
+ * channel closes as soon as the shell returns. macOS has no `setsid`, so the
+ * plain `nohup` branch stays as the fallback.
+ */
+export function detachedCommandLine(argv, cwd) {
+  const command = argv.map(shellQuote).join(' ');
+  const redirect = '>/dev/null 2>&1 < /dev/null';
+  return `cd ${shellQuote(cwd)} && if command -v setsid >/dev/null 2>&1; then setsid ${command} ${redirect} & else nohup ${command} ${redirect} & fi`;
+}
+
+/**
  * Starts the card's own command line again, detached, so it survives this SSH
  * session. `nohup` is the portable detach: macOS has no `setsid`.
  */
@@ -197,7 +216,7 @@ export async function respawnRemoteProcess(channel, { argv, cwd }, { signal } = 
   if (!Array.isArray(argv) || argv.length === 0 || typeof cwd !== 'string' || !cwd.startsWith('/')) {
     throw new SshRemoteError('INVALID_REQUEST', 'The Host card has no usable command line.');
   }
-  const line = `cd ${shellQuote(cwd)} && nohup ${argv.map(shellQuote).join(' ')} >/dev/null 2>&1 < /dev/null &`;
+  const line = detachedCommandLine(argv, cwd);
   const result = await channel.exec({ command: 'sh', args: ['-c', line], signal });
   return result.code === 0;
 }

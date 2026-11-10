@@ -113,3 +113,24 @@ test('sync plans missing plugins and upgrades, never downgrades or pushes local 
     ['dsh-linked', 'local-spec'],
   ]);
 });
+
+test('the restart command detaches the Host from the SSH session', async () => {
+  const { detachedCommandLine } = await import('../../../packages/manager/src/host/remote-hosts.js');
+  const line = detachedCommandLine(['/opt/node', '/opt/dsh', '--profile', 'web'], '/home/user');
+  assert.match(line, /command -v setsid/u, 'setsid is preferred so sshd closes the channel');
+  assert.match(line, /setsid '\/opt\/node' '\/opt\/dsh' '--profile' 'web'/u);
+  assert.match(line, /nohup /u, 'macOS has no setsid; the fallback stays');
+  assert.match(line, /^cd '\/home\/user' && /u);
+});
+
+test('an empty card directory reads as an empty list, not a failed command', async () => {
+  const channel = { async exec(request) {
+    // The remote script ends with `exit 0`; an empty directory must not surface
+    // as a read failure while a Host restarts.
+    assert.match(String(request.args?.[1] ?? ''), /exit 0$/u);
+    return { code: 0, stdout: '', stderr: '' };
+  } };
+  const { hosts, skipped } = await readRemoteHostCards(channel);
+  assert.deepEqual(hosts, []);
+  assert.deepEqual(skipped, []);
+});

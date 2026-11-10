@@ -3,7 +3,7 @@
 // card is how we find it again.
 
 import { SshRemoteError } from './ssh/errors.js';
-import { filterLivePids, readRemoteHostCards } from './remote-hosts.js';
+import { detachedCommandLine, filterLivePids, readRemoteHostCards } from './remote-hosts.js';
 
 const PROFILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const VERSION = /^[vV]?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)$/u;
@@ -57,8 +57,10 @@ export async function startGuestHost(channel, { interpreter, profileId, workspac
   if (typeof workspace !== 'string' || !workspace.startsWith('/')) {
     throw new SshRemoteError('INVALID_REQUEST', 'The remote workspace is not usable.');
   }
-  const line = `cd ${shellQuote(workspace)} && nohup ${shellQuote(interpreter.node)} ${shellQuote(interpreter.dsh)}`
-    + ` --profile ${shellQuote(profileId)} --host 127.0.0.1 --port 0 --no-open >/dev/null 2>&1 < /dev/null &`;
+  const line = detachedCommandLine(
+    [interpreter.node, interpreter.dsh, '--profile', profileId, '--host', '127.0.0.1', '--port', '0', '--no-open'],
+    workspace,
+  );
   const started = await channel.exec({ command: 'sh', args: ['-c', line], signal });
   if (started.code !== 0) throw new SshRemoteError('REMOTE_HOST_START_FAILED', 'The remote dsh could not be started.');
 }

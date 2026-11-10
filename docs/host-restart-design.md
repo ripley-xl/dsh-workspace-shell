@@ -216,4 +216,4 @@ Desktop 的 Shell 会直接 `import 'dsh-workspace-guest/session-host'`（为了
 
 guest 模式下：`connect` 只建通道；`web/list` 的 profile 从远端 `~/.dsh/profiles/*/package.json` 读、运行中的行从卡片生成（`guestProfileHosts`）；`web/open` 只走卡片接管/远端 dsh 启动，不再回退 controller；`upgradeHost` 明确报 `UPGRADE_RUNTIME_UNAVAILABLE`（没有内置运行包可换）。
 
-下一步（最后一步）删掉 controller 路径与运行包，`transport` 开关随之下线。
+上述开关已在 0.4.0 随 controller 路径一起删除：`transport` 概念不再存在，manager 只走 guest 通道。

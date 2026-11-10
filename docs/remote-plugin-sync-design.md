@@ -1,3 +1,7 @@
+> **已过时（0.4.0）**：内置运行包、Remote Controller、Supervisor 和远端状态插件已被移除。
+> 远端宿主现在由远端机器自己的 `dsh` 启动，靠 Guest 的 Host 卡片被本机发现和接管；
+> 本文档保留为历史设计记录，当前实现见 [Web Host 自重启与来宾上报](host-restart-design.md) 与 README。
+
 # 远端插件同步与「同步并升级」
 
 ## 目标

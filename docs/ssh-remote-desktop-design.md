@@ -1,3 +1,7 @@
+> **已过时（0.4.0）**：内置运行包、Remote Controller、Supervisor 和远端状态插件已被移除。
+> 远端宿主现在由远端机器自己的 `dsh` 启动，靠 Guest 的 Host 卡片被本机发现和接管；
+> 本文档保留为历史设计记录，当前实现见 [Web Host 自重启与来宾上报](host-restart-design.md) 与 README。
+
 # SSH Remote Desktop 工作区重做规格
 
 > 2026-11-03 更新：独立工作区根框架已安装并通过当前 macOS 截图和用户常用点击初验；未修改 DSH 源码。原有 Slot 声明和服务保留。多环境页签尚未接入；本文旧方案与当前进度冲突时，以[第一阶段记录](</Users/okarinhuang/dsh-workspace/dsh-workspace-shell/docs/frame-redraw.md>)为准。

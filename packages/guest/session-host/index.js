@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { createSessionHostRegistry, persistenceRoot, sessionIds, sessionHostError } from '../src/host/session-hosts.js';
 import { createSessionViewBroker } from '../src/host/session-views.js';
+import { createTurnEndTracker } from '../src/host/turn-end.js';
 
 export const inject = ['connection', 'profileContext', 'loader', 'agents', 'sessionPersistence'];
 
@@ -41,7 +42,16 @@ export async function apply(ctx) {
   });
   ctx.effect(() => () => registry.dispose(), 'workspace session Host registration');
   ctx.provide('workspaceSessionHosts', registry);
+  // Notifications need what the status store cannot say: the final reply text and
+  // whether the Turn failed. The page asks for it when it sees a Turn settle.
+  const turnEnds = createTurnEndTracker({ subscribe: (listener) => ctx.on('session/event', listener) });
+  ctx.effect(() => () => turnEnds.dispose(), 'workspace notification turn ends');
   const routes = {
+    'turn-end': (input) => {
+      const sessionId = typeof input.sessionId === 'string' ? input.sessionId : '';
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(sessionId)) throw sessionHostError('SESSION_HOST_INVALID_INPUT');
+      return turnEnds.read(sessionId);
+    },
     status: (input, signal) => registry.lookup(sessionIds(input.sessionIds), signal),
     attach: (input, signal) => registry.attach(input.instanceId, input.sessionId, signal),
     views: (input, signal) => registry.views(input.instanceId, input.windowId, signal),

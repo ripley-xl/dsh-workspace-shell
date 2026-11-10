@@ -16,6 +16,8 @@ const NOTIFICATION_EVENT = 'workspace-shell-notification';
 const OPEN_SESSION_EVENT = 'workspace-shell-open-session';
 const NOTIFICATION_VERSION = 1;
 const NOTIFICATION_KINDS = new Set(['turn-end', 'approval', 'question', 'plan-review', 'attention']);
+// Why the Turn ended. "other" covers aborted, interrupted, blocked and future kinds.
+const NOTIFICATION_REASONS = new Set(['completed', 'error', 'max-tokens', 'aborted', 'interrupted', 'blocked', 'other']);
 const NOTIFICATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const NOTIFICATION_REQUEST_ID = /^[A-Za-z0-9_-]{16,128}$/;
 const NOTIFICATION_FIELD_LIMIT = 1024;
@@ -52,9 +54,16 @@ function validNotificationEvent(data) {
   if (value.event === 'attention' && value.kind === 'turn-end') return null;
   const title = notificationField(value, 'title');
   const detail = notificationField(value, 'detail');
-  if (title === null || detail === null) return null;
+  const error = notificationField(value, 'error');
+  if (title === null || detail === null || error === null) return null;
+  const reason = value.reason === undefined ? 'completed' : value.reason;
+  if (typeof reason !== 'string' || !NOTIFICATION_REASONS.has(reason)) return null;
+  // Whether the Host actually answered the Turn-end question. An older Guest has
+  // no answer at all, which is not the same as "the Turn produced no reply".
+  const textKnown = value.textKnown === undefined ? false : value.textKnown;
+  if (typeof textKnown !== 'boolean') return null;
   if (typeof value.viewing !== 'boolean') return null;
-  return { event: value.event, kind: value.kind, sessionId: value.sessionId, title, detail, viewing: value.viewing };
+  return { event: value.event, kind: value.kind, sessionId: value.sessionId, title, detail, reason, error, textKnown, viewing: value.viewing };
 }
 
 function validOpenSessionRequest(data) {
@@ -73,24 +82,97 @@ function notificationKindOf(pending) {
   return 'attention';
 }
 
-function notificationDetailOf(pending, kind) {
+// The detail line is the only line the body has, so a long reason must not push
+// the notification past a readable size. The count suffix is appended afterwards
+// and is never the part that gets cut.
+const NOTIFICATION_DETAIL_LIMIT = 120;
+const NOTIFICATION_DETAIL_COPY = {
+  zh: {
+    question: (index, count) => `第 ${index}/${count} 问`,
+    options: (count) => `${count} 个选项`,
+    wrap: (text) => '（' + text + '）',
+    tool: (name) => `工具「${name}」`,
+    sep: '：',
+  },
+  en: {
+    question: (index, count) => `${index}/${count}`,
+    options: (count) => `${count} options`,
+    wrap: (text) => ' (' + text + ')',
+    tool: (name) => `tool "${name}"`,
+    sep: ': ',
+  },
+};
+
+function notificationLocale(localeOf) {
+  try {
+    const active = localeOf?.()?.active;
+    return typeof active === 'string' && /^zh/iu.test(active) ? 'zh' : 'en';
+  } catch {
+    return 'en';
+  }
+}
+
+// `displayReason` arrives as a localized text map and is rendered through the
+// page's locale service. A resolver that throws or answers with a non-string
+// leaves the field empty so the next fallback wins.
+function notificationResolved(value, resolveText) {
+  if (typeof value === 'string') return value;
+  if (value === null || typeof value !== 'object' || typeof resolveText !== 'function') return '';
+  try {
+    const resolved = resolveText(value);
+    return typeof resolved === 'string' ? resolved : '';
+  } catch {
+    return '';
+  }
+}
+
+function notificationFirstLine(value) {
+  if (typeof value !== 'string') return '';
+  for (const line of value.split(/\r?\n/u)) {
+    const trimmed = line.replace(/^#+\s*/u, '').trim();
+    if (trimmed) return trimmed;
+  }
+  return '';
+}
+
+// A question with several parts or options says so after the text. The suffix
+// is built from the first question only, matching what the text shows.
+function notificationQuestionSuffix(questions, localeKey) {
+  const copy = NOTIFICATION_DETAIL_COPY[localeKey] ?? NOTIFICATION_DETAIL_COPY.en;
+  const options = Array.isArray(questions[0]?.options) ? questions[0].options.length : 0;
+  const parts = [];
+  if (questions.length > 1) parts.push(copy.question(1, questions.length));
+  if (options > 0) parts.push(copy.options(options));
+  return parts.length > 0 ? copy.wrap(parts.join(' · ')) : '';
+}
+
+function notificationDetailOf(pending, kind, { resolveText, localeOf } = {}) {
   if (!pending || typeof pending !== 'object') return '';
   if (kind === 'approval') {
-    return [pending.toolName, pending.displayReason ?? pending.reason].filter((part) => typeof part === 'string' && part.trim()).join(' · ');
+    const reason = (notificationResolved(pending.displayReason, resolveText) || notificationResolved(pending.reason, resolveText)).trim();
+    const tool = typeof pending.toolName === 'string' ? pending.toolName.trim() : '';
+    const copy = NOTIFICATION_DETAIL_COPY[notificationLocale(localeOf)] ?? NOTIFICATION_DETAIL_COPY.en;
+    const label = tool ? copy.tool(tool) : '';
+    if (label && reason) return notificationText(label + copy.sep + reason, NOTIFICATION_DETAIL_LIMIT);
+    return notificationText(label || reason, NOTIFICATION_DETAIL_LIMIT);
   }
-  if (kind === 'question' || kind === 'plan-review') {
-    const questions = Array.isArray(pending.questions) ? pending.questions : [];
-    const first = questions[0];
-    if (typeof first?.question === 'string' && first.question.trim()) return first.question;
-    if (typeof first?.header === 'string' && first.header.trim()) return first.header;
-    return '';
+  const questions = Array.isArray(pending.questions) ? pending.questions : [];
+  if (kind === 'question') {
+    const first = questions[0] ?? {};
+    const text = [first.question, first.header].find((value) => typeof value === 'string' && value.trim()) ?? '';
+    return notificationText(text, NOTIFICATION_DETAIL_LIMIT) + notificationQuestionSuffix(questions, notificationLocale(localeOf));
+  }
+  if (kind === 'plan-review') {
+    const first = questions[0] ?? {};
+    const text = notificationFirstLine(first.detail) || [first.header, first.question].find((value) => typeof value === 'string' && value.trim()) || '';
+    return notificationText(text, NOTIFICATION_DETAIL_LIMIT);
   }
   return typeof pending.kind === 'string' ? pending.kind : '';
 }
 
 // Snapshot-driven transition detector. Any first snapshot seeds the baseline so a
 // page that opens long after a Turn ended does not replay history.
-function createSessionNotificationMonitor({ status, list, report }) {
+function createSessionNotificationMonitor({ status, list, report, resolveText, localeOf, readTurnEnd }) {
   const previous = new Map();
   let seeded = false;
   let disposed = false;
@@ -125,6 +207,37 @@ function createSessionNotificationMonitor({ status, list, report }) {
       // A framing Shell that cannot receive this event must not break the page.
     }
   };
+  // A settling Turn has no content in the status store; ask the Host for the last
+  // reply text and the end reason, but never hold the notification hostage to it.
+  const NOTIFICATION_TURN_END_WAIT = 1200;
+  const emitTurnEnd = (sessionId, turn) => emit({
+    event: 'turn-end', kind: 'turn-end', sessionId, title: readTitle(sessionId),
+    detail: notificationText(typeof turn?.text === 'string' ? turn.text : '', NOTIFICATION_DETAIL_LIMIT),
+    reason: typeof turn?.reason === 'string' && NOTIFICATION_REASONS.has(turn.reason) ? turn.reason : 'completed',
+    error: notificationText(typeof turn?.error === 'string' ? turn.error : '', NOTIFICATION_DETAIL_LIMIT),
+    textKnown: turn !== null && typeof turn === 'object',
+    viewing: isViewing(sessionId),
+  });
+  const reportTurnEnd = (sessionId) => {
+    if (typeof readTurnEnd !== 'function') {
+      emitTurnEnd(sessionId, null);
+      return;
+    }
+    let settled = false;
+    let timer = null;
+    const finish = (turn) => {
+      if (settled) return;
+      settled = true;
+      if (timer !== null) clearTimeout(timer);
+      emitTurnEnd(sessionId, turn);
+    };
+    try {
+      Promise.resolve(readTurnEnd(sessionId)).then(finish, () => finish(null));
+    } catch {
+      finish(null);
+    }
+    timer = setTimeout(() => finish(null), NOTIFICATION_TURN_END_WAIT);
+  };
   const sync = () => {
     if (disposed) return;
     let snapshot;
@@ -147,11 +260,11 @@ function createSessionNotificationMonitor({ status, list, report }) {
       const before = previous.get(sessionId);
       if (pending && pendingKey !== before?.pendingKey) {
         const kind = notificationKindOf(pending);
-        emit({ event: 'attention', kind, sessionId, title: readTitle(sessionId), detail: notificationDetailOf(pending, kind), viewing: isViewing(sessionId) });
+        emit({ event: 'attention', kind, sessionId, title: readTitle(sessionId), detail: notificationDetailOf(pending, kind, { resolveText, localeOf }), viewing: isViewing(sessionId) });
         continue;
       }
       if (!pending && running === false && before?.running === true && !isSubagent(sessionId)) {
-        emit({ event: 'turn-end', kind: 'turn-end', sessionId, title: readTitle(sessionId), detail: '', viewing: isViewing(sessionId) });
+        reportTurnEnd(sessionId);
       }
     }
     previous.clear();
@@ -251,9 +364,28 @@ function createGuestNotificationBridge({ window, ctx }) {
     // A window that refuses the marker still gets a working bridge.
   }
   let disposed = false;
+  // Detail text follows the Guest page's own locale: localized approval reasons
+  // and the question count suffix are rendered here, before the frame is sent.
+  const locale = ctx?.locale;
+  // The Host tracks what a finished Turn produced; the page asks for it after the
+  // status store reports the settle. A missing route (older Host) answers null.
+  const readTurnEnd = (sessionId) => {
+    try {
+      return window.fetch('/api/workspace-session-hosts/turn-end', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId }),
+      }).then((response) => (response.ok ? response.json() : null)).then((payload) => (payload?.ok === true ? payload.result : null)).catch(() => null);
+    } catch {
+      return Promise.resolve(null);
+    }
+  };
   const monitor = createSessionNotificationMonitor({
     status: ctx?.uiSession?.sessionStatus,
     list: ctx?.sessions?.list,
+    resolveText: (value) => { try { return locale?.resolveText?.(value) ?? ''; } catch { return ''; } },
+    localeOf: () => { try { return locale?.getSnapshot?.(); } catch { return undefined; } },
+    readTurnEnd,
     report: (payload) => {
       if (disposed) return;
       const message = { type: NOTIFICATION_EVENT, version: NOTIFICATION_VERSION, ...payload };

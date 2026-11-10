@@ -9,6 +9,8 @@ export const NOTIFICATION_EVENT = 'workspace-shell-notification';
 export const OPEN_SESSION_EVENT = 'workspace-shell-open-session';
 export const NOTIFICATION_VERSION = 1;
 const NOTIFICATION_KINDS = new Set(['turn-end', 'approval', 'question', 'plan-review', 'attention']);
+// Why the Turn ended. "other" covers aborted, interrupted, blocked and future kinds.
+const NOTIFICATION_REASONS = new Set(['completed', 'error', 'max-tokens', 'aborted', 'interrupted', 'blocked', 'other']);
 const NOTIFICATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const NOTIFICATION_REQUEST_ID = /^[A-Za-z0-9_-]{16,128}$/;
 const NOTIFICATION_FIELD_LIMIT = 1024;
@@ -45,9 +47,16 @@ export function validNotificationEvent(data) {
   if (value.event === 'attention' && value.kind === 'turn-end') return null;
   const title = notificationField(value, 'title');
   const detail = notificationField(value, 'detail');
-  if (title === null || detail === null) return null;
+  const error = notificationField(value, 'error');
+  if (title === null || detail === null || error === null) return null;
+  const reason = value.reason === undefined ? 'completed' : value.reason;
+  if (typeof reason !== 'string' || !NOTIFICATION_REASONS.has(reason)) return null;
+  // Whether the Host actually answered the Turn-end question. An older Guest has
+  // no answer at all, which is not the same as "the Turn produced no reply".
+  const textKnown = value.textKnown === undefined ? false : value.textKnown;
+  if (typeof textKnown !== 'boolean') return null;
   if (typeof value.viewing !== 'boolean') return null;
-  return { event: value.event, kind: value.kind, sessionId: value.sessionId, title, detail, viewing: value.viewing };
+  return { event: value.event, kind: value.kind, sessionId: value.sessionId, title, detail, reason, error, textKnown, viewing: value.viewing };
 }
 
 export function validOpenSessionRequest(data) {
@@ -66,24 +75,97 @@ function notificationKindOf(pending) {
   return 'attention';
 }
 
-function notificationDetailOf(pending, kind) {
+// The detail line is the only line the body has, so a long reason must not push
+// the notification past a readable size. The count suffix is appended afterwards
+// and is never the part that gets cut.
+const NOTIFICATION_DETAIL_LIMIT = 120;
+const NOTIFICATION_DETAIL_COPY = {
+  zh: {
+    question: (index, count) => `第 ${index}/${count} 问`,
+    options: (count) => `${count} 个选项`,
+    wrap: (text) => '（' + text + '）',
+    tool: (name) => `工具「${name}」`,
+    sep: '：',
+  },
+  en: {
+    question: (index, count) => `${index}/${count}`,
+    options: (count) => `${count} options`,
+    wrap: (text) => ' (' + text + ')',
+    tool: (name) => `tool "${name}"`,
+    sep: ': ',
+  },
+};
+
+function notificationLocale(localeOf) {
+  try {
+    const active = localeOf?.()?.active;
+    return typeof active === 'string' && /^zh/iu.test(active) ? 'zh' : 'en';
+  } catch {
+    return 'en';
+  }
+}
+
+// `displayReason` arrives as a localized text map and is rendered through the
+// page's locale service. A resolver that throws or answers with a non-string
+// leaves the field empty so the next fallback wins.
+function notificationResolved(value, resolveText) {
+  if (typeof value === 'string') return value;
+  if (value === null || typeof value !== 'object' || typeof resolveText !== 'function') return '';
+  try {
+    const resolved = resolveText(value);
+    return typeof resolved === 'string' ? resolved : '';
+  } catch {
+    return '';
+  }
+}
+
+function notificationFirstLine(value) {
+  if (typeof value !== 'string') return '';
+  for (const line of value.split(/\r?\n/u)) {
+    const trimmed = line.replace(/^#+\s*/u, '').trim();
+    if (trimmed) return trimmed;
+  }
+  return '';
+}
+
+// A question with several parts or options says so after the text. The suffix
+// is built from the first question only, matching what the text shows.
+function notificationQuestionSuffix(questions, localeKey) {
+  const copy = NOTIFICATION_DETAIL_COPY[localeKey] ?? NOTIFICATION_DETAIL_COPY.en;
+  const options = Array.isArray(questions[0]?.options) ? questions[0].options.length : 0;
+  const parts = [];
+  if (questions.length > 1) parts.push(copy.question(1, questions.length));
+  if (options > 0) parts.push(copy.options(options));
+  return parts.length > 0 ? copy.wrap(parts.join(' · ')) : '';
+}
+
+function notificationDetailOf(pending, kind, { resolveText, localeOf } = {}) {
   if (!pending || typeof pending !== 'object') return '';
   if (kind === 'approval') {
-    return [pending.toolName, pending.displayReason ?? pending.reason].filter((part) => typeof part === 'string' && part.trim()).join(' · ');
+    const reason = (notificationResolved(pending.displayReason, resolveText) || notificationResolved(pending.reason, resolveText)).trim();
+    const tool = typeof pending.toolName === 'string' ? pending.toolName.trim() : '';
+    const copy = NOTIFICATION_DETAIL_COPY[notificationLocale(localeOf)] ?? NOTIFICATION_DETAIL_COPY.en;
+    const label = tool ? copy.tool(tool) : '';
+    if (label && reason) return notificationText(label + copy.sep + reason, NOTIFICATION_DETAIL_LIMIT);
+    return notificationText(label || reason, NOTIFICATION_DETAIL_LIMIT);
   }
-  if (kind === 'question' || kind === 'plan-review') {
-    const questions = Array.isArray(pending.questions) ? pending.questions : [];
-    const first = questions[0];
-    if (typeof first?.question === 'string' && first.question.trim()) return first.question;
-    if (typeof first?.header === 'string' && first.header.trim()) return first.header;
-    return '';
+  const questions = Array.isArray(pending.questions) ? pending.questions : [];
+  if (kind === 'question') {
+    const first = questions[0] ?? {};
+    const text = [first.question, first.header].find((value) => typeof value === 'string' && value.trim()) ?? '';
+    return notificationText(text, NOTIFICATION_DETAIL_LIMIT) + notificationQuestionSuffix(questions, notificationLocale(localeOf));
+  }
+  if (kind === 'plan-review') {
+    const first = questions[0] ?? {};
+    const text = notificationFirstLine(first.detail) || [first.header, first.question].find((value) => typeof value === 'string' && value.trim()) || '';
+    return notificationText(text, NOTIFICATION_DETAIL_LIMIT);
   }
   return typeof pending.kind === 'string' ? pending.kind : '';
 }
 
 // Snapshot-driven transition detector. Any first snapshot seeds the baseline so a
 // page that opens long after a Turn ended does not replay history.
-export function createSessionNotificationMonitor({ status, list, report }) {
+export function createSessionNotificationMonitor({ status, list, report, resolveText, localeOf, readTurnEnd }) {
   const previous = new Map();
   let seeded = false;
   let disposed = false;
@@ -118,6 +200,37 @@ export function createSessionNotificationMonitor({ status, list, report }) {
       // A framing Shell that cannot receive this event must not break the page.
     }
   };
+  // A settling Turn has no content in the status store; ask the Host for the last
+  // reply text and the end reason, but never hold the notification hostage to it.
+  const NOTIFICATION_TURN_END_WAIT = 1200;
+  const emitTurnEnd = (sessionId, turn) => emit({
+    event: 'turn-end', kind: 'turn-end', sessionId, title: readTitle(sessionId),
+    detail: notificationText(typeof turn?.text === 'string' ? turn.text : '', NOTIFICATION_DETAIL_LIMIT),
+    reason: typeof turn?.reason === 'string' && NOTIFICATION_REASONS.has(turn.reason) ? turn.reason : 'completed',
+    error: notificationText(typeof turn?.error === 'string' ? turn.error : '', NOTIFICATION_DETAIL_LIMIT),
+    textKnown: turn !== null && typeof turn === 'object',
+    viewing: isViewing(sessionId),
+  });
+  const reportTurnEnd = (sessionId) => {
+    if (typeof readTurnEnd !== 'function') {
+      emitTurnEnd(sessionId, null);
+      return;
+    }
+    let settled = false;
+    let timer = null;
+    const finish = (turn) => {
+      if (settled) return;
+      settled = true;
+      if (timer !== null) clearTimeout(timer);
+      emitTurnEnd(sessionId, turn);
+    };
+    try {
+      Promise.resolve(readTurnEnd(sessionId)).then(finish, () => finish(null));
+    } catch {
+      finish(null);
+    }
+    timer = setTimeout(() => finish(null), NOTIFICATION_TURN_END_WAIT);
+  };
   const sync = () => {
     if (disposed) return;
     let snapshot;
@@ -140,11 +253,11 @@ export function createSessionNotificationMonitor({ status, list, report }) {
       const before = previous.get(sessionId);
       if (pending && pendingKey !== before?.pendingKey) {
         const kind = notificationKindOf(pending);
-        emit({ event: 'attention', kind, sessionId, title: readTitle(sessionId), detail: notificationDetailOf(pending, kind), viewing: isViewing(sessionId) });
+        emit({ event: 'attention', kind, sessionId, title: readTitle(sessionId), detail: notificationDetailOf(pending, kind, { resolveText, localeOf }), viewing: isViewing(sessionId) });
         continue;
       }
       if (!pending && running === false && before?.running === true && !isSubagent(sessionId)) {
-        emit({ event: 'turn-end', kind: 'turn-end', sessionId, title: readTitle(sessionId), detail: '', viewing: isViewing(sessionId) });
+        reportTurnEnd(sessionId);
       }
     }
     previous.clear();
@@ -341,9 +454,13 @@ export function createGuestNotificationBridge({ window, ctx }) {
 const NOTIFICATION_COPY = {
   zh: {
     turnEnd: '回合结束', approval: '等待你确认', question: '等待你回答', planReview: '计划等待你确认', attention: '需要你处理', session: '会话',
+    titleApproval: '正在申请权限', titleQuestion: '模型在等你回答', titlePlan: '计划待确认', titleAttention: '需要你处理',
+    titleError: '生成失败', titleTruncated: '输出被截断', error: '回合异常结束', truncated: '已达到输出 token 上限',
   },
   en: {
     turnEnd: 'Turn finished', approval: 'Waiting for your approval', question: 'Waiting for your answer', planReview: 'Plan awaiting approval', attention: 'Needs your action', session: 'Session',
+    titleApproval: 'Requesting permission', titleQuestion: 'Waiting for your answer', titlePlan: 'Plan awaiting review', titleAttention: 'Needs your action',
+    titleError: 'Generation failed', titleTruncated: 'Output truncated', error: 'The turn ended abnormally', truncated: 'Reached the output token limit',
   },
 };
 
@@ -370,17 +487,6 @@ export function createNotificationCenter({ window, document, workspace, localeOf
     }
   };
   const text = (value) => typeof value === 'string' ? value : '';
-  const tabOf = (tabId) => workspace.tabs.getSnapshot().tabs.find((tab) => tab.id === tabId) ?? null;
-  const tabLabel = (tab) => {
-    if (!tab) return '';
-    try {
-      const appearance = workspace.getTabAppearance?.(tab);
-      if (typeof appearance?.name === 'string' && appearance.name.trim()) return appearance.name.trim();
-    } catch {
-      // Appearance is display-only; the tab title still identifies the tab.
-    }
-    return typeof tab.title === 'string' ? tab.title : '';
-  };
   const isFocused = () => {
     try {
       if (windowFocused !== true) return false;
@@ -391,14 +497,35 @@ export function createNotificationCenter({ window, document, workspace, localeOf
   };
   // The framing page must not notify for the exact Session the user is reading.
   const suppressed = (entry) => isFocused() && workspace.tabs.getSnapshot().activeId === entry.tabId && entry.viewing;
+  // The title is the Session name, plus what the notification is about. A Turn
+  // that failed or was cut short says so in the title, matching the answer text
+  // that would otherwise hide the failure.
+  const titleOf = (entry, copy) => {
+    const base = text(entry.title).trim() || copy.session;
+    let suffix = '';
+    if (entry.kind === 'turn-end') {
+      if (entry.reason === 'error') suffix = copy.titleError;
+      else if (entry.reason === 'max-tokens') suffix = copy.titleTruncated;
+    } else if (entry.kind === 'approval') suffix = copy.titleApproval;
+    else if (entry.kind === 'question') suffix = copy.titleQuestion;
+    else if (entry.kind === 'plan-review') suffix = copy.titlePlan;
+    else suffix = copy.titleAttention;
+    return suffix ? base + ' · ' + suffix : base;
+  };
+  // The body carries the content itself: the final reply text for a finished
+  // Turn, the failure for an errored one, and the ask for an interaction. The
+  // scenario wording is only a fallback when there is nothing else to show.
   const bodyOf = (entry, copy) => {
-    const label = {
-      'turn-end': copy.turnEnd, attention: copy.attention, approval: copy.approval, question: copy.question, 'plan-review': copy.planReview,
+    const detail = text(entry.detail).trim();
+    if (entry.kind === 'turn-end') {
+      if (entry.reason === 'error') return text(entry.error).trim() || detail || copy.error;
+      if (entry.reason === 'max-tokens') return copy.truncated;
+      return detail || copy.turnEnd;
+    }
+    if (detail) return detail;
+    return {
+      approval: copy.approval, question: copy.question, 'plan-review': copy.planReview,
     }[entry.kind] ?? copy.attention;
-    const detail = text(entry.detail);
-    const head = detail ? (copy === NOTIFICATION_COPY.zh ? label + '：' + detail : label + ': ' + detail) : label;
-    const tab = text(entry.tabLabel);
-    return tab ? head + ' · ' + tab : head;
   };
   // The click has to bring the tab forward first: a notification for a background
   // Session must land on the Session, not leave the user on whatever tab is active.
@@ -423,6 +550,10 @@ export function createNotificationCenter({ window, document, workspace, localeOf
   };
   const show = (entry) => {
     if (disposed || !Ctor) return;
+    // A finished Turn with nothing to quote has nothing to say. A bare "Turn
+    // finished" box is noise; a failure still notifies without reply text.
+    if (entry.kind === 'turn-end' && entry.reason !== 'error' && entry.reason !== 'max-tokens'
+      && !text(entry.detail).trim() && entry.textKnown === true) return;
     if (suppressed(entry)) return;
     let permission;
     try {
@@ -438,7 +569,7 @@ export function createNotificationCenter({ window, document, workspace, localeOf
       return;
     }
     const copy = notificationCopy(localeOf?.());
-    const title = text(entry.title).trim() || copy.session;
+    const title = titleOf(entry, copy);
     let notification;
     try {
       notification = new Ctor(title, { body: bodyOf(entry, copy), tag: NOTIFICATION_TAG + entry.sessionId });
@@ -478,13 +609,12 @@ export function createNotificationCenter({ window, document, workspace, localeOf
   const resolveEntry = (tabKey, payload) => {
     const tab = workspace.tabs.getSnapshot().tabs.find((candidate) => candidate.key === tabKey);
     if (!tab) return null;
-    return { ...payload, tabId: tab.id, tabKey: tab.key, tabLabel: notificationText(tabLabel(tab)) };
+    return { ...payload, tabId: tab.id, tabKey: tab.key };
   };
   const reportHost = (payload) => {
     const value = notificationObject(payload);
     if (!value) return;
-    const tab = tabOf('local');
-    show({ ...value, tabId: 'local', tabKey: 'local', tabLabel: notificationText(tabLabel(tab)) });
+    show({ ...value, tabId: 'local', tabKey: 'local' });
   };
   const reportGuest = (tabKey, data) => {
     const payload = validNotificationEvent(data);

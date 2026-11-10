@@ -1,6 +1,6 @@
 {
   "name": "dsh-workspace-guest",
-  "version": "0.5.27",
+  "version": "0.5.28",
   "private": true,
   "type": "module",
   "description": "Guest-side workspace bridge for DSH Web profiles",

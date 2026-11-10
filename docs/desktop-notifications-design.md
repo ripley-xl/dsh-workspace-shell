@@ -46,7 +46,7 @@ Desktop 窗口里的本地 Web 页签和远程 Web 页签，在回合结束或�
 | 场景 | 判定 | 通知正文 |
 | --- | --- | --- |
 | 回合结束 | `running` 由 `true` 变为 `false`，且没有待处理交互 | 回合结束 |
-| 等待批准 | `pendingInteraction.kind === 'approval'` 首次出现 | 等待你确认：工具名或原因 |
+| 等待批准 | `pendingInteraction.kind === 'approval'` 首次出现 | 等待你确认：理由或工具名 |
 | 等待回答 | `pendingInteraction.kind === 'question'` 首次出现 | 等待你回答：问题摘要 |
 | 计划待确认 | `pendingInteraction.kind === 'plan-review'` 首次出现 | 计划等待你确认 |
 | 其他交互 | 未知 `pendingInteraction.kind` | 需要你处理 |
@@ -70,9 +70,7 @@ Desktop 窗口里的本地 Web 页签和远程 Web 页签，在回合结束或�
 
 ## 通知内容
 
-- 标题：会话显示名（`displayTitle`），最多 200 字符。
-- 正文：场景文案；有细节时写成「场景：细节」；末尾附页签显示名（自定义名优先，没有则用页签原标题）。
-- 归一化：折叠连续空白、去掉控制字符、超长截断。
+标题是会话显示名，正文一行：场景文案，有细节时写成「场景：细节」。正文不含页签名或项目名。各项细节的取法与截断规则见[通知内容设计](desktop-notification-content-design.md)。
 
 中英文文案内置在 Shell 中，按当前界面语言选择。
 

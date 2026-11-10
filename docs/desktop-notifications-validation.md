@@ -31,3 +31,18 @@
 - Desktop 的 Web Guest 是 `<webview>`，页面内 `window.parent === window`，不能靠 `postMessage` 回传；guest 用 `console.log` 带前缀上报，父框架监听 `console-message`。
 - 点击后的导航由父框架 `executeJavaScript` 调用 guest 暴露的 `__workspaceShellOpenSession(id)`。
 - 本机验证使用 Electron 44.7.0 的 Desktop；独立 Electron 24 探针确认了 console 事件与 `executeJavaScript` 的行为。
+
+## 2026-11-10 通知内容 v2 实机验收
+
+环境：macOS，Desktop 应用，desktop profile 装本仓库构建的 Workspace Shell（本地文件安装）。dsh-pet 的通知关闭，dsh-composer-plus 的「后台通知」关闭。
+
+| 场景 | 结果 |
+| --- | --- |
+| 计划待确认 | 标题「<会话名> · 计划待确认」，正文为计划首个非空行 |
+| 等待批准 | 标题「<会话名> · 正在申请权限」，正文「工具「bash」：理由」 |
+| 回合结束 | 标题为会话名，正文为本轮最后一段回复 |
+| 重复通知 | 同一事件只弹一条；dsh-pet 与 dsh-composer-plus 都不再弹 |
+
+顺带确认了来源区分：Shell 的通知 tag 是 `workspace-shell:<sessionId>`，Composer Plus 是 `dsh:<sessionId>`。旧版实机里那个「已完成。」空框来自 Composer Plus 在拿不到回复正文时的兜底文案，不是 Shell。
+
+未覆盖：旧远端运行包（未重建）下的降级文案，实机未验证。

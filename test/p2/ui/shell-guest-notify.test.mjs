@@ -41,10 +41,11 @@ function harness({ parentIsSelf = true, running = true } = {}) {
   return { window, status, opened, logged, bridge, ctx, running };
 }
 
-test('a webview Guest seeds the baseline and reports one Turn end through its console', () => {
+test('a webview Guest seeds the baseline and reports one Turn end through its console', async () => {
   const h = harness();
   h.status.set(new Map([[SESSION, statusOf({ running: true })]]));
   h.status.set(new Map([[SESSION, statusOf({ running: false })]]));
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(h.logged.length, 1);
   const message = JSON.parse(h.logged[0].slice(MARKER.length));
   assert.equal(message.type, 'workspace-shell-notification');
@@ -65,7 +66,7 @@ test('a pending interaction is reported once and only one bridge installs per pa
   assert.equal(h.logged.length, 1);
   const message = JSON.parse(h.logged[0].slice(MARKER.length));
   assert.equal(message.kind, 'approval');
-  assert.equal(message.detail, 'bash');
+  assert.equal(message.detail, 'tool "bash"');
   const second = createGuestNotificationBridge({ window: h.window, ctx: h.ctx });
   second.dispose();
   assert.equal(typeof h.window.__workspaceShellOpenSession, 'function');

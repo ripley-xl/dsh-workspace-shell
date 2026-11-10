@@ -161,10 +161,29 @@ return {
       if (notifications) {
         ctx.effect(() => () => notifications.dispose(), 'workspace notifications');
         if (typeof deps.createSessionNotificationMonitor === 'function') withUiSession((scope) => {
+          // Localized detail text (approval reasons, count suffixes) follows the
+          // page locale; the monitor stays usable when the service is absent.
+          const locale = scope.locale ?? ctx.locale;
+          // This Host tracks the last reply text and the Turn-end reason; a Host
+          // without the route answers null and the notification stays generic.
+          const readTurnEnd = (sessionId) => {
+            try {
+              return window.fetch('/api/workspace-session-hosts/turn-end', {
+                method: 'POST', credentials: 'same-origin',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ sessionId }),
+              }).then((response) => (response.ok ? response.json() : null)).then((payload) => (payload?.ok === true ? payload.result : null)).catch(() => null);
+            } catch {
+              return Promise.resolve(null);
+            }
+          };
           const monitor = safeFactory(deps.createSessionNotificationMonitor, {
             status: scope.uiSession?.sessionStatus,
             list: scope.sessions?.list,
             report: (payload) => notifications.reportHost(payload),
+            resolveText: (value) => { try { return locale?.resolveText?.(value) ?? ''; } catch { return ''; } },
+            localeOf: () => { try { return locale?.getSnapshot?.(); } catch { return undefined; } },
+            readTurnEnd,
           });
           if (monitor) scope.effect(() => () => monitor.dispose(), 'workspace notification monitor');
         });

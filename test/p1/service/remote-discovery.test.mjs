@@ -59,15 +59,6 @@ test('discovered hosts are read over the connected channel without their token',
   assert.equal(fixture.state.execs.some((request) => String(request.args?.[1] ?? '').includes('kill -0')), true);
 });
 
-test('a controller-started Host is not listed twice', async (t) => {
-  const { fixture, record } = await connectedFixture(t, JSON.stringify(card()));
-  const managed = fixture.service.webList(record.id);
-  const instanceId = (await managed).hosts[0]?.instanceId;
-  // The fixture's own Host writes a card as well; it must be filtered out.
-  const listed = await fixture.service.discoveredHosts(record.id);
-  assert.equal(listed.hosts.some((host) => host.instanceId === instanceId), false);
-});
-
 test('attaching a discovered Host reuses an active forward and rewrites the URL', async (t) => {
   const { fixture, record } = await connectedFixture(t, JSON.stringify(card()));
   const runtime = fixture.service.runtime(record.id);

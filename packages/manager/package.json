@@ -13,7 +13,6 @@
     "index.js",
     "client.js",
     "src/**/*.js",
-    "artifacts/*",
     "locale/*.json",
     "icon.svg"
   ],

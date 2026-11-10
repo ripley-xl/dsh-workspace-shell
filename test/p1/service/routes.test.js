@@ -72,7 +72,7 @@ test('event stream publishes authenticated status without browser URLs or local 
   await reader.cancel();
 });
 
-test('P2 routes expose ports, diagnostics and structured interaction failures', async (t) => {
+test('P2 routes expose ports and structured interaction failures', async (t) => {
   const { routes } = await routeFixture(t);
   const created = await (await post(routes.get('/api/ssh-remote/hosts'), {
     action: 'upsert', host: { hostAlias: 'p2-routes', syncPolicy: { appearance: false } },
@@ -86,13 +86,6 @@ test('P2 routes expose ports, diagnostics and structured interaction failures', 
   });
   assert.equal(unavailable.status, 409);
   assert.equal((await unavailable.json()).error.code, 'HOST_NOT_CONNECTED');
-
-  const diagnosticResponse = await post(routes.get('/api/ssh-remote/diagnostics'), { hostId });
-  const diagnostic = await diagnosticResponse.json();
-  assert.equal(diagnostic.ok, true);
-  assert.equal(diagnostic.report.host.id, hostId);
-  assert.match(diagnostic.text, /SSH Remote diagnostic report/u);
-  assert.equal(JSON.stringify(diagnostic).includes('local-secret'), false);
 
   const stale = await post(routes.get('/api/ssh-remote/interaction'), { requestId: 'stale', value: 'secret' });
   assert.equal((await stale.json()).error.code, 'INTERACTION_NOT_FOUND');

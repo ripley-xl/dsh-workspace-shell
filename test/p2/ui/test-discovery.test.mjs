@@ -14,11 +14,11 @@ test('default regression discovery includes nested named tests but never standal
   const files = await discoverNamedTests(testRoot);
   const names = files.map((file) => path.relative(testRoot, file));
   assert.ok(names.includes('p2/ui/ssh-workspace-extension.test.mjs'));
-  assert.ok(names.includes('p0/runtime/supervisor.test.js'));
+  assert.ok(names.includes('p2/ui/shell-ssh-launcher.test.mjs'));
   assert.equal(files.length, new Set(files).size);
   assert.deepEqual(files, [...files].sort());
   assert.ok(names.every((name) => /\.test\.[cm]?js$/u.test(name)));
-  for (const entry of ['p0/run.mjs', 'p0/runtime/lima-smoke.mjs', 'p0/runtime/verify-http.mjs', 'p2/runtime/macos-smoke.mjs', 'p2/runtime/verify-http.mjs']) {
+  for (const entry of ['p2/runtime/macos-smoke.mjs', 'p2/runtime/verify-http.mjs']) {
     assert.equal(names.includes(entry), false, `Standalone runner must stay explicit: ${entry}`);
   }
 });

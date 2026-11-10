@@ -85,12 +85,3 @@ test('guest transport opens the reported Host instead of starting a controller o
   assert.equal(opened.url, 'http://127.0.0.1:40020/?token=guest-token');
   assert.equal(fixture.state.instances.length, 0);
 });
-
-test('guest transport refuses upgrade with a clear reason', async (t) => {
-  const { fixture, record } = await guestFixture(t);
-  await fixture.service.connect(record.id);
-  await assert.rejects(
-    fixture.service.upgradeHost({ hostId: record.id, profileId: 'web' }),
-    (error) => error.code === 'UPGRADE_RUNTIME_UNAVAILABLE',
-  );
-});

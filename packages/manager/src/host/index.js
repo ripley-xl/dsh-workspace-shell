@@ -3,7 +3,6 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 
 import { ConnectionStore } from './store.js';
-import { RuntimeCatalog } from './runtime-catalog.js';
 import { SshRemoteService } from './service.js';
 import { DEFAULT_PROFILE_ID, normalizeProfileId } from './profiles.js';
 import { SshRemoteError } from './ssh/errors.js';
@@ -197,14 +196,8 @@ export async function apply(ctx, config = {}) {
   const store = await new ConnectionStore(ctx.storageDomain).open();
   const service = new SshRemoteService({
     store,
-    catalog: new RuntimeCatalog(),
     localVersion: () => dshVersion(ctx),
     localBundles: () => ctx.pluginManager.listBundles(),
-    // Guest transport by default: the remote machine's own dsh. Set
-    // `transport: controller` in the plugin config to keep the bundled runtime.
-    transport: process.env.DSH_SSH_TRANSPORT === 'controller' || config?.transport === 'controller'
-      ? 'controller'
-      : 'guest',
     localHome: () => ctx.profileContext?.home ?? (process.env.DSH_HOME ?? null),
     localReturnUrl: ctx.get('webApp')?.getAdvertisedUrl() ?? 'http://127.0.0.1:54542',
     settings: ctx.settings,
@@ -254,34 +247,7 @@ export async function apply(ctx, config = {}) {
     const input = await body(request);
     return service.connect(hostId(input));
   });
-  route('/api/ssh-remote/upgrade', ['POST'], async (request) => {
-    const input = await body(request);
-    const result = await service.upgradeHost({
-      hostId: hostId(input),
-      profileId: input.profileId ?? input.profile,
-    });
-    return { ok: true, result };
-  });
-  route('/api/ssh-remote/upgrade/approve', ['POST'], async (request) => {
-    const input = await body(request);
-    const result = await service.approveUpgrades({
-      hostId: hostId(input),
-      profileId: input.profileId ?? input.profile,
-    });
-    return { ok: true, result };
-  });
   route('/api/ssh-remote/disconnect', ['POST'], async (request) => service.disconnect(hostId(await body(request))));
-  route('/api/ssh-remote/sync/preview', ['POST'], async (request) => {
-    const id = hostId(await body(request));
-    const preview = await service.previewSync(id);
-    return { ok: true, host: service.publicConnection(id), preview };
-  });
-  route('/api/ssh-remote/sync', ['POST'], async (request) => {
-    const input = await body(request);
-    const id = hostId(input);
-    const report = await service.sync(id, { allowConflicts: input.allowConflicts ?? input.confirmConflicts ?? false });
-    return { ok: true, host: service.publicConnection(id), sync: report };
-  });
   route('/api/ssh-remote/stop', ['POST'], async (request) => {
     const input = await body(request);
     return service.stop(hostId(input), { instanceId: input.instanceId });
@@ -379,22 +345,5 @@ export async function apply(ctx, config = {}) {
     else if (input.action !== undefined && input.action !== 'list') throw new SshRemoteError('INVALID_REQUEST', 'ports action must be add, remove, or list.');
     return { ok: true, result, forwards: service.listPorts(id) };
   });
-  route('/api/ssh-remote/diagnostics', ['POST'], async (request) => {
-    const input = await body(request);
-    return service.diagnostics(hostId(input));
-  });
 
-  route('/api/ssh-remote/local/plugins', ['POST'], async () => ({
-    ok: true,
-    bundles: await ctx.pluginManager.listBundles(),
-  }));
-  route('/api/ssh-remote/local/settings', ['POST'], async () => ({
-    ok: true,
-    descriptors: ctx.settings.describe({ redactSecrets: true }),
-  }));
-
-  ctx.effect(() => async () => {
-    await service.close();
-    await store.close();
-  });
 }

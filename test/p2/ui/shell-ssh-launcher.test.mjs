@@ -566,80 +566,6 @@ test('Web Host rows show the DSH version and offer Upgrade only for a newer bund
   assert.equal(work.findAll((node) => node.type === 'button' && text(node) === 'Sync & upgrade').length, 0);
 });
 
-test('clicking Upgrade starts one request and disables the button with the fixed step copy', async (t) => {
-  const h = await mountLauncher(t, {
-    props: { locale: 'en', upgradePollMs: 60_000 },
-    handlers: {
-      '/web/list': () => webList({
-        hosts: [{ profileId: 'work', instanceId: 'inst-work', state: 'running', dshVersion: '1.0.0', latestDshVersion: '2.0.0' }],
-      }),
-      '/upgrade': () => ({ ok: true, result: { started: true, upgrade: { phase: 'running', step: 'runtime' } } }),
-    },
-  });
-  const row = h.view.root.findAll((node) => node.type === 'li' && node.props['data-state'] === 'running')
-    .find((node) => text(node).includes('work'));
-  const upgrade = row.findAll((node) => node.type === 'button' && text(node) === 'Sync & upgrade')[0];
-  await flushEffects(() => upgrade.props.onClick({ currentTarget: null }));
-  const calls = h.of('/upgrade');
-  assert.deepEqual(calls.map((call) => call.input), [{ hostId: 'a', profileId: 'work' }]);
-  const body = text(h.view.toJSON());
-  assert.match(body, /Upgrading runtime…/);
-  assert.match(body, /Remote Host upgrade started/);
-  const running = h.view.root.findAll((node) => node.type === 'li' && node.props['data-state'] === 'running')
-    .find((node) => text(node).includes('work'));
-  const disabled = running.findAll((node) => node.type === 'button' && text(node) === 'Upgrading runtime…')[0];
-  assert.equal(disabled.props.disabled, true);
-});
-
-test('a failed upgrade poll shows the safe error code copy and clears the running step', async (t) => {
-  let listCalls = 0;
-  const h = await mountLauncher(t, {
-    props: { locale: 'en', upgradePollMs: 5 },
-    handlers: {
-      '/web/list': () => {
-        listCalls += 1;
-        return webList({
-          hosts: [{
-            profileId: 'work', instanceId: 'inst-work', state: 'running', dshVersion: '1.0.0', latestDshVersion: '2.0.0',
-            ...listCalls > 1 ? { upgrade: { phase: 'failed', step: 'plugins', error: { code: 'UPGRADE_PLUGIN_FAILED' } } } : {},
-          }],
-        });
-      },
-      '/upgrade': () => ({ ok: true, result: { started: true, upgrade: { phase: 'running', step: 'runtime' } } }),
-    },
-  });
-  const row = h.view.root.findAll((node) => node.type === 'li' && node.props['data-state'] === 'running')
-    .find((node) => text(node).includes('work'));
-  await flushEffects(() => row.findAll((node) => node.type === 'button' && text(node) === 'Sync & upgrade')[0].props.onClick({ currentTarget: null }));
-  assert.match(text(h.view.toJSON()), /Upgrading runtime…/);
-  await flushEffects(() => new Promise((resolve) => setTimeout(resolve, 40)));
-  const body = text(h.view.toJSON());
-  assert.match(body, /The remote Host upgrade failed/);
-  assert.doesNotMatch(body, /Upgrading runtime…/);
-  assert.doesNotMatch(body, /SECRET/);
-});
-
-test('an up-to-date answer from Upgrade shows the no-op notice', async (t) => {
-  const h = await mountLauncher(t, {
-    props: { locale: 'en', upgradePollMs: 60_000 },
-    handlers: {
-      '/web/list': () => webList({
-        hosts: [{ profileId: 'work', instanceId: 'inst-work', state: 'running', dshVersion: '2.0.0', latestDshVersion: '2.0.0' }],
-      }),
-      '/upgrade': () => ({ ok: true, result: { started: false, reason: 'up-to-date' } }),
-    },
-  });
-  // Force the button into view with a stale newest version, then answer up-to-date.
-  h.handlers['/web/list'] = () => webList({
-    hosts: [{ profileId: 'work', instanceId: 'inst-work', state: 'running', dshVersion: '1.0.0', latestDshVersion: '2.0.0' }],
-  });
-  await clickImmediate(h.view.root.findAll((node) => node.type === 'button' && text(node) === 'Refresh Web Hosts')[0]);
-  const row = h.view.root.findAll((node) => node.type === 'li' && node.props['data-state'] === 'running')
-    .find((node) => text(node).includes('work'));
-  await flushEffects(() => row.findAll((node) => node.type === 'button' && text(node) === 'Sync & upgrade')[0].props.onClick({ currentTarget: null }));
-  assert.match(text(h.view.toJSON()), /already runs the newest bundled runtime/);
-});
-
 test('new tab opens a Web Host and hands the URL only to onOpenWeb', async (t) => {
   const opened = [];
   const h = await mountLauncher(t, { props: { onOpenWeb: (...args) => { opened.push(args); } } });
@@ -921,29 +847,4 @@ test('Chinese dictionary renders without missing keys', async (t) => {
   assert.match(body, /连接/);
   assert.match(body, /连接并刷新/);
   assert.doesNotMatch(body, /\bwsh-ssh\b/);
-});
-
-test('a pending build approval lists the package names and offers an approve action', async (t) => {
-  const h = await mountLauncher(t, {
-    props: { locale: 'en', upgradePollMs: 60_000 },
-    handlers: {
-      '/web/list': () => webList({
-        hosts: [{
-          profileId: 'web', profileName: 'Web', instanceId: 'inst-web', state: 'running', views: 0,
-          dshVersion: '2.0.0', latestDshVersion: '2.0.0', pluginsUpgradable: true,
-          buildApprovals: [{ name: 'dsh-opencode-go', builds: ['bun@1.4.4'] }],
-          upgrade: { phase: 'failed', step: 'plugins', error: { code: 'UPGRADE_PLUGIN_FAILED' } },
-        }],
-      }),
-      '/upgrade/approve': () => ({ ok: true, result: { started: true, approved: 1, upgrade: { phase: 'running', step: 'plugins' } } }),
-    },
-  });
-  const row = h.view.root.findAll((node) => node.type === 'li' && node.props['data-state'] === 'running')
-    .find((node) => text(node).includes('web'));
-  assert.match(text(row), /Pending build approval: bun@1\.4\.4/);
-  const approve = row.findAll((node) => node.type === 'button' && text(node) === 'Approve & retry')[0];
-  assert.ok(approve, 'the approval entry is rendered next to the pending names');
-  await flushEffects(() => approve.props.onClick({ currentTarget: null }));
-  assert.deepEqual(h.of('/upgrade/approve').map((call) => call.input), [{ hostId: 'a', profileId: 'web' }]);
-  assert.match(text(h.view.toJSON()), /Upgrading plugins…/);
 });

@@ -7,7 +7,6 @@
     "test": "node scripts/test.mjs",
     "build:client": "node scripts/build-manager-client.mjs && node scripts/build-shell-client.mjs",
     "check:client": "node scripts/build-manager-client.mjs --check && node scripts/build-shell-client.mjs --check",
-    "build:runtime": "node controller/scripts/build-runtime.mjs",
     "test:p0": "node test/p0/run.mjs"
   },
   "devDependencies": {

@@ -850,14 +850,14 @@ export function createSshLauncher(React, deps = {}) {
           ? h('span', { className: 'wsh-ssh-build-approval', 'data-build-approval': '' },
             h('span', { className: 'wsh-ssh-error-text' }, `${t('buildApprovalPending')}${approvalNames.join(', ')}`),
             h(Button, {
-              onClick: () => onApprove(profile),
+              onClick: () => onApprove?.(profile),
               disabled: upgrading || Boolean(busy),
               'data-launcher-action': 'approve-builds',
             }, t('approveBuilds')))
           : null),
       h('div', { className: 'wsh-ssh-host-actions' },
         showUpgrade ? h(Button, {
-          onClick: () => onUpgrade(profile),
+          onClick: () => onUpgrade?.(profile),
           disabled: upgrading || Boolean(busy),
           title: upgrading ? stepText : t('upgradeHint'),
           'aria-busy': upgrading || undefined,
@@ -1313,59 +1313,6 @@ export function createSshLauncher(React, deps = {}) {
         }
       };
       token.timer = setTimeout(tick, pollInterval);
-    }
-
-    async function upgradeHost(connection, profile) {
-      if (!alive.current || !connection || !profile || busy) return false;
-      const hostId = connection.id;
-      const scope = `upgrade:${hostId}:${profile.id}`;
-      setBusy(scope);
-      setOperation(scope);
-      dropNotice(`host:${hostId}`);
-      try {
-        const value = payload(await api('/upgrade', { hostId, profileId: profile.id }));
-        if (!alive.current) return false;
-        if (value?.started !== true) {
-          putNotice(`host:${hostId}`, { kind: 'notice', code: 'UPGRADE_UP_TO_DATE' });
-          void loadDetail(hostId);
-          return true;
-        }
-        const upgrade = normalizeUpgrade(value.upgrade) ?? { phase: 'running', step: 'runtime' };
-        applyUpgrade(hostId, profile.id, upgrade);
-        putNotice(`host:${hostId}`, { kind: 'notice', code: 'UPGRADE_STARTED' });
-        track('upgrade', 'start', hostId);
-        pollUpgrade(hostId, profile.id);
-        return true;
-      } catch (cause) {
-        if (alive.current) putNotice(`host:${hostId}`, failure(cause));
-        return false;
-      } finally {
-        if (alive.current) clearBusy(scope);
-      }
-    }
-
-    async function approveHost(connection, profile) {
-      if (!alive.current || !connection || !profile || busy) return false;
-      const hostId = connection.id;
-      const scope = `upgrade:${hostId}:${profile.id}`;
-      setBusy(scope);
-      setOperation(scope);
-      dropNotice(`host:${hostId}`);
-      try {
-        const value = payload(await api('/upgrade/approve', { hostId, profileId: profile.id }));
-        if (!alive.current) return false;
-        const upgrade = normalizeUpgrade(value?.upgrade) ?? { phase: 'running', step: 'plugins' };
-        applyUpgrade(hostId, profile.id, upgrade);
-        putNotice(`host:${hostId}`, { kind: 'notice', code: 'UPGRADE_STARTED' });
-        track('approve', 'start', hostId);
-        pollUpgrade(hostId, profile.id);
-        return true;
-      } catch (cause) {
-        if (alive.current) putNotice(`host:${hostId}`, failure(cause));
-        return false;
-      } finally {
-        if (alive.current) clearBusy(scope);
-      }
     }
 
     // autoConnect is the Desktop startup policy. Saving goes through hosts upsert;
@@ -1877,8 +1824,6 @@ export function createSshLauncher(React, deps = {}) {
           onRefresh: () => { if (selected) void loadDetail(selected.id); },
           onOpen: (profile) => { if (selected) openWeb(selected, profile); },
           onStop: (host) => { if (selected && host) setDialog({ type: 'stop', hostId: selected.id, host }); },
-          onUpgrade: (profile) => { if (selected) void upgradeHost(selected, profile); },
-          onApprove: (profile) => { if (selected) void approveHost(selected, profile); },
           onOpenDiscovered: (card) => { if (selected) openDiscovered(selected, card); },
           onRestartDiscovered: (card) => { if (selected) void restartDiscovered(selected, card); },
           onSyncDiscovered: (card) => { if (selected) setDialog({ type: 'sync-discovered', hostId: selected.id, card }); },

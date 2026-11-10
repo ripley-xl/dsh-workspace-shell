@@ -1,10 +1,9 @@
 export function createSshRequest(fetcher, lifetime) {
   const getPaths = new Set(['/status', '/ssh-hosts']);
   const postPaths = new Set([
-    '/hosts', '/connect', '/disconnect', '/sync/preview', '/sync', '/stop', '/interaction', '/ports', '/diagnostics',
+    '/hosts', '/connect', '/disconnect', '/stop', '/interaction', '/ports',
     '/web/list', '/web/open', '/web/attach', '/web/stop', '/web/discovered', '/web/discovered/attach',
     '/web/discovered/stop', '/web/discovered/restart', '/web/discovered/sync', '/cleanup-runtime',
-    '/upgrade', '/upgrade/approve',
   ]);
   const error = (code) => Object.assign(new Error(code), { code });
   return async (path, { body = {}, signal } = {}) => {

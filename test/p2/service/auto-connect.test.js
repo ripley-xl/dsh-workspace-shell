@@ -3,19 +3,7 @@ import test from 'node:test';
 
 import { SshRemoteService } from '../../../packages/manager/src/host/service.js';
 import { ConnectionStore } from '../../../packages/manager/src/host/store.js';
-import { memoryStorage } from '../../p1/service/helpers.mjs';
-
-const artifact = {
-  artifactPath: '/artifacts/dsh-1.0.0.tar.gz',
-  filename: 'dsh-1.0.0.tar.gz',
-  runtimeId: '1.0.0-linux-x64-glibc',
-  dshVersion: '1.0.0',
-  version: '1.0.0',
-  buildId: 'build-1',
-  sha256: 'a'.repeat(64),
-  size: 1,
-  target: { platform: 'linux', arch: 'x64', libc: 'glibc' },
-};
+import { guestChannel, memoryStorage } from '../../p1/service/helpers.mjs';
 
 function harness({ autoConnectOnStart = true, connectResolves = true } = {}) {
   const storage = memoryStorage();
@@ -26,12 +14,11 @@ function harness({ autoConnectOnStart = true, connectResolves = true } = {}) {
   const service = new SshRemoteService({
     store,
     autoConnectOnStart,
-    catalog: { select: async () => artifact },
     localVersion: async () => '1.0.0',
     localReturnUrl: 'http://127.0.0.1:54542/?tkn=local-secret',
     settings: { describe: () => [] },
     credentials: { async resolve() { throw new Error('not expected'); } },
-    openControllerSession: async () => {
+    openGuestChannel: async () => {
       calls.push('connect');
       if (!connectResolves) {
         throw Object.assign(new Error('interactive authentication required'), {

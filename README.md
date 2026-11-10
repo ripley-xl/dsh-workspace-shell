@@ -19,7 +19,7 @@ SSH Remote 在本地和远程 DSH Web 之间切换。Desktop 使用当前窗口�
 
 ## 已实现
 
-- `0.5.27` 拆出 `dsh-workspace-guest` 来宾端包：Desktop 只装宿主端，guest profile 只装来宾端；本机 Web 由宿主端注入兜底，远端运行包内置；
+- `0.5.27` 拆出 `dsh-workspace-guest` 来宾端包：Desktop 只装宿主端，guest profile 只装来宾端；本机 Web 由宿主端注入兜底，远端运行包内置；来宾页复制按钮增加剪贴板兜底（`writeText` 被拒时改用 `execCommand`），浏览器 guest 的 iframe 委派 `clipboard-write`；
 - `0.5.26` 修复 SSH 远程页签的通知不上报：登录重定向会清掉查询参数，嵌入标记改为始终写在 URL fragment 里，远端伴生插件才能安装；
 - `0.5.25` 远程 Web 页签的通知改用运行包内置伴生插件：远端 profile 不必安装 Shell，连接补丁自动加载 `guest-notify`；本地页签与本机 Web Guest 的行为不变；
 - `0.5.24` 本地与远程 Web 页签的回合结束、等待批准、等待回答、计划待确认透传为 Desktop 原生通知；标题为会话名，正文带场景、细节和页签名，同一会话只保留一条；点击切到对应页签并打开会话。窗口聚焦且正看着该会话时不打扰。设计见[通知透传说明](docs/desktop-notifications-design.md)，验证结果见[通知验证记录](docs/desktop-notifications-validation.md)；

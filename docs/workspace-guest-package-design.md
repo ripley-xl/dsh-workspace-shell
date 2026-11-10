@@ -62,7 +62,7 @@
 - 浏览器 guest 的 iframe 增加 `allow="clipboard-write; clipboard-read"`，把权限委派给页面；
 - 来宾端 Client 安装兜底：先调原生的 `writeText`，失败时用临时 textarea + `execCommand('copy')` 完成，成功与否记录在页面全局 `__workspaceShellClipboard`。
 
-实测：Desktop 里本机 Web 页签和 anydev 页签的复制按钮都恢复正常（重开页签加载新 Client 后）。
+实测：Desktop 里本机 Web 页签和远程页签的复制按钮都恢复正常（重开页签加载新 Client 后）。
 
 ## 测试
 

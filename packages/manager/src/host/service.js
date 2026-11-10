@@ -895,9 +895,14 @@ export class SshRemoteService extends EventEmitter {
    */
   async ensureTransport(session, options = {}) {
     if (session.connected) return session;
+    this.debugLog(`transport: begin for ${session.hostId}`);
     if (session.operation) return session.operation;
     const record = this.store.require(session.hostId);
-    const preferredVersion = await this.localVersion();
+    const preferredVersion = await this.localVersion().catch((cause) => {
+      this.debugLog(`transport: localVersion failed ${cause?.code ?? ''}`);
+      return null;
+    });
+    this.debugLog(`transport: localVersion=${String(preferredVersion).slice(0, 24)}`);
     const interactive = options.interactive !== false && options.background !== true;
     const promise = bounded((signal) => this.openSessionTransport(session, record, {
       version: preferredVersion,
@@ -910,7 +915,12 @@ export class SshRemoteService extends EventEmitter {
     });
     session.operation = promise;
     try {
-      return await promise;
+      const done = await promise;
+      this.debugLog(`transport: ok for ${session.hostId}`);
+      return done;
+    } catch (cause) {
+      this.debugLog(`transport: failed ${cause?.code ?? ''} ${String(cause?.message ?? cause).slice(0, 120)}`);
+      throw cause;
     } finally {
       if (session.operation === promise) session.operation = null;
       session.abort = null;
@@ -1164,9 +1174,11 @@ export class SshRemoteService extends EventEmitter {
   }
 
   async performGuestConnect(runtime, { signal, background = false } = {}) {
+    this.debugLog(`guest-connect: start ${runtime.hostId}`);
     this.transition(runtime, 'installing');
     try {
       const session = await this.ensureProfileTransport(runtime.hostId, { background });
+      this.debugLog(`guest-connect: transport ready ${runtime.hostId}`);
       signal?.throwIfAborted?.();
       this.transition(runtime, 'connected');
       return { ok: true, host: this.publicConnection(runtime.hostId), browserUrl: null };

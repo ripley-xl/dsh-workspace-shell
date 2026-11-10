@@ -4,7 +4,9 @@ import { SshRemoteError } from './ssh/errors.js';
 
 function connectedRuntime(service, hostId) {
   const runtime = service.runtime(hostId);
-  if (!runtime.channel || runtime.channel.closed || !runtime.host || runtime.host.closed) {
+  // The shared SSH channel is the whole transport in guest mode: there is no
+  // controller-hosted `runtime.host` to require any more.
+  if (!runtime.channel || runtime.channel.closed) {
     throw new SshRemoteError('HOST_NOT_CONNECTED', 'The SSH host is not connected.');
   }
   return runtime;

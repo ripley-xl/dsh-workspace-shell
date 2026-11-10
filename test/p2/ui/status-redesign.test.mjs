@@ -55,7 +55,7 @@ function runtime({ href = 'http://localhost:5000/', storage = new Map(), fetchIm
       }
     },
   };
-  const context = vm.createContext({ window, document, URL, fetch: fetchImpl, console,
+  const context = vm.createContext({ window, document, URL, URLSearchParams, fetch: fetchImpl, console,
     crypto: { randomUUID: () => `request-${++nextId}` },
     setInterval(callback) { const id = ++nextId; timers.set(id, callback); return id; },
     clearInterval(id) { timers.delete(id); },
@@ -121,6 +121,15 @@ function slotsFor(rt) {
   rt.client.apply(ctx, config);
   return { slots, locales };
 }
+
+test('a workspace Guest registers no remote status slots', () => {
+  const guest = runtime({ href: 'http://127.0.0.1:5000/?token=x#workspaceShellEmbedded=1' });
+  const { slots, locales } = slotsFor(guest);
+  assert.deepEqual(slots, []);
+  assert.deepEqual(locales, []);
+  const ordinary = slotsFor(runtime());
+  assert.ok(ordinary.slots.length > 0);
+});
 
 test('embedded detection persists only one Guest session bit and survives navigation or module reload', () => {
   const storage = new Map();

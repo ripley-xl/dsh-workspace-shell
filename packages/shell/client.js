@@ -2359,6 +2359,9 @@ function createBrowserGuest({
     try {
       const current = document.createElement('iframe');
       current.setAttribute('sandbox', SANDBOX);
+      // Cross-origin frames need an explicit Permissions Policy delegation for
+      // the Clipboard API; without it every copy action in the Guest fails.
+      current.setAttribute('allow', 'clipboard-write; clipboard-read');
       current.setAttribute('referrerpolicy', 'no-referrer');
       Object.assign(current.style, {
         border: '0',
@@ -4243,6 +4246,10 @@ function createWorkspaceClient(deps) {
     const task = resolveUrl().then(async (url) => {
       if (closed) return;
       if (spec.ssh && sshRegistration !== registration) throw error('SSH_COMPONENT_DISABLED');
+      // Connection's login redirect removes the query but preserves the fragment,
+      // so the embedded flag must travel in the hash for every Guest. SSH views have
+      // no session-navigation identity but still need it for the notification bridge.
+      const bootstrap = new URLSearchParams({ workspaceShellEmbedded: '1', ...(parentOrigin ? { workspaceShellParentOrigin: parentOrigin } : {}) });
       if (!spec.ssh && sessionNavigation?.context) {
         const parent = await sessionNavigation.context();
         if (closed) return;
@@ -4251,10 +4258,11 @@ function createWorkspaceClient(deps) {
         url.searchParams.set('workspaceSessionWindow', parent.windowId);
         url.searchParams.set('workspaceSessionParent', parent.instanceId);
         url.searchParams.set('workspaceSessionTab', token);
-        // Connection's login redirect removes the query but preserves the fragment.
-        const bootstrap = new URLSearchParams({ workspaceShellEmbedded: '1', workspaceSessionWindow: parent.windowId, workspaceSessionParent: parent.instanceId, workspaceSessionTab: token, ...(parentOrigin ? { workspaceShellParentOrigin: parentOrigin } : {}) });
-        url.hash = url.hash.slice(1) + (url.hash ? '&' : '') + bootstrap.toString();
+        bootstrap.set('workspaceSessionWindow', parent.windowId);
+        bootstrap.set('workspaceSessionParent', parent.instanceId);
+        bootstrap.set('workspaceSessionTab', token);
       }
+      url.hash = url.hash.slice(1) + (url.hash ? '&' : '') + bootstrap.toString();
       token?.mark('host');
       guest = createGuest({ document, window, container: options.container, workspaceKey: 'workspace-profile:' + spec.key, url: url.href, signal: abort.signal,
         onGuestEvent: guestNotice,
@@ -6841,7 +6849,7 @@ return {
 return { createWorkspaceSelection, createShellPlugin };
 })();
 const { createWorkspaceSelection, createShellPlugin } = m17;
-// ---- module: ../session-host/submissions ----
+// ---- module: ../../guest/session-host/submissions ----
 const m18 = (() => {
 // Observe the public Session prompt boundary without changing admission or draft restoration.
 function observeSessionSubmissions(sessions, { failed, succeeded }) {
@@ -6905,7 +6913,7 @@ function applyTransferredDraft(ctx, sessionId, draft, received) {
 return { observeSessionSubmissions, applyTransferredDraft };
 })();
 const { observeSessionSubmissions, applyTransferredDraft } = m18;
-// ---- module: ../session-host/controller ----
+// ---- module: ../../guest/session-host/controller ----
 const m19 = (() => {
 const validToken = (value) => typeof value === 'string' && /^[a-f0-9]{32}$/.test(value);
 const fail = (code) => Object.assign(new Error(code), { code });
@@ -7137,7 +7145,7 @@ function createSessionHostClient({ ctx, window, applyDraft }) {
 return { createSessionHostClient };
 })();
 const { createSessionHostClient } = m19;
-// ---- module: ../session-host/ui ----
+// ---- module: ../../guest/session-host/ui ----
 const m20 = (() => {
 const sessionHostCss = `
 .wsh-session-notice{display:flex;align-items:center;flex-wrap:wrap;gap:8px;width:calc(100% - var(--dsh-composer-side-clearance,16px) - var(--dsh-composer-side-clearance,16px));max-width:var(--dsh-composer-card-max-width,760px);margin:0 auto;box-sizing:border-box;padding:8px 0;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;letter-spacing:0}

@@ -1,6 +1,6 @@
 {
   "name": "dsh-workspace-shell",
-  "version": "0.5.25",
+  "version": "0.5.27",
   "private": true,
   "type": "module",
   "description": "Plugin-only multi-profile workspace frame for DeepSeek Harness",
@@ -15,18 +15,9 @@
     "client.js",
     "src/**/*.js",
     "cordis.patch.yml",
-    "guest-cwd/index.js",
-    "guest-cwd/client.js",
-    "guest-cwd/cordis.patch.yml",
-    "guest-cwd/package.json",
-    "session-host/*.js",
     "locale/*.json",
     "icon.svg",
-    "assets/*",
-    "guest-notify/index.js",
-    "guest-notify/client.js",
-    "guest-notify/cordis.patch.yml",
-    "guest-notify/package.json"
+    "assets/*"
   ],
   "dsh": {
     "bundle": {
@@ -51,6 +42,7 @@
     "@deepseek-ai/dsh-tools": "0.2.1-rc.5"
   },
   "dependencies": {
+    "dsh-workspace-guest": "file:../guest",
     "@local/dsh-ssh-remote": "file:../manager"
   }
 }

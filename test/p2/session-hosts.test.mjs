@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, writeFile, chmod } from 'node:fs/promises';
-import { createSessionHostRegistry, persistenceRoot, sessionHostUrl } from '../../packages/shell/src/host/session-hosts.js';
-import { createSessionViewBroker } from '../../packages/shell/src/host/session-views.js';
-import { readSessionHostInput } from '../../packages/shell/session-host/index.js';
+import { createSessionHostRegistry, persistenceRoot, sessionHostUrl } from '../../packages/guest/src/host/session-hosts.js';
+import { createSessionViewBroker } from '../../packages/guest/src/host/session-views.js';
+import { readSessionHostInput } from '../../packages/guest/session-host/index.js';
 
 async function fixture(t) {
   const root = await mkdtemp('/tmp/wsh-host-test-');

@@ -7,7 +7,7 @@ import { createWorkspacePreferencesStore } from './src/host/workspace-preference
 import { registerShellRoutes } from './src/host/routes.js';
 import { registerWorkspaceRuntimeTool } from './src/host/runtime-tool.js';
 import { removeContextAds } from './src/host/context-ads.js';
-import { apply as registerSessionHost, inject as sessionHostInject } from './session-host/index.js';
+import { apply as registerSessionHost, inject as sessionHostInject } from 'dsh-workspace-guest/session-host';
 
 export const inject = [...new Set(['connection', 'profileContext', 'subprocess', 'tools', ...sessionHostInject])];
 

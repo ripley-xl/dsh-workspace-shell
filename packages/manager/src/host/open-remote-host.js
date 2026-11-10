@@ -20,8 +20,7 @@ function loopbackBaseUrl(value) {
 
 export function statusPluginPatch({ runtimeRoot, hostAlias, localReturnUrl, dshVersion }) {
   const statusPackage = posix.join(runtimeRoot, 'plugins', 'status', 'index.js');
-  const guestCwdPackage = posix.join(runtimeRoot, 'plugins', 'guest-cwd', 'index.js');
-  const guestNotifyPackage = posix.join(runtimeRoot, 'plugins', 'guest-notify', 'index.js');
+  const guestPackage = posix.join(runtimeRoot, 'plugins', 'guest', 'index.js');
   return [
     '- insert:',
     '    - id: ssh-remote-status',
@@ -30,11 +29,8 @@ export function statusPluginPatch({ runtimeRoot, hostAlias, localReturnUrl, dshV
     `        hostAlias: ${JSON.stringify(hostAlias)}`,
     `        localReturnUrl: ${JSON.stringify(loopbackBaseUrl(localReturnUrl))}`,
     `        dshVersion: ${JSON.stringify(dshVersion)}`,
-    '    - id: workspace-shell-guest-cwd',
-    `      name: ${JSON.stringify(guestCwdPackage)}`,
-    '      config: {}',
-    '    - id: workspace-shell-guest-notify',
-    `      name: ${JSON.stringify(guestNotifyPackage)}`,
+    '    - id: workspace-guest',
+    `      name: ${JSON.stringify(guestPackage)}`,
     '      config: {}',
     '',
   ].join('\n');

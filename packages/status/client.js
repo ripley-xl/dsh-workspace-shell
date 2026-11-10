@@ -228,6 +228,18 @@ window.__ModuleLoader__.load({
     }
 
     const EMBEDDED_KEY = 'ssh-remote:embedded';
+    // A workspace Guest is framed by the host Shell, which already owns the SSH
+    // manager; only the manager's own embedded preview keeps the status UI.
+    function workspaceGuest(pageWindow) {
+      try {
+        const url = new URL(pageWindow.location.href);
+        if (url.searchParams.get('workspaceShellEmbedded') === '1') return true;
+        return new URLSearchParams((url.hash ?? '').slice(1)).get('workspaceShellEmbedded') === '1';
+      } catch {
+        return false;
+      }
+    }
+
     function detectEmbedded(pageWindow) {
       let marked = false;
       try { marked = new URL(pageWindow.location.href).searchParams.get('sshRemoteEmbedded') === '1'; } catch { /* No page URL in non-browser renders. */ }
@@ -594,6 +606,9 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots', 'locale'],
       apply(ctx, config) {
+        // A workspace Guest is framed by the host Shell, which owns the SSH
+        // manager; the remote status page and its sidebar entry would duplicate it.
+        if (workspaceGuest(window)) return;
         for (const locale of ['en', 'zh']) ctx.effect(() => ctx.locale.register('ssh-remote-status', locale, messages[locale]));
         const t = ctx.locale.bind('ssh-remote-status');
         const embedded = detectEmbedded(window);

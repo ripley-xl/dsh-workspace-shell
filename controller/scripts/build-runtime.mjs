@@ -161,14 +161,16 @@ async function assertRuntimeContents(runtimeRoot, platform, arch, libc) {
     "plugins/status/client.js",
     "plugins/status/src/host/index.js",
     "plugins/status/cordis.patch.yml",
-    "plugins/guest-cwd/package.json",
-    "plugins/guest-cwd/index.js",
-    "plugins/guest-cwd/client.js",
-    "plugins/guest-cwd/cordis.patch.yml",
-    "plugins/guest-notify/package.json",
-    "plugins/guest-notify/index.js",
-    "plugins/guest-notify/client.js",
-    "plugins/guest-notify/cordis.patch.yml",
+    "plugins/guest/package.json",
+    "plugins/guest/index.js",
+    "plugins/guest/client.js",
+    "plugins/guest/cordis.patch.yml",
+    "plugins/guest/session-host/index.js",
+    "plugins/guest/session-host/controller.js",
+    "plugins/guest/session-host/submissions.js",
+    "plugins/guest/session-host/ui.js",
+    "plugins/guest/src/host/session-hosts.js",
+    "plugins/guest/src/host/session-views.js",
     "app/node_modules/@deepseek-ai/dsh/lib/bin.js",
     "app/node_modules/@deepseek-ai/dsh-web-app/lib/index.js",
     "app/node_modules/@deepseek-ai/dsh-web-frontend/dist/index.html"
@@ -233,8 +235,10 @@ async function buildTarget(platform, arch, libc, options) {
     recursive: true,
     filter: (source) => !source.split("/").includes("node_modules")
   });
-  await cp(resolve(CONTROLLER_ROOT, "..", "packages", "shell", "guest-cwd"), resolve(runtimeRoot, "plugins", "guest-cwd"), { recursive: true });
-  await cp(resolve(CONTROLLER_ROOT, "..", "packages", "shell", "guest-notify"), resolve(runtimeRoot, "plugins", "guest-notify"), { recursive: true });
+  await cp(resolve(CONTROLLER_ROOT, "..", "packages", "guest"), resolve(runtimeRoot, "plugins", "guest"), {
+    recursive: true,
+    filter: (source) => !source.split("/").includes("node_modules")
+  });
   await rm(resolve(app, "node_modules", ".bin"), { recursive: true, force: true });
 
   const dshScript = `#!/bin/sh\nset -eu\nBIN_DIR=$(CDPATH= cd -P "$(dirname "$0")" && pwd)\nROOT=$(CDPATH= cd -P "$BIN_DIR/.." && pwd)\nexec "$ROOT/bin/node" "$ROOT/app/node_modules/@deepseek-ai/dsh/lib/bin.js" "$@"\n`;

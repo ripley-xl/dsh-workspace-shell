@@ -577,6 +577,10 @@ export function createWorkspaceClient(deps) {
     const task = resolveUrl().then(async (url) => {
       if (closed) return;
       if (spec.ssh && sshRegistration !== registration) throw error('SSH_COMPONENT_DISABLED');
+      // Connection's login redirect removes the query but preserves the fragment,
+      // so the embedded flag must travel in the hash for every Guest. SSH views have
+      // no session-navigation identity but still need it for the notification bridge.
+      const bootstrap = new URLSearchParams({ workspaceShellEmbedded: '1', ...(parentOrigin ? { workspaceShellParentOrigin: parentOrigin } : {}) });
       if (!spec.ssh && sessionNavigation?.context) {
         const parent = await sessionNavigation.context();
         if (closed) return;
@@ -585,10 +589,11 @@ export function createWorkspaceClient(deps) {
         url.searchParams.set('workspaceSessionWindow', parent.windowId);
         url.searchParams.set('workspaceSessionParent', parent.instanceId);
         url.searchParams.set('workspaceSessionTab', token);
-        // Connection's login redirect removes the query but preserves the fragment.
-        const bootstrap = new URLSearchParams({ workspaceShellEmbedded: '1', workspaceSessionWindow: parent.windowId, workspaceSessionParent: parent.instanceId, workspaceSessionTab: token, ...(parentOrigin ? { workspaceShellParentOrigin: parentOrigin } : {}) });
-        url.hash = url.hash.slice(1) + (url.hash ? '&' : '') + bootstrap.toString();
+        bootstrap.set('workspaceSessionWindow', parent.windowId);
+        bootstrap.set('workspaceSessionParent', parent.instanceId);
+        bootstrap.set('workspaceSessionTab', token);
       }
+      url.hash = url.hash.slice(1) + (url.hash ? '&' : '') + bootstrap.toString();
       token?.mark('host');
       guest = createGuest({ document, window, container: options.container, workspaceKey: 'workspace-profile:' + spec.key, url: url.href, signal: abort.signal,
         onGuestEvent: guestNotice,

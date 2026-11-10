@@ -525,7 +525,10 @@ test('authenticated view URLs reach only the Guest, preserve hash, and add the e
   const url = new URL(guest.input.url);
   assert.equal(url.searchParams.get('token'), 'secret');
   assert.equal(url.searchParams.get('workspaceShellEmbedded'), '1');
-  assert.equal(url.hash, '#thread');
+  // The login redirect keeps the fragment only, so the embedded flag also rides there.
+  const fragment = new URLSearchParams(url.hash.slice(1));
+  assert.equal(url.hash.startsWith('#thread&'), true);
+  assert.equal(fragment.get('workspaceShellEmbedded'), '1');
   assert.match(guest.input.workspaceKey, /^workspace-profile:local-web:alpha:web:/);
   assert.doesNotMatch(JSON.stringify(h.client.tabs.getSnapshot()), /token|secret|http|runtimeId|lease/);
   assert.equal(tab(h.client, id).phase, 'opening');

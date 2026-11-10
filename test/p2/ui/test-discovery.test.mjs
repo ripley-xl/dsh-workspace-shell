@@ -41,8 +41,8 @@ test('discovery skips hidden runtime trees, dependencies, fixtures, artifacts an
   assert.deepEqual((await discoverNamedTests(directory)).map((file) => path.relative(directory, file)), ['a.test.js', 'nested/b.test.mjs']);
 });
 
-test('guest notification companion matches the authored sources', () => {
-  const result = spawnSync(process.execPath, ['scripts/build-guest-notify.mjs', '--check'], {
+test('guest Client matches the authored sources', () => {
+  const result = spawnSync(process.execPath, ['scripts/build-guest-client.mjs', '--check'], {
     cwd: projectRoot, encoding: 'utf8', timeout: 10000,
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);

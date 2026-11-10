@@ -1,0 +1,34 @@
+{
+  "name": "dsh-workspace-guest",
+  "version": "0.5.27",
+  "private": true,
+  "type": "module",
+  "description": "Guest-side workspace bridge for DSH Web profiles",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./session-host": "./session-host/index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "package.json",
+    "session-host/*.js",
+    "src/**/*.js"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "engines": {
+    "dsh": ">=0.2.1-rc.5 <0.3.0-0"
+  }
+}

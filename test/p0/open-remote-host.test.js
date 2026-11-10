@@ -11,10 +11,8 @@ test('remote status patch carries no local access token', () => {
   });
   assert.equal(patch.includes('local-secret'), false);
   assert.equal(patch.includes('/plugins/status'), true);
-  assert.equal(patch.includes('/plugins/guest-cwd'), true);
-  assert.equal(patch.includes('workspace-shell-guest-cwd'), true);
-  assert.equal(patch.includes('/plugins/guest-notify'), true);
-  assert.equal(patch.includes('workspace-shell-guest-notify'), true);
+  assert.equal(patch.includes('/plugins/guest'), true);
+  assert.equal(patch.includes('workspace-guest'), true);
   assert.equal(patch.includes('p0-linux'), true);
 });
 

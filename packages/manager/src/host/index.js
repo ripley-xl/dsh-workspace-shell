@@ -346,4 +346,10 @@ export async function apply(ctx, config = {}) {
     return { ok: true, result, forwards: service.listPorts(id) };
   });
 
+  // Hot reload replaces this plugin without restarting the app: the storage
+  // domain must be closed here or the next instance cannot open it.
+  ctx.effect(() => async () => {
+    await service.close();
+    await store.close();
+  });
 }

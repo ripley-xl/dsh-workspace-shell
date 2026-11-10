@@ -53,6 +53,17 @@
 
 迁移前，旧 profile 里的单包 Shell 仍按原方式工作（来宾端标记会阻止两个通知桥重复安装）。
 
+## 剪贴板
+
+来宾页在跨域 iframe 或 webview 里时，`navigator.clipboard.writeText` 会被 Permissions Policy 或焦点检查拒绝；DSH 的复制路径在被拒后直接返回失败，不回退。
+
+来宾端做两件事：
+
+- 浏览器 guest 的 iframe 增加 `allow="clipboard-write; clipboard-read"`，把权限委派给页面；
+- 来宾端 Client 安装兜底：先调原生的 `writeText`，失败时用临时 textarea + `execCommand('copy')` 完成，成功与否记录在页面全局 `__workspaceShellClipboard`。
+
+实测：Desktop 里本机 Web 页签和 anydev 页签的复制按钮都恢复正常（重开页签加载新 Client 后）。
+
 ## 测试
 
 - 全量具名测试通过；

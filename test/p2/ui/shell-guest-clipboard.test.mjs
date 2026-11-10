@@ -15,8 +15,8 @@ function harness({ fail = true } = {}) {
   };
   const area = {
     value: '', style: {}, removed: 0,
-    setAttribute() {}, select() { copied = this.value; },
-    remove() { this.removed += 1; },
+    setAttribute() {}, focus() { this.focused += 1; }, setSelectionRange() {}, select() { copied = this.value; },
+    remove() { this.removed += 1; }, focused: 0,
   };
   const document = {
     createElement(tag) { assert.equal(tag, 'textarea'); return area; },

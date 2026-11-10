@@ -4,13 +4,16 @@
 // back, so the Guest installs the fallback itself: try the modern API first and
 // use a select+copy textarea only when it fails.
 export function installClipboardFallback(window, document) {
+  const mark = (installed, reason) => {
+    try { window.__workspaceShellClipboard = { installed, reason }; } catch { /* Diagnostics only. */ }
+  };
   let clipboard;
   try {
     clipboard = window.navigator?.clipboard;
   } catch {
     clipboard = null;
   }
-  if (!clipboard || typeof clipboard.writeText !== 'function') return false;
+  if (!clipboard || typeof clipboard.writeText !== 'function') { mark(false, clipboard ? 'no-write-text' : 'no-clipboard'); return false; }
   const original = clipboard.writeText.bind(clipboard);
   const fallback = (text) => {
     let area;
@@ -23,7 +26,9 @@ export function installClipboardFallback(window, document) {
       area.style.left = '0';
       area.style.opacity = '0';
       document.body.appendChild(area);
+      try { area.focus({ preventScroll: true }); } catch { /* A page without focus support still tries execCommand. */ }
       area.select();
+      try { area.setSelectionRange(0, area.value.length); } catch { /* Selection API is best effort. */ }
       const copied = document.execCommand('copy');
       if (!copied) throw new Error('copy denied');
     } finally {
@@ -39,8 +44,11 @@ export function installClipboardFallback(window, document) {
   };
   try {
     Object.defineProperty(clipboard, 'writeText', { configurable: true, value: writeText });
-    return clipboard.writeText === writeText;
-  } catch {
+    const installed = clipboard.writeText === writeText;
+    mark(installed, installed ? 'installed' : 'unchanged');
+    return installed;
+  } catch (error) {
+    mark(false, 'define-failed:' + String(error?.name ?? error));
     return false;
   }
 }

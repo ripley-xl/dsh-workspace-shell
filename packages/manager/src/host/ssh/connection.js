@@ -28,7 +28,9 @@ async function defaultClientFactory() {
   // Desktop HMR can retain an empty Client export while the constructor module is intact.
   if (typeof Client !== 'function') Client = require('ssh2/lib/client.js');
   if (typeof Client !== 'function') throw new Error('The ssh2 package does not export a Client constructor.');
-  return new Client();
+  // Corporate proxies and NAT drop idle TCP after half a minute or so; a
+  // keepalive keeps the manager's shared channel alive between actions.
+  return new Client({ keepaliveInterval: 15_000, keepaliveCountMax: 4 });
 }
 
 function authenticationFailed(cause) {

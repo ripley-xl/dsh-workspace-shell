@@ -12,6 +12,13 @@ export function createGuestPlugin(React, deps) {
       sessions?.apply(ctx);
       installGuestCwd(ctx, deps.window);
       installClipboardFallback(deps.window, deps.document);
+      const restart = createGuestRestart(React, { window: deps.window, document: deps.document });
+      try {
+        ctx.effect(() => () => restart.dispose(), 'workspace guest restart');
+      } catch {
+        restart.dispose();
+      }
+      restart.apply(ctx);
       const bridge = createGuestNotificationBridge({ window: deps.window, ctx });
       try {
         ctx.effect(() => () => bridge.dispose(), 'workspace guest notifications');

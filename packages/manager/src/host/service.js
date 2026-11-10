@@ -1,3 +1,4 @@
+import { appendFileSync, mkdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { homedir } from 'node:os';
@@ -967,6 +968,15 @@ export class SshRemoteService extends EventEmitter {
     };
   }
 
+  /** Startup diagnostics land next to the route errors; failures are otherwise silent. */
+  debugLog(message) {
+    try {
+      const file = path.join(homedir(), '.dsh', 'ssh-remote', 'logs', 'auto-connect.log');
+      mkdirSync(path.dirname(file), { recursive: true });
+      appendFileSync(file, new Date().toISOString() + ' ' + message + '\n');
+    } catch { /* diagnostics never break the service */ }
+  }
+
   publish(hostId) {
     if (!this.store.get(hostId)) return;
     this.emit('connection', this.publicConnection(hostId));
@@ -1049,7 +1059,9 @@ export class SshRemoteService extends EventEmitter {
       if (!record || !this.wantsAutoConnect(record)) return;
       const runtime = this.runtime(hostId);
       if (runtime.operation || runtime.host) return;
-      this.connect(hostId, { background: true }).catch(() => {});
+      this.connect(hostId, { background: true }).catch((cause) => {
+        this.debugLog(`auto-connect failed for ${hostId}: ${cause?.code ?? ''} ${String(cause?.message ?? cause).slice(0, 200)}`);
+      });
     }, 0);
     timer.unref?.();
   }
@@ -1059,6 +1071,7 @@ export class SshRemoteService extends EventEmitter {
     this.autoConnectStarted = true;
     const records = this.store.list().filter((record) => this.wantsAutoConnect(record));
     for (const record of records) this.scheduleAutoConnect(record.id);
+    this.debugLog(`auto-connect: ${records.length} record(s) scheduled`);
     return { ok: true, attempted: this.autoConnectAttempts.size };
   }
 

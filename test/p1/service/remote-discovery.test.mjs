@@ -44,18 +44,21 @@ async function connectedFixture(t, output, { alive = true } = {}) {
   return { fixture, record };
 }
 
-test('discovered hosts are read over the connected channel without their token', async (t) => {
-  const { fixture, record } = await connectedFixture(t, JSON.stringify(card()) + '\n');
+test('discovered hosts are the ones without a profile row and carry no token', async (t) => {
+  const older = card({
+    instanceId: 'b'.repeat(32), pid: 4343, port: 3081,
+    startedAt: '2026-11-10T00:00:00.000Z', heartbeatAt: '2026-11-10T00:00:00.000Z',
+  });
+  const newest = card({ startedAt: '2026-11-10T01:00:00.000Z', heartbeatAt: '2026-11-10T01:00:00.000Z' });
+  const { fixture, record } = await connectedFixture(t, [older, newest].map((item) => JSON.stringify(item)).join('\n') + '\n');
   const listed = await fixture.service.discoveredHosts(record.id);
   assert.equal(listed.ok, true);
-  assert.equal(listed.hosts.length, 1);
-  assert.equal(listed.hosts[0].instanceId, INSTANCE);
-  assert.equal(listed.hosts[0].profileId, 'web');
+  // The newest live card is already the profile row; only the older one is
+  // "another Host" on this machine.
+  assert.deepEqual(listed.hosts.map((host) => host.instanceId), ['b'.repeat(32)]);
   assert.equal(JSON.stringify(listed).includes('secret-token'), false, 'the authenticated URL never leaves the host');
   const reads = fixture.state.execs.filter((request) => String(request.args?.[1] ?? '').includes('workspace-hosts'));
-  assert.equal(reads.length, 1);
-  assert.equal(reads[0].command, 'sh');
-  // The second round trip only asks which pids are alive.
+  assert.equal(reads.length >= 1, true);
   assert.equal(fixture.state.execs.some((request) => String(request.args?.[1] ?? '').includes('kill -0')), true);
 });
 

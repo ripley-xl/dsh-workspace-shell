@@ -627,10 +627,11 @@ export class SshRemoteService extends EventEmitter {
       throw error('HOST_NOT_CONNECTED', 'The SSH host is not connected.');
     }
     const { hosts, skipped } = await readRemoteHostCards(runtime.channel, { signal });
-    // Controller-started Hosts write cards too, and a card outlives its process
-    // when the Host is killed. Neither belongs in "other hosts": the first is
-    // already a row of its own, the second is not running at all.
-    const managed = new Set();
+    // A Host that already has a profile row must not show up again under
+    // "other hosts"; supervised cards are controller leftovers, and a card can
+    // outlive its process when the Host is killed.
+    const managed = new Set((await this.guestProfileHosts(hostId, { signal }))
+      .map((host) => host.instanceId).filter(Boolean));
     const candidates = hosts.filter((card) => card.supervised !== true && !managed.has(card.instanceId));
     const alive = await filterLivePids(runtime.channel, candidates.map((card) => card.pid), { signal });
     return {
@@ -1241,7 +1242,7 @@ export class SshRemoteService extends EventEmitter {
       phase: 'running',
       health: { healthy: true, connected: true, hostAlive: true, supervisorAlive: false },
       views: 0,
-      dshVersion: card.guestVersion ?? null,
+      dshVersion: null,
       connected: true,
     }));
   }

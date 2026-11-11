@@ -488,9 +488,59 @@ export class SshRemoteService extends EventEmitter {
   session(hostId) {
     if (!this.sessions.has(hostId)) {
       const record = this.store.require(hostId);
-      this.sessions.set(hostId, new HostSession({ hostId, alias: record.hostAlias }));
+      const session = new HostSession({ hostId, alias: record.hostAlias });
+      // A dropped SSH channel must heal itself: the alternative is a panel that
+      // silently stays disconnected and tabs whose forwarded port is gone.
+      session.on('channelClose', () => this.handleChannelLoss(hostId));
+      this.sessions.set(hostId, session);
     }
     return this.sessions.get(hostId);
+  }
+
+  async handleChannelLoss(hostId) {
+    if (this.closed) return;
+    const runtime = this.runtime(hostId);
+    if (runtime.intentionalClose) return;
+    if (runtime.reconnectTimer) return;
+    // Forwards die with the channel; remember their ports so the tabs that are
+    // already open keep the same local address after the reconnect.
+    runtime.savedForwards = [...(runtime.knownForwards ?? [])];
+    runtime.reconnectAttempts = 0;
+    this.transition(runtime, 'reconnecting');
+    this.scheduleGuestReconnect(hostId);
+  }
+
+  scheduleGuestReconnect(hostId) {
+    const runtime = this.runtime(hostId);
+    if (this.closed || !runtime.savedForwards) return;
+    const attempt = runtime.reconnectAttempts + 1;
+    runtime.reconnectAttempts = attempt;
+    const delay = Math.min(30_000, 1_000 * 2 ** (attempt - 1));
+    runtime.reconnectTimer = setTimeout(async () => {
+      runtime.reconnectTimer = null;
+      if (this.closed) return;
+      try {
+        await this.connect(hostId, { background: true });
+        const saved = runtime.savedForwards ?? [];
+        runtime.savedForwards = null;
+        runtime.reconnectAttempts = 0;
+        for (const forward of saved) {
+          await addPortForward(this, hostId, {
+            name: `restore-${forward.remotePort}`, remotePort: forward.remotePort, localPort: forward.localPort,
+          }).catch(() => {});
+        }
+        this.publish(hostId);
+      } catch (cause) {
+        if (this.closed) return;
+        if (attempt >= 6) {
+          runtime.savedForwards = null;
+          this.transition(runtime, 'failed', cause);
+          return;
+        }
+        this.scheduleGuestReconnect(hostId);
+      }
+    }, delay);
+    runtime.reconnectTimer.unref?.();
   }
 
   /** Refreshes the cached profile list; failures keep the previous cache. */
@@ -548,6 +598,11 @@ export class SshRemoteService extends EventEmitter {
     if (!forward || !Number.isInteger(forward.localPort) || forward.localPort < 1) {
       throw error('TUNNEL_FAILED', 'The port forward did not become active.');
     }
+    // Remember the ports, not just the live forwards: when the channel drops the
+    // forward objects are gone before the close handler runs.
+    const known = (this.runtime(hostId).knownForwards ?? []).filter((item) => item.remotePort !== forward.remotePort);
+    known.push({ remotePort: forward.remotePort, localPort: forward.localPort });
+    this.runtime(hostId).knownForwards = known;
     return {
       ok: true,
       guest: true,
@@ -798,6 +853,11 @@ export class SshRemoteService extends EventEmitter {
     if (!forward || !Number.isInteger(forward.localPort) || forward.localPort < 1) {
       throw error('TUNNEL_FAILED', 'The port forward did not become active.');
     }
+    // Remember the ports, not just the live forwards: when the channel drops the
+    // forward objects are gone before the close handler runs.
+    const known = (this.runtime(hostId).knownForwards ?? []).filter((item) => item.remotePort !== forward.remotePort);
+    known.push({ remotePort: forward.remotePort, localPort: forward.localPort });
+    this.runtime(hostId).knownForwards = known;
     return {
       ok: true,
       instanceId: card.instanceId,
@@ -1291,6 +1351,7 @@ export class SshRemoteService extends EventEmitter {
   async disconnect(hostId) {
     const runtime = this.runtime(hostId);
     this.store.require(hostId);
+    runtime.intentionalClose = true;
     this.clearReconnect(runtime);
     this.interactions.cancelHost(hostId);
     runtime.abort?.abort(operationCancelled());
@@ -1303,6 +1364,7 @@ export class SshRemoteService extends EventEmitter {
     runtime.reconnectAttempts = 0;
     runtime.sync = null;
     runtime.preview = null;
+    runtime.intentionalClose = false;
     this.transition(runtime, 'idle');
     return { ok: true, host: this.publicConnection(hostId) };
   }

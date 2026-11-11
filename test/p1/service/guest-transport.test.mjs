@@ -85,3 +85,31 @@ test('guest transport opens the reported Host instead of starting a controller o
   assert.equal(opened.url, 'http://127.0.0.1:40020/?token=guest-token');
   assert.equal(fixture.state.instances.length, 0);
 });
+
+test('a dropped SSH channel reconnects in the background', async (t) => {
+  const { SshRemoteService } = await import('../../../packages/manager/src/host/service.js');
+  const { ConnectionStore } = await import('../../../packages/manager/src/host/store.js');
+  const { guestChannel, memoryStorage, waitForPhase } = await import('./helpers.mjs');
+  const store = await new ConnectionStore(memoryStorage()).open();
+  const channels = [];
+  const service = new SshRemoteService({
+    store,
+    localVersion: async () => '1.0.0',
+    localBundles: async () => [],
+    localReturnUrl: 'http://127.0.0.1:54542',
+    openGuestChannel: async () => {
+      const channel = guestChannel();
+      channels.push(channel);
+      return { channel, controller: null, transportMode: 'guest' };
+    },
+  });
+  t.after(async () => { await service.close().catch(() => {}); await store.close().catch(() => {}); });
+  const record = await store.upsert({ hostAlias: 'p0-test' });
+  await service.connect(record.id);
+  assert.equal(channels.length, 1);
+  await channels[0].close();
+  await waitForPhase(service, record.id, 'reconnecting');
+  await waitForPhase(service, record.id, 'connected', 6_000);
+  assert.equal(channels.length, 2, 'the service dials a fresh channel');
+  assert.equal(service.publicConnection(record.id).connected, true);
+});

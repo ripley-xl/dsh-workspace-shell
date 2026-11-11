@@ -679,6 +679,10 @@ export class SshRemoteService extends EventEmitter {
    * their authenticated URL.
    */
   async discoveredHosts(hostId, { signal } = {}) {
+    return this.withTransportRetry(hostId, () => this.discoveredHostsOnce(hostId, { signal }));
+  }
+
+  async discoveredHostsOnce(hostId, { signal } = {}) {
     this.store.require(hostId);
     const runtime = this.runtime(hostId);
     if (!runtime.channel || runtime.channel.closed) {
@@ -767,7 +771,28 @@ export class SshRemoteService extends EventEmitter {
    * Only missing plugins and genuine upgrades are installed; a newer remote
    * plugin, a local path spec, and Desktop-only packages are left alone.
    */
+  /**
+   * A dropped transport surfaces as SSH_EXEC_FAILED in the middle of a read or
+   * a sync. Reconnect once and retry before showing the user an error.
+   */
+  async withTransportRetry(hostId, run) {
+    try {
+      return await run();
+    } catch (cause) {
+      const transient = new Set(['SSH_EXEC_FAILED', 'SSH_CONNECTION_FAILED', 'SSH_CHANNEL_FAILED']);
+      if (!transient.has(cause?.code)) throw cause;
+      await this.session(hostId).closeTransport().catch(() => {});
+      this.transition(this.runtime(hostId), 'reconnecting');
+      await this.connect(hostId, { background: true }).catch(() => {});
+      return run();
+    }
+  }
+
   async syncDiscovered(hostId, { instanceId, signal } = {}) {
+    return this.withTransportRetry(hostId, () => this.syncDiscoveredOnce(hostId, { instanceId, signal }));
+  }
+
+  async syncDiscoveredOnce(hostId, { instanceId, signal } = {}) {
     await this.ensureConnected(hostId);
     this.store.require(hostId);
     const { runtime, card } = await this.requireDiscoveredCard(hostId, instanceId, signal);

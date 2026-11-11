@@ -113,3 +113,34 @@ test('a dropped SSH channel reconnects in the background', async (t) => {
   assert.equal(channels.length, 2, 'the service dials a fresh channel');
   assert.equal(service.publicConnection(record.id).connected, true);
 });
+
+test('a transient transport failure retries once after reconnecting', async (t) => {
+  const { SshRemoteService } = await import('../../../packages/manager/src/host/service.js');
+  const { ConnectionStore } = await import('../../../packages/manager/src/host/store.js');
+  const { guestChannel, memoryStorage } = await import('./helpers.mjs');
+  const store = await new ConnectionStore(memoryStorage()).open();
+  let dials = 0;
+  const service = new SshRemoteService({
+    store,
+    localVersion: async () => '1.0.0',
+    localBundles: async () => [],
+    localReturnUrl: 'http://127.0.0.1:54542',
+    openGuestChannel: async () => { dials += 1; return { channel: guestChannel(), controller: null, transportMode: 'guest' }; },
+  });
+  t.after(async () => { await service.close().catch(() => {}); await store.close().catch(() => {}); });
+  const record = await store.upsert({ hostAlias: 'p0-test' });
+  await service.connect(record.id);
+  let runs = 0;
+  const result = await service.withTransportRetry(record.id, async () => {
+    runs += 1;
+    if (runs === 1) {
+      const cause = new Error('channel died');
+      cause.code = 'SSH_EXEC_FAILED';
+      throw cause;
+    }
+    return 'ok';
+  });
+  assert.equal(result, 'ok');
+  assert.equal(runs, 2);
+  assert.equal(dials, 2, 'the retry dials a fresh channel');
+});

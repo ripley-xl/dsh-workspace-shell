@@ -32,7 +32,12 @@ test('preference sync takes settings files and leaves state behind', async (t) =
 test('applying preferences backs the remote file up before replacing it', async () => {
   const calls = [];
   const channel = {
-    async exec(request) { calls.push(['exec', String(request.args?.[1] ?? '')]); return { code: 0, stdout: '', stderr: '' }; },
+    async exec(request) {
+      const script = String(request.args?.[1] ?? '');
+      calls.push(['exec', script]);
+      if (script.includes('printf %s "$HOME"')) return { code: 0, stdout: '/home/user', stderr: '' };
+      return { code: 0, stdout: '', stderr: '' };
+    },
     async upload(local, remote) { calls.push(['upload', remote]); },
   };
   const result = await applyPreferenceSync(channel, {
@@ -40,5 +45,5 @@ test('applying preferences backs the remote file up before replacing it', async 
   });
   assert.deepEqual(result.synced, ['storages/dsh-composer-plus/assistant-switch.json']);
   assert.ok(calls.some(([kind, line]) => kind === 'exec' && line.includes('bak-sync-')));
-  assert.ok(calls.some(([kind, remote]) => kind === 'upload' && remote === '$HOME/.dsh/storages/dsh-composer-plus/assistant-switch.json'));
+  assert.ok(calls.some(([kind, remote]) => kind === 'upload' && remote === '/home/user/.dsh/storages/dsh-composer-plus/assistant-switch.json'));
 });

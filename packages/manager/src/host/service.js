@@ -816,7 +816,7 @@ export class SshRemoteService extends EventEmitter {
     // profile, not in the patch; copy the Desktop's files over.
     let preferences = { synced: [], failed: [] };
     try {
-      const planned = await planPreferenceSync({ home, profileId: 'desktop' });
+      const planned = await planPreferenceSync({ home, profileId: 'desktop', targetProfileId: card.profileId });
       preferences = await applyPreferenceSync(runtime.channel, { files: planned.files, signal });
     } catch (cause) {
       preferences = { synced: [], failed: [], error: safeMessage(cause) };

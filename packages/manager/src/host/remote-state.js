@@ -28,7 +28,7 @@ async function readJsonFile(file) {
  * the per-plugin JSON at the top of `storages/<plugin>/`. Runtime state,
  * caches, grants and secrets are left alone.
  */
-export async function planPreferenceSync({ home, profileId = 'desktop', fsImpl = fs } = {}) {
+export async function planPreferenceSync({ home, profileId = 'desktop', targetProfileId = profileId, fsImpl = fs } = {}) {
   if (typeof home !== 'string' || !path.isAbsolute(home)) return { files: [], skipped: [] };
   const files = [];
   const skipped = [];
@@ -54,7 +54,7 @@ export async function planPreferenceSync({ home, profileId = 'desktop', fsImpl =
   }
   for (const name of names) {
     if (!PROFILE_FILE.test(name) || EXCLUDED.test(name)) continue;
-    await add(path.join(profileDir, name), `profiles/${profileId}/${name}`);
+    await add(path.join(profileDir, name), `profiles/${targetProfileId}/${name}`);
   }
 
   const storages = path.join(home, 'storages');
@@ -93,9 +93,15 @@ export async function applyPreferenceSync(channel, {
   }
   const synced = [];
   const failed = [];
+  const homeReply = await channel.exec({ command: 'sh', args: ['-c', 'printf %s "$HOME"'], signal });
+  const remoteHome = String(homeReply?.stdout ?? '').trim();
+  if (homeReply?.code !== 0 || !remoteHome.startsWith('/')) {
+    throw new SshRemoteError('REMOTE_STATE_SYNC_FAILED', 'The remote home directory could not be resolved.');
+  }
+  const quote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
   for (const file of files) {
-    const remote = `"$HOME/.dsh/${file.target}"`;
-    const plain = `$HOME/.dsh/${file.target}`;
+    const absolute = `${remoteHome}/.dsh/${file.target}`;
+    const remote = quote(absolute);
     const local = path.join(os.tmpdir(), `dsh-pref-${stamp}-${synced.length}.json`);
     try {
       await fs.writeFile(local, file.text, { mode: 0o600 });
@@ -103,7 +109,7 @@ export async function applyPreferenceSync(channel, {
         command: 'sh', args: ['-c', `[ -f ${remote} ] && cp ${remote} ${remote}.bak-sync-${stamp} 2>/dev/null; mkdir -p "$(dirname ${remote})"`], signal,
       });
       if (backup.code !== 0) throw new Error('backup failed');
-      await channel.upload(local, plain, { signal });
+      await channel.upload(local, absolute, { signal });
       synced.push(file.target);
     } catch {
       failed.push(file.target);

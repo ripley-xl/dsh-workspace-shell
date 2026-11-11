@@ -194,7 +194,8 @@ export async function appendRemotePatch(channel, {
       args: [argv[1], '--profile', profileId, '--dump-config'],
       signal,
       timeoutMs: 120_000,
-      maxStdoutBytes: 64 * 1024,
+      // The resolved config of a real profile is well past 64 KB.
+      maxStdoutBytes: 4 * 1024 * 1024,
     });
     if (check.code !== 0) {
       await channel.exec({ command: 'sh', args: ['-c', `cp ${quoteRemote(backup)} ${quoteRemote(target)} 2>/dev/null || true`], signal }).catch(() => {});

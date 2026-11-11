@@ -606,6 +606,11 @@ export class SshRemoteService extends EventEmitter {
     const session = this.session(hostId);
     if (session.connected) await this.refreshGuestProfiles(session);
     const hosts = await this.guestProfileHosts(hostId);
+    for (const host of hosts) {
+      const counts = await this.planSyncCounts(hostId, host.profileId);
+      host.syncPending = counts ? !counts.aligned : null;
+      host.syncCounts = counts;
+    }
     return {
       ok: true,
       profiles: session.profiles?.length ? session.profiles : defaultProfiles(),
@@ -1369,6 +1374,35 @@ export class SshRemoteService extends EventEmitter {
       session.profiles = session.profiles ?? null;
     }
     return session.profiles ?? null;
+  }
+
+  /**
+   * How much a Host is behind this machine: installable plugins and appendable
+   * patch entries. Read-only, so the row can hide the sync action when aligned.
+   */
+  async planSyncCounts(hostId, profileId, { signal } = {}) {
+    const runtime = this.runtime(hostId);
+    if (!runtime.channel || runtime.channel.closed) return null;
+    try {
+      const home = this.localHome() ?? process.env.DSH_HOME ?? path.join(homedir(), '.dsh');
+      const desktopDeps = await readLocalProfileDependencies(home, 'desktop').catch(() => null);
+      const localBundles = desktopDeps
+        ? Object.entries(desktopDeps).map(([name, spec]) => ({
+          name, version: String(spec).replace(/^[\^~]/u, ''), official: name.startsWith('@deepseek-ai/'), enabled: true,
+        }))
+        : await this.localBundles().catch(() => []);
+      const remoteDependencies = await readRemoteProfileDependencies(runtime.channel, profileId, { signal });
+      const plugins = planDiscoveredSync({ localBundles, remoteDependencies }).install.length;
+      let config = 0;
+      try {
+        const localText = await readLocalProfilePatch(home, 'desktop');
+        const remoteText = await readRemoteProfilePatch(runtime.channel, profileId, { signal });
+        config = planPatchSync({ localText, remoteText }).append.length;
+      } catch { config = 0; }
+      return { plugins, config, aligned: plugins === 0 && config === 0 };
+    } catch {
+      return null;
+    }
   }
 
   /** One running row per profile, built from the Host cards. */

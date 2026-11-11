@@ -25,7 +25,7 @@ function webList(overrides = {}) {
   return {
     ok: true,
     profiles: [{ id: 'web', web: true }, { id: 'work', web: true }],
-    hosts: [{ profileId: 'work', profileName: 'Work', instanceId: 'inst-work', state: 'running', views: 2 }],
+    hosts: [{ profileId: 'work', profileName: 'Work', instanceId: 'inst-work', state: 'running', views: 2, syncPending: true }],
     profilesSource: 'remote',
     connected: true,
     ...overrides,
@@ -889,4 +889,13 @@ test('an idle disconnect keeps the Host row actions on screen', async (t) => {
   await tap(button(h.view.root, 'Refresh Web Hosts'));
   await act(async () => {});
   assert.equal(syncButton().length, 1, 'the row survives the disconnect instead of blinking out');
+});
+
+test('an aligned Host hides the sync action', async (t) => {
+  const h = await mountLauncher(t, {
+    handlers: { '/web/list': () => webList({ hosts: [{ profileId: 'work', profileName: 'Work', instanceId: 'inst-work', state: 'running', syncPending: false }] }) },
+  });
+  const syncButtons = h.view.root.findAll((node) => node.type === 'button' && text(node) === 'Sync & update');
+  assert.equal(syncButtons.length, 0, 'nothing to sync, so no action');
+  assert.ok(h.view.root.findAll((node) => node.type === 'button' && text(node) === 'Restart').length >= 1);
 });

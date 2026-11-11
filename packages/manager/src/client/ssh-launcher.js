@@ -434,6 +434,7 @@ export function createSshLauncher(React, deps = {}) {
         dshVersion: firstString(host.dshVersion, host.version),
         latestDshVersion: firstString(host.latestDshVersion),
         pluginsUpgradable: host.pluginsUpgradable === true,
+        syncPending: host.syncPending === true ? true : host.syncPending === false ? false : null,
         buildApprovals: (Array.isArray(host.buildApprovals) ? host.buildApprovals : []).slice(0, 16).map((entry) => {
           const name = firstString(entry?.name);
           if (!name) return null;
@@ -852,7 +853,9 @@ export function createSshLauncher(React, deps = {}) {
           onClick: () => onRestartDiscovered?.({ instanceId: host.instanceId, profileId: profile.id, pid: host.pid ?? null, port: host.port ?? null }),
           disabled: Boolean(busy), 'data-launcher-action': 'restart-host',
         }, t('discoveredRestart')) : null,
-        host?.instanceId ? h(Button, {
+        // Aligned Hosts have nothing to sync; only show the action when the
+        // server reports installable plugins or patch entries.
+        host?.instanceId && host.syncPending === true ? h(Button, {
           onClick: () => onSyncDiscovered?.({ instanceId: host.instanceId, profileId: profile.id, pid: host.pid ?? null, port: host.port ?? null }),
           disabled: Boolean(busy), 'data-launcher-action': 'sync-host',
         }, t('discoveredSync')) : null,

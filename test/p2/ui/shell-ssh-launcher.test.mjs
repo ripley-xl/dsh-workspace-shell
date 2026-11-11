@@ -873,3 +873,20 @@ test('the sync confirmation closes once the sync finishes', async (t) => {
   const headings = h.view.root.findAll((node) => typeof node.props?.title === 'string' && node.props.title.includes('Sync this Web Host profile'));
   assert.equal(headings.length, 0, 'the dialog is gone after the sync completes');
 });
+
+test('an idle disconnect keeps the Host row actions on screen', async (t) => {
+  let disconnected = false;
+  const h = await mountLauncher(t, {
+    handlers: {
+      '/web/list': () => (disconnected
+        ? webList({ hosts: [], connected: false })
+        : webList()),
+    },
+  });
+  const syncButton = () => h.view.root.findAll((node) => node.type === 'button' && text(node) === 'Sync & update');
+  assert.equal(syncButton().length, 1, 'the running Host row offers sync');
+  disconnected = true;
+  await tap(button(h.view.root, 'Refresh Web Hosts'));
+  await act(async () => {});
+  assert.equal(syncButton().length, 1, 'the row survives the disconnect instead of blinking out');
+});

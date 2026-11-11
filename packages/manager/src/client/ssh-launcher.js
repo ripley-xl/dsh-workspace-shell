@@ -1172,11 +1172,14 @@ export function createSshLauncher(React, deps = {}) {
         if (!alive.current || detailTokens.current.get(hostId) !== token) return null;
         setDetails((current) => {
           const before = current[hostId] ?? emptyDetail(hostId);
+          // Idle disconnects are expected now. Keep the rows we last saw so the
+          // restart/sync/stop buttons do not blink away; acting on them reconnects.
+          const keepRows = value.connected === false && value.hosts.length === 0;
           return {
             ...current,
             [hostId]: {
-              hostId, refreshing: false, stale: false, error: null,
-              profiles: value.profiles, hosts: value.hosts, discovered, profilesSource: value.profilesSource,
+              hostId, refreshing: false, stale: keepRows, error: null,
+              profiles: value.profiles, hosts: keepRows ? before.hosts : value.hosts, discovered: keepRows ? before.discovered : discovered, profilesSource: value.profilesSource,
               connected: value.connected,
               phase: value.connected ? 'connected' : CONNECTED_PHASES.has(before.phase) ? 'idle' : before.phase,
             },

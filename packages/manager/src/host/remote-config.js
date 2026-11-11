@@ -116,6 +116,11 @@ export async function readLocalProfileDependencies(home, profileId, { fs: fsImpl
   }
 }
 
+/** Single-quotes a remote path for `sh -c`. */
+function quoteRemote(value) {
+  return `'${String(value).replaceAll("'", "'\\''")}'`;
+}
+
 /** Reads the remote profile's patch. A missing file reads as empty. */
 export async function readRemoteProfilePatch(channel, profileId, { signal } = {}) {
   checkProfile(profileId);
@@ -150,14 +155,22 @@ export async function appendRemotePatch(channel, {
   if (!Array.isArray(argv) || argv.length < 2) {
     throw new SshRemoteError('INVALID_REQUEST', 'The Host card has no usable interpreter.');
   }
-  const directory = `"$HOME/.dsh/profiles/${profileId}"`;
+  // SFTP never expands $HOME; resolve it once and use absolute paths.
+  const homeReply = await channel.exec({ command: 'sh', args: ['-c', 'printf %s "$HOME"'], signal });
+  const remoteHome = String(homeReply?.stdout ?? '').trim();
+  if (homeReply?.code !== 0 || !remoteHome.startsWith('/')) {
+    throw new SshRemoteError('REMOTE_CONFIG_SYNC_FAILED', 'The remote home directory could not be resolved.');
+  }
+  const directory = `${remoteHome}/.dsh/profiles/${profileId}`;
   const target = `${directory}/cordis.patch.yml`;
-  const backup = `${directory}/cordis.patch.yml.bak-sync-${stamp}`;
-  const temporary = `${directory}/cordis.patch.yml.sync-${stamp}`;
+  const backup = `${target}.bak-sync-${stamp}`;
+  const temporary = `${target}.sync-${stamp}`;
   const base = (remoteText ?? '').replace(/\s+$/u, '');
   const backupName = `~/.dsh/profiles/${profileId}/cordis.patch.yml.bak-sync-${stamp}`;
 
-  const backupResult = await channel.exec({ command: 'sh', args: ['-c', `cp ${target} ${backup} 2>/dev/null || true`], signal });
+  const backupResult = await channel.exec({
+    command: 'sh', args: ['-c', `cp ${quoteRemote(target)} ${quoteRemote(backup)} 2>/dev/null || true`], signal,
+  });
   if (backupResult.code !== 0) throw new SshRemoteError('REMOTE_CONFIG_SYNC_FAILED', 'The remote configuration could not be backed up.');
 
   // A `disabled: true` entry only means something where the plugin exists. The
@@ -170,11 +183,11 @@ export async function appendRemotePatch(channel, {
     const local = path.join(os.tmpdir(), `cordis-patch-${stamp}.yml`);
     await fs.writeFile(local, merged, { mode: 0o600 });
     try {
-      await channel.upload(local, temporary.replaceAll('"', ''), { signal });
+      await channel.upload(local, temporary, { signal });
     } finally {
       await fs.unlink(local).catch(() => {});
     }
-    const move = await channel.exec({ command: 'mv', args: ['-f', temporary.replaceAll('"', ''), target.replaceAll('"', '')], signal });
+    const move = await channel.exec({ command: 'sh', args: ['-c', `mv -f ${quoteRemote(temporary)} ${quoteRemote(target)}`], signal });
     if (move.code !== 0) throw new SshRemoteError('REMOTE_CONFIG_SYNC_FAILED', 'The remote configuration could not be replaced.');
     const check = await channel.exec({
       command: argv[0],
@@ -184,7 +197,7 @@ export async function appendRemotePatch(channel, {
       maxStdoutBytes: 64 * 1024,
     });
     if (check.code !== 0) {
-      await channel.exec({ command: 'sh', args: ['-c', `cp ${backup} ${target} 2>/dev/null || true`], signal }).catch(() => {});
+      await channel.exec({ command: 'sh', args: ['-c', `cp ${quoteRemote(backup)} ${quoteRemote(target)} 2>/dev/null || true`], signal }).catch(() => {});
       return { appended: [], dropped, backup: backupName, error: 'the Host rejected the merged configuration' };
     }
     const unknown = unknownPatchEntries(check.stderr);

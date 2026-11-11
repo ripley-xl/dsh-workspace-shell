@@ -69,6 +69,7 @@ function fakeChannel(overrides = {}) {
     calls,
     uploads,
     async exec(request) {
+    if (String(request.args?.[1] ?? '').includes('printf %s "$HOME"')) return { code: 0, stdout: '/home/user', stderr: '' };
       calls.push(request);
       const script = String(request.args?.[1] ?? '');
       if (request.command === 'sh' && script.startsWith('cp ')) return { code: 0, stdout: '', stderr: '' };
@@ -111,5 +112,5 @@ test('a rejected merge restores the backup and reports the reason', async () => 
   assert.match(result.error, /rejected/u);
   const copies = channel.calls.filter((call) => call.command === 'sh' && String(call.args?.[1] ?? '').startsWith('cp '));
   assert.equal(copies.length, 2, 'one backup, then one restore');
-  assert.match(copies[1].args[1], /cordis\.patch\.yml 2>\/dev\/null/u, 'the restore targets the live file');
+  assert.match(copies[1].args[1], /cordis\.patch\.yml'? 2>\/dev\/null/u, 'the restore targets the live file');
 });

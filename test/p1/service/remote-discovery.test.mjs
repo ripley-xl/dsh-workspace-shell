@@ -217,6 +217,7 @@ test('sync installs missing plugins, aligns configuration and restarts the Host'
       state.installs.push(script);
       return { code: 0, stdout: 'installed\n', stderr: '' };
     }
+    if (String(request.args?.[1] ?? '').includes('printf %s "$HOME"')) return { code: 0, stdout: '/home/user', stderr: '' };
     if (request.command === 'sh' && script.includes('cordis.patch.yml')) return { code: 0, stdout: '- id: remote-entry\n', stderr: '' };
     if (request.command === 'node' && request.args?.includes('--dump-config')) return { code: 0, stdout: '[]\n', stderr: '' };
     if (request.command === 'mv') return { code: 0, stdout: '', stderr: '' };

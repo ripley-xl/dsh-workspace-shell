@@ -238,9 +238,7 @@ export async function waitForReplacementCard(channel, { hostKey, profileId, prev
 }
 
 /** Desktop-only packages never belong on a guest Web profile. */
-// Only plugins that cannot exist outside the Desktop belong here. Ordinary
-// client plugins (assistant panel, pet, market) sync like any other.
-const DESKTOP_ONLY = new Set(['dsh-workspace-shell', '@local/dsh-preset-whale-maid']);
+const DESKTOP_ONLY = new Set(['dsh-workspace-shell', 'dsh-pet', '@xmanrui/dsh-im', '@local/dsh-preset-whale-maid']);
 
 function localSpec(value) {
   return typeof value === 'string' && /^(?:file:|link:|github:|git:|git\+|https?:\/\/)/iu.test(value);

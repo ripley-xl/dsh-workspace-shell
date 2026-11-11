@@ -78,11 +78,16 @@ export async function applyHostLifecycle(ctx) {
 
   // Status is readable with the page cookie alone; the restart action
   // additionally demands the same origin, so a page on another site cannot make
-  // this Host kill itself.
+  // this Host kill itself. The page's origin is what the browser reports; behind
+  // an SSH forward the page is reached on a different port than this Host's own
+  // authenticated URL, so compare the Origin authority with the request's Host
+  // authority instead of this process's origin.
   const sameOrigin = (request) => {
     const header = request.headers.get('origin');
     if (!header) return false;
-    try { return new URL(header).origin === hostOrigin.origin; } catch { return false; }
+    const host = request.headers.get('host');
+    if (typeof host !== 'string' || host.length === 0) return false;
+    try { return new URL(header).host === host; } catch { return false; }
   };
   ctx.effect(() => ctx.connection.fetch.register({
     path: '/api/workspace-host/status', methods: ['GET'], requestBody: 'buffered',
@@ -93,10 +98,14 @@ export async function applyHostLifecycle(ctx) {
   ctx.effect(() => ctx.connection.fetch.register({
     path: '/api/workspace-host/restart', methods: ['POST'], requestBody: 'streaming',
     async fetch(request) {
-      if (!sameOrigin(request)) return json(403, { ok: false, code: 'HOST_RESTART_ORIGIN_REJECTED' });
-      if (supervised) return json(403, { ok: false, code: 'HOST_RESTART_SUPERVISED' });
+      // Read the bounded body first: this is a streaming route, and a handler
+      // that answers before consuming its body makes the connection layer
+      // destroy the socket, so the page would see a network error instead of
+      // the rejection code.
       let input;
       try { input = await readSessionHostInput(request); } catch { return json(400, { ok: false, code: 'HOST_RESTART_INVALID_INPUT' }); }
+      if (!sameOrigin(request)) return json(403, { ok: false, code: 'HOST_RESTART_ORIGIN_REJECTED' });
+      if (supervised) return json(403, { ok: false, code: 'HOST_RESTART_SUPERVISED' });
       const mode = input?.mode === 'wait' || input?.mode === 'cancel' ? input.mode : 'now';
       const lock = inspectInstallLock(ctx.profileContext.dir);
       if (lock.locked) return json(409, { ok: false, code: 'HOST_RESTART_INSTALLING' });

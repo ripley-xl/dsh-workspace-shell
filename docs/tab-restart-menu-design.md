@@ -60,6 +60,7 @@ Guest 页面被工作区页签框住时，这个位置不对：用户看到的�
 ## 6. 边界
 
 - 页签 `phase !== 'ready'` 时两项置灰；页签没有 Guest（如未装 Guest 的 profile）时点了报 `HOST_RESTART_UNAVAILABLE`。
+- 远端 Host 经 SSH 转发访问时，页面的 origin 是本地转发端口，不是 Host 自己的端口；Guest 的同源判定以请求的 Host authority 为准（Guest 0.6.3），否则远端页签会一直报 `HOST_RESTART_UNAVAILABLE`。
 - 重启后端口变化时，页签不会自己换地址，与既有行为一致；新地址见终端输出或工作区页签。
 - 页签菜单只承载重启，不合并关闭、编辑等已有入口。
 

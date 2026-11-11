@@ -11,8 +11,9 @@ import { apply as applySessionHost } from '../../packages/guest/session-host/ind
 
 const PORT = 61_595;
 
-function request(body) {
-  const headers = new Headers({ 'content-type': 'application/json', origin: `http://127.0.0.1:${PORT}` });
+function request(body, { origin = `http://127.0.0.1:${PORT}`, host = `127.0.0.1:${PORT}` } = {}) {
+  const headers = new Headers({ 'content-type': 'application/json', host });
+  if (origin !== null) headers.set('origin', origin);
   const payload = new TextEncoder().encode(body);
   let sent = false;
   return {
@@ -169,6 +170,43 @@ test('the Desktop Shell reuse of session-host publishes no card and no restart r
   } finally {
     await host.close();
     // The Host-card disposer finishes asynchronously; retry the race away.
+    rmSync(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 });
+  }
+});
+
+test('the restart route accepts the page origin of a forwarded port', async () => {
+  const root = tempRoot();
+  // A supervised Host refuses the action, so this proves the origin check
+  // passed without dispatching a real restart.
+  const host = await hostContext('desktop', root);
+  try {
+    // A remote Host reached through an SSH forward is served on another port
+    // than its own authenticated URL; the browser's Origin and Host agree.
+    const forwarded = request('{"mode":"now"}', { origin: 'http://127.0.0.1:61999', host: '127.0.0.1:61999' });
+    const response = await host.routes.get('/api/workspace-host/restart').fetch(forwarded);
+    assert.equal(response.status, 403);
+    assert.deepEqual(await response.json(), { ok: false, code: 'HOST_RESTART_SUPERVISED' });
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 });
+  }
+});
+
+test('the restart route rejects a cross-site or origin-less request', async () => {
+  const root = tempRoot();
+  const host = await hostContext('web', root);
+  try {
+    const crossSite = await host.routes.get('/api/workspace-host/restart').fetch(
+      request('{"mode":"now"}', { origin: 'https://evil.example', host: `127.0.0.1:${PORT}` }),
+    );
+    assert.equal(crossSite.status, 403);
+    assert.deepEqual(await crossSite.json(), { ok: false, code: 'HOST_RESTART_ORIGIN_REJECTED' });
+
+    const noOrigin = await host.routes.get('/api/workspace-host/restart').fetch(request('{"mode":"now"}', { origin: null }));
+    assert.equal(noOrigin.status, 403);
+    assert.deepEqual(await noOrigin.json(), { ok: false, code: 'HOST_RESTART_ORIGIN_REJECTED' });
+  } finally {
+    await host.close();
     rmSync(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 });
   }
 });

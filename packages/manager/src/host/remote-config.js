@@ -70,8 +70,10 @@ export function planPatchSync({ localText, remoteText } = {}) {
     if (remote.has(entry.id) || seen.has(entry.id)) continue;
     seen.add(entry.id);
     if (NEVER_SYNC_IDS.has(entry.id)) { skipped.push({ id: entry.id, reason: 'desktop-only' }); continue; }
-    // A bare `- id: x` declares nothing; syncing it only adds noise.
-    if (!/^\s*name:\s*\S/mu.test(entry.block)) continue;
+    // `- id: x` alone declares nothing. A block with only `config:` or
+    // `disabled:` is a real override for a plugin both sides already install,
+    // and dropping it was why most Desktop settings never reached a Host.
+    if (!/^\s*(?:name|config|disabled|settings):\s*\S/mu.test(entry.block)) continue;
     if (MACHINE_SPECIFIC.test(entry.block)) { skipped.push({ id: entry.id, reason: 'machine-specific' }); continue; }
     append.push(entry);
   }
@@ -98,13 +100,15 @@ export async function readLocalProfilePatch(home, profileId, { fs: fsImpl = fs }
   }
 }
 
-/** Reads this machine's dependency map for the same-name profile. */
+/**
+ * Reads this machine's dependency map for a profile. Desktop is the sync
+ * source, so this is where the plugin list comes from.
+ */
 export async function readLocalProfileDependencies(home, profileId, { fs: fsImpl = fs } = {}) {
   checkProfile(profileId);
   if (typeof home !== 'string' || !path.isAbsolute(home)) return null;
-  const file = path.join(home, 'profiles', profileId, 'package.json');
   try {
-    const manifest = JSON.parse(await fsImpl.readFile(file, 'utf8'));
+    const manifest = JSON.parse(await fsImpl.readFile(path.join(home, 'profiles', profileId, 'package.json'), 'utf8'));
     const dependencies = manifest?.dependencies;
     return dependencies && typeof dependencies === 'object' && !Array.isArray(dependencies) ? dependencies : null;
   } catch {
@@ -132,11 +136,17 @@ export async function readRemoteProfilePatch(channel, profileId, { signal } = {}
  *
  * @returns {Promise<{appended: string[], backup: string|null, error: string|null}>}
  */
+export function unknownPatchEntries(stderr) {
+  const ids = new Set();
+  for (const match of String(stderr ?? '').matchAll(/patch: entry "([^"]+)" not found/gu)) ids.add(match[1]);
+  return ids;
+}
+
 export async function appendRemotePatch(channel, {
   argv, profileId, remoteText, entries, signal, stamp = randomUUID().replaceAll('-', '').slice(0, 12),
 } = {}) {
   checkProfile(profileId);
-  if (!Array.isArray(entries) || entries.length === 0) return { appended: [], backup: null, error: null };
+  if (!Array.isArray(entries) || entries.length === 0) return { appended: [], dropped: [], backup: null, error: null };
   if (!Array.isArray(argv) || argv.length < 2) {
     throw new SshRemoteError('INVALID_REQUEST', 'The Host card has no usable interpreter.');
   }
@@ -144,19 +154,28 @@ export async function appendRemotePatch(channel, {
   const target = `${directory}/cordis.patch.yml`;
   const backup = `${directory}/cordis.patch.yml.bak-sync-${stamp}`;
   const temporary = `${directory}/cordis.patch.yml.sync-${stamp}`;
-
   const base = (remoteText ?? '').replace(/\s+$/u, '');
-  const merged = `${base ? `${base}\n` : ''}\n# appended by workspace sync ${new Date().toISOString()}\n${entries.map((entry) => entry.block).join('')}`;
+  const backupName = `~/.dsh/profiles/${profileId}/cordis.patch.yml.bak-sync-${stamp}`;
 
-  const local = path.join(os.tmpdir(), `cordis-patch-${stamp}.yml`);
-  await fs.writeFile(local, merged, { mode: 0o600 });
-  try {
-    const backupResult = await channel.exec({ command: 'sh', args: ['-c', `cp ${target} ${backup} 2>/dev/null || true`], signal });
-    if (backupResult.code !== 0) throw new SshRemoteError('REMOTE_CONFIG_SYNC_FAILED', 'The remote configuration could not be backed up.');
-    await channel.upload(local, temporary.replaceAll('"', ''), { signal });
+  const backupResult = await channel.exec({ command: 'sh', args: ['-c', `cp ${target} ${backup} 2>/dev/null || true`], signal });
+  if (backupResult.code !== 0) throw new SshRemoteError('REMOTE_CONFIG_SYNC_FAILED', 'The remote configuration could not be backed up.');
+
+  // A `disabled: true` entry only means something where the plugin exists. The
+  // Host says so itself ("patch: entry ... not found"), so drop those entries
+  // and validate again instead of leaving a pile of warnings behind.
+  let kept = entries.slice();
+  const dropped = [];
+  for (let attempt = 0; attempt < 3 && kept.length > 0; attempt += 1) {
+    const merged = `${base ? `${base}\n` : ''}\n# appended by workspace sync ${new Date().toISOString()}\n${kept.map((entry) => entry.block).join('')}`;
+    const local = path.join(os.tmpdir(), `cordis-patch-${stamp}.yml`);
+    await fs.writeFile(local, merged, { mode: 0o600 });
+    try {
+      await channel.upload(local, temporary.replaceAll('"', ''), { signal });
+    } finally {
+      await fs.unlink(local).catch(() => {});
+    }
     const move = await channel.exec({ command: 'mv', args: ['-f', temporary.replaceAll('"', ''), target.replaceAll('"', '')], signal });
     if (move.code !== 0) throw new SshRemoteError('REMOTE_CONFIG_SYNC_FAILED', 'The remote configuration could not be replaced.');
-    // The Host's own loader is the only honest validator for this file.
     const check = await channel.exec({
       command: argv[0],
       args: [argv[1], '--profile', profileId, '--dump-config'],
@@ -166,18 +185,19 @@ export async function appendRemotePatch(channel, {
     });
     if (check.code !== 0) {
       await channel.exec({ command: 'sh', args: ['-c', `cp ${backup} ${target} 2>/dev/null || true`], signal }).catch(() => {});
-      return {
-        appended: [],
-        backup: `~/.dsh/profiles/${profileId}/cordis.patch.yml.bak-sync-${stamp}`,
-        error: 'the Host rejected the merged configuration',
-      };
+      return { appended: [], dropped, backup: backupName, error: 'the Host rejected the merged configuration' };
     }
-    return {
-      appended: entries.map((entry) => entry.id),
-      backup: `~/.dsh/profiles/${profileId}/cordis.patch.yml.bak-sync-${stamp}`,
-      error: null,
-    };
-  } finally {
-    await fs.unlink(local).catch(() => {});
+    const unknown = unknownPatchEntries(check.stderr);
+    const next = kept.filter((entry) => !unknown.has(entry.id));
+    if (next.length === kept.length) {
+      return { appended: kept.map((entry) => entry.id), dropped, backup: backupName, error: null };
+    }
+    dropped.push(...kept.filter((entry) => unknown.has(entry.id)).map((entry) => entry.id));
+    kept = next;
   }
+  if (kept.length === 0) {
+    await channel.exec({ command: 'sh', args: ['-c', `cp ${backup} ${target} 2>/dev/null || true`], signal }).catch(() => {});
+    return { appended: [], dropped, backup: backupName, error: null };
+  }
+  return { appended: kept.map((entry) => entry.id), dropped, backup: backupName, error: null };
 }

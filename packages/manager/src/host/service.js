@@ -7,7 +7,7 @@ import path from 'node:path';
 import { publicError, safeMessage } from './diagnostics.js';
 import { addPortForward, createRemoteDiagnosticReport, listPortForwards, removePortForward } from './service-extensions.js';
 import {
-  appendRemotePatch, planPatchSync, readLocalProfilePatch, readRemoteProfilePatch,
+  appendRemotePatch, planPatchSync, readLocalProfileDependencies, readLocalProfilePatch, readRemoteProfilePatch,
 } from './remote-config.js';
 import { resolveGuestInterpreter, startGuestHost, waitForProfileCard } from './guest-hosts.js';
 import {
@@ -716,10 +716,19 @@ export class SshRemoteService extends EventEmitter {
     this.store.require(hostId);
     const { runtime, card } = await this.requireDiscoveredCard(hostId, instanceId, signal);
     const remoteDependencies = await readRemoteProfileDependencies(runtime.channel, card.profileId, { signal });
-    // The Desktop's own plugin set is the baseline: it is maintained most often,
-    // and every other Host is aligned to it with this one action.
+    // The Desktop profile's whole dependency list is the baseline: bundles alone
+    // miss ordinary plugins (image-gen, recall, model packs), which is why their
+    // config entries could never resolve on the Host.
     const home = this.localHome() ?? process.env.DSH_HOME ?? path.join(homedir(), '.dsh');
-    const localBundles = await this.localBundles().catch(() => []);
+    const desktopDeps = await readLocalProfileDependencies(home, 'desktop').catch(() => null);
+    const localBundles = desktopDeps
+      ? Object.entries(desktopDeps).map(([name, spec]) => ({
+        name,
+        version: String(spec).replace(/^[\^~]/u, ''),
+        official: name.startsWith('@deepseek-ai/'),
+        enabled: true,
+      }))
+      : await this.localBundles().catch(() => []);
     const plan = planDiscoveredSync({ localBundles, remoteDependencies });
     const items = [];
     for (const entry of plan.install) {

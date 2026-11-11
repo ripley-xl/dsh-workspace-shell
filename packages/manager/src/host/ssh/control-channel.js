@@ -14,11 +14,12 @@ export class SshControlChannel extends EventEmitter {
     this.closed = false;
     this.gateways = new Set();
     this.lastError = null;
+    this.openedAt = Date.now();
     this.onClientClose = () => {
       this.closed = true;
       for (const gateway of [...this.gateways]) void gateway.close();
       for (const resource of this.resources) void Promise.resolve(resource.close()).catch(() => {});
-      this.emit('close', { source: 'client', error: this.lastError });
+      this.emit('close', { source: 'client', error: this.lastError, uptimeMs: Date.now() - this.openedAt });
     };
     this.onClientError = (error) => {
       this.lastError = error ?? this.lastError;
@@ -70,6 +71,6 @@ export class SshControlChannel extends EventEmitter {
     }
     await Promise.allSettled(this.resources.map((resource) => resource.close()));
     this.resources = [];
-    this.emit('close', { source: 'local', error: null });
+    this.emit('close', { source: 'local', error: null, uptimeMs: Date.now() - this.openedAt });
   }
 }

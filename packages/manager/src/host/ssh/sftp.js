@@ -45,7 +45,12 @@ export async function uploadFile(client, localPath, remotePath, options = {}) {
     };
     const fail = (error) => {
       if (error instanceof SshRemoteError) finish(error);
-      else finish(new SshRemoteError('SSH_SFTP_FAILED', 'The SFTP upload failed.', { cause: error }));
+      else {
+        const detail = error?.message ? `: ${error.message}` : '';
+        finish(new SshRemoteError('SSH_SFTP_FAILED', `The SFTP upload failed${detail}`, {
+          cause: error, details: { remotePath: String(remotePath ?? '') },
+        }));
+      }
     };
     const onAbort = () => finish(abortError(signal));
     let timer;

@@ -494,7 +494,8 @@ export class SshRemoteService extends EventEmitter {
       // silently stays disconnected and tabs whose forwarded port is gone.
       session.on('channelClose', (_connected, reason) => {
         const detail = reason?.error?.message ? ` ${reason.error.message}` : '';
-        this.debugLog(`channel closed (${reason?.source ?? 'unknown'}) for ${hostId}${detail}`);
+        const uptime = Number.isFinite(reason?.uptimeMs) ? ` after ${Math.round(reason.uptimeMs / 1000)}s` : '';
+        this.debugLog(`channel closed (${reason?.source ?? 'unknown'}) for ${hostId}${uptime}${detail}`);
         this.handleChannelLoss(hostId);
       });
       this.sessions.set(hostId, session);
@@ -783,7 +784,9 @@ export class SshRemoteService extends EventEmitter {
     try {
       return await run();
     } catch (cause) {
-      const transient = new Set(['SSH_EXEC_FAILED', 'SSH_CONNECTION_FAILED', 'SSH_CHANNEL_FAILED']);
+      const transient = new Set([
+        'SSH_EXEC_FAILED', 'SSH_CONNECTION_FAILED', 'SSH_CHANNEL_FAILED', 'SSH_SFTP_FAILED', 'SSH_UPLOAD_FAILED',
+      ]);
       if (!transient.has(cause?.code)) throw cause;
       await this.session(hostId).closeTransport().catch(() => {});
       this.transition(this.runtime(hostId), 'reconnecting');

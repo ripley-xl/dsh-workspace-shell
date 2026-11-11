@@ -852,3 +852,24 @@ test('Chinese dictionary renders without missing keys', async (t) => {
   assert.match(body, /连接并刷新/);
   assert.doesNotMatch(body, /\bwsh-ssh\b/);
 });
+
+test('the sync confirmation closes once the sync finishes', async (t) => {
+  const sync = deferred();
+  const h = await mountLauncher(t, {
+    handlers: {
+      '/web/discovered': () => ({ ok: true, hosts: [{ instanceId: 'inst-x', profileId: 'web', pid: 10, port: 3080 }] }),
+      '/web/discovered/sync': () => sync.promise,
+    },
+  });
+  const rows = h.view.root.findAll((node) => node.type === 'button' && text(node) === 'Sync & update');
+  assert.ok(rows.length >= 1);
+  await tap(rows[0]);
+  // The dialog repeats the label; the last one belongs to the confirm panel.
+  const confirm = h.view.root.findAll((node) => node.type === 'button' && text(node) === 'Sync & update').at(-1);
+  await tap(confirm);
+  assert.equal(h.of('/web/discovered/sync').length, 1);
+  await flushEffects(() => sync.resolve({ ok: true, items: [], config: { appended: [] }, preferences: { synced: [] } }));
+  await act(async () => {});
+  const headings = h.view.root.findAll((node) => typeof node.props?.title === 'string' && node.props.title.includes('Sync this Web Host profile'));
+  assert.equal(headings.length, 0, 'the dialog is gone after the sync completes');
+});

@@ -1560,7 +1560,12 @@ export function createSshLauncher(React, deps = {}) {
         if (alive.current) putNotice(`host:${connection.id}`, failure(cause));
         return false;
       } finally {
-        if (alive.current) clearBusy(`sync:${connection.id}`);
+        if (alive.current) {
+          clearBusy(`sync:${connection.id}`);
+          // The confirm dialog opens before the request; a second click on the
+          // row (or a replayed event) must not leave it on screen afterwards.
+          setDialog((current) => (current?.type === 'sync-discovered' ? null : current));
+        }
       }
     }
 
@@ -1817,7 +1822,7 @@ export function createSshLauncher(React, deps = {}) {
           onStop: (host) => { if (selected && host) setDialog({ type: 'stop', hostId: selected.id, host }); },
           onOpenDiscovered: (card) => { if (selected) openDiscovered(selected, card); },
           onRestartDiscovered: (card) => { if (selected) void restartDiscovered(selected, card); },
-          onSyncDiscovered: (card) => { if (selected) setDialog({ type: 'sync-discovered', hostId: selected.id, card }); },
+          onSyncDiscovered: (card) => { if (selected && !busy) setDialog({ type: 'sync-discovered', hostId: selected.id, card }); },
           onStopDiscovered: (card) => { if (selected) setDialog({ type: 'stop-discovered', hostId: selected.id, card }); },
           onDismiss: () => dropNotice(`host:${selectedId}`), t,
         })),

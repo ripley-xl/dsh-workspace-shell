@@ -10,6 +10,7 @@ import {
   appendRemotePatch, planPatchSync, readLocalProfileDependencies, readLocalProfilePatch, readRemoteProfilePatch,
 } from './remote-config.js';
 import { resolveGuestInterpreter, startGuestHost, waitForProfileCard } from './guest-hosts.js';
+import { applyPreferenceSync, planPreferenceSync } from './remote-state.js';
 import {
   filterLivePids, forwardedUrl, installRemotePlugin as installRemotePluginOverSsh, planDiscoveredSync, publicHost,
   readRemoteHostCards, readRemoteProfileDependencies, respawnRemoteProcess,
@@ -811,7 +812,16 @@ export class SshRemoteService extends EventEmitter {
     } catch (cause) {
       config = { appended: [], backup: null, error: safeMessage(cause) };
     }
-    const changed = items.some((item) => item.ok) || config.appended.length > 0;
+    // Plugin preferences (entry visibility, feature switches) live next to the
+    // profile, not in the patch; copy the Desktop's files over.
+    let preferences = { synced: [], failed: [] };
+    try {
+      const planned = await planPreferenceSync({ home, profileId: 'desktop' });
+      preferences = await applyPreferenceSync(runtime.channel, { files: planned.files, signal });
+    } catch (cause) {
+      preferences = { synced: [], failed: [], error: safeMessage(cause) };
+    }
+    const changed = items.some((item) => item.ok) || config.appended.length > 0 || preferences.synced.length > 0;
     let restarted = null;
     if (changed) restarted = await this.restartDiscoveredCard(runtime, card, { signal }).catch(() => null);
     return {
@@ -820,6 +830,7 @@ export class SshRemoteService extends EventEmitter {
       items,
       skipped: plan.skipped,
       config,
+      preferences,
       restarted: restarted ? { instanceId: restarted.instanceId, pid: restarted.pid, port: restarted.port } : null,
       changed,
     };

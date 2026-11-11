@@ -318,7 +318,7 @@ export class HostSession extends EventEmitter {
     this.starting = false;
     this.closing = false;
     this.closed = false;
-    this.onChannelClose = () => this.handleChannelClose();
+    this.onChannelClose = (reason) => this.handleChannelClose(reason);
   }
 
   get connected() {
@@ -348,11 +348,11 @@ export class HostSession extends EventEmitter {
     }
   }
 
-  handleChannelClose() {
+  handleChannelClose(reason = {}) {
     const wasConnected = Boolean(this.controller);
     this.channel = null;
     this.controller = null;
-    this.emit('channelClose', wasConnected);
+    this.emit('channelClose', wasConnected, reason);
   }
 
   clearReconnect() {
@@ -492,7 +492,11 @@ export class SshRemoteService extends EventEmitter {
       const session = new HostSession({ hostId, alias: record.hostAlias });
       // A dropped SSH channel must heal itself: the alternative is a panel that
       // silently stays disconnected and tabs whose forwarded port is gone.
-      session.on('channelClose', () => this.handleChannelLoss(hostId));
+      session.on('channelClose', (_connected, reason) => {
+        const detail = reason?.error?.message ? ` ${reason.error.message}` : '';
+        this.debugLog(`channel closed (${reason?.source ?? 'unknown'}) for ${hostId}${detail}`);
+        this.handleChannelLoss(hostId);
+      });
       this.sessions.set(hostId, session);
     }
     return this.sessions.get(hostId);

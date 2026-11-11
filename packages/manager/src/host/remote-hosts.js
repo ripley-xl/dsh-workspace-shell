@@ -263,6 +263,12 @@ export function planDiscoveredSync({ localBundles = [], remoteDependencies = {} 
     if (!name || !version) continue;
     if (bundle.enabled === false || bundle.availability === 'missing') continue;
     if (DESKTOP_ONLY.has(name) || name.startsWith('@local/')) continue;
+    // Official bundles ship with the DSH installation on both sides; adding them
+    // to the remote profile pins this machine's version over the remote's own.
+    if (bundle.official === true || name.startsWith('@deepseek-ai/')) {
+      skipped.push({ name, reason: 'official' });
+      continue;
+    }
     const remote = remoteDependencies[name];
     if (!remote) { install.push({ name, spec: `${name}@${version}`, reason: 'missing' }); continue; }
     if (localSpec(remote)) { skipped.push({ name, reason: 'local-spec' }); continue; }
@@ -295,9 +301,12 @@ export async function readRemoteProfileDependencies(channel, profileId, { signal
  */
 export async function installRemotePlugin(channel, { argv, profileId, spec }, { signal, timeoutMs = 600_000 } = {}) {
   if (!Array.isArray(argv) || argv.length < 2) throw new SshRemoteError('INVALID_REQUEST', 'The Host card has no usable interpreter.');
+  // `dsh plugin` shells out to pnpm, which lives in the user's login PATH;
+  // a non-login exec cannot find it (spawn pnpm ENOENT).
+  const line = `exec ${[argv[0], argv[1], 'plugin', '--profile', profileId, 'add', spec].map(shellQuote).join(' ')}`;
   const result = await channel.exec({
-    command: argv[0],
-    args: [argv[1], 'plugin', '--profile', profileId, 'add', spec],
+    command: 'sh',
+    args: ['-lc', line],
     signal,
     timeoutMs,
     maxStdoutBytes: 64 * 1024,

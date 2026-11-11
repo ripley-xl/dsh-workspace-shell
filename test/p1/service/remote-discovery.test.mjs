@@ -209,8 +209,9 @@ test('sync installs missing plugins, aligns configuration and restarts the Host'
     if (request.command === 'sh' && script.includes('workspace-hosts')) {
       return { code: 0, stdout: state.alive ? `${JSON.stringify(state.card)}\n` : '', stderr: '' };
     }
-    if (request.command === 'node' && request.args?.includes('plugin')) {
-      state.installs.push(request.args);
+    if (request.command === 'sh' && script.startsWith('exec ')) {
+      // The install runs in a login shell so `dsh plugin` can find pnpm.
+      state.installs.push(script);
       return { code: 0, stdout: 'installed\n', stderr: '' };
     }
     if (request.command === 'sh' && script.includes('cordis.patch.yml')) return { code: 0, stdout: '- id: remote-entry\n', stderr: '' };
@@ -221,7 +222,7 @@ test('sync installs missing plugins, aligns configuration and restarts the Host'
   const result = await fixture.service.syncDiscovered(record.id, { instanceId: INSTANCE });
   assert.equal(result.ok, true);
   assert.deepEqual(result.items.map((item) => [item.name, item.ok]), [['dsh-missing', true]]);
-  assert.deepEqual(state.installs[0], ['dsh', 'plugin', '--profile', 'web', 'add', 'dsh-missing@1.0.0']);
+  assert.match(state.installs[0], /exec 'node' 'dsh' 'plugin' '--profile' 'web' 'add' 'dsh-missing@1.0.0'/u);
   assert.equal(result.changed, true);
   assert.deepEqual(result.config.appended, ['local-only-entry']);
   assert.equal(state.uploaded, 1);

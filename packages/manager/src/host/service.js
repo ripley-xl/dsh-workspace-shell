@@ -554,6 +554,8 @@ export class SshRemoteService extends EventEmitter {
       instanceId: card.instanceId,
       profileId: card.profileId,
       profileName: card.profileId,
+      pid: card.pid,
+      port: card.port,
       state: 'running',
       url: forwardedUrl(card.url, forward.localPort),
     };
@@ -1238,6 +1240,8 @@ export class SshRemoteService extends EventEmitter {
       instanceId: card.instanceId,
       profileId: card.profileId,
       profileName: card.profileId,
+      pid: card.pid,
+      port: card.port,
       state: 'running',
       phase: 'running',
       health: { healthy: true, connected: true, hostAlive: true, supervisorAlive: false },

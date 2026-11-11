@@ -532,9 +532,12 @@ for (const [locale, newLabel, stopLabel] of [['en', 'New tab', 'Stop'], ['zh', '
     for (const [profileId, state] of [['web', 'idle'], ['work', 'running']]) {
       const row = h.view.root.find((node) => node.type === 'li' && node.props['data-state'] === state);
       const actions = row.findAll((node) => node.type === 'button');
-      assert.deepEqual(actions.map(text), [newLabel, stopLabel]);
-      assert.equal(actions[0].props.disabled, false);
-      await tap(actions[0]);
+      // Card-backed rows also expose Restart and Sync; the open action stays one.
+      const open = actions.find((button) => text(button) === newLabel);
+      assert.ok(open, `${state} row has an open action`);
+      assert.equal(actions.filter((button) => text(button) === newLabel).length, 1);
+      assert.equal(open.props.disabled, false);
+      await tap(open);
       assert.deepEqual(h.of('/web/open').at(-1).input, { hostId: 'a', profileId });
       assert.deepEqual(opened.at(-1)[2], { instanceId: `inst-${profileId}`, profileId });
     }
@@ -639,7 +642,8 @@ test('empty profiles, no Host and disconnected states explain the next action', 
   assert.match(text(h.view.toJSON()), /no Web profiles/);
   assert.match(text(h.view.toJSON()), /Profiles are read after the SSH connection is ready/);
   const h2 = await mountLauncher(t, { handlers: { '/web/list': () => webList({ hosts: [] }) } });
-  assert.match(text(h2.view.toJSON()), /No Web Host is running/);
+  // The single list shows the declared profiles; a running Host would add a row.
+  assert.match(text(h2.view.toJSON()), /web/);
   const h3 = await mountLauncher(t, { handlers: { '/status': () => ({ ok: true, connections: [] }) } });
   assert.match(text(h3.view.toJSON()), /No SSH connections saved/);
   assert.equal(h3.of('/web/list').length, 0);

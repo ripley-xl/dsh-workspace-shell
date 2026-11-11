@@ -825,7 +825,7 @@ function createSshLauncher(React, deps = {}) {
     };
   }
 
-  function ProfileRow({ profile, host, detail, views, busy, operation, onOpen, onStop, onUpgrade, onApprove, t }) {
+  function ProfileRow({ profile, host, detail, views, busy, operation, onOpen, onStop, onUpgrade, onApprove, onRestartDiscovered, onSyncDiscovered, t }) {
     const actions = hostActions(profile, host, detail, Boolean(busy), t);
     const opening = operation === `open:${profile.id}`;
     const stopping = operation === `stop:${profile.id}`;
@@ -860,6 +860,14 @@ function createSshLauncher(React, deps = {}) {
             }, t('approveBuilds')))
           : null),
       h('div', { className: 'wsh-ssh-host-actions' },
+        host?.instanceId ? h(Button, {
+          onClick: () => onRestartDiscovered?.({ instanceId: host.instanceId, profileId: profile.id, pid: host.pid ?? null, port: host.port ?? null }),
+          disabled: Boolean(busy), 'data-launcher-action': 'restart-host',
+        }, t('discoveredRestart')) : null,
+        host?.instanceId ? h(Button, {
+          onClick: () => onSyncDiscovered?.({ instanceId: host.instanceId, profileId: profile.id, pid: host.pid ?? null, port: host.port ?? null }),
+          disabled: Boolean(busy), 'data-launcher-action': 'sync-host',
+        }, t('discoveredSync')) : null,
         showUpgrade ? h(Button, {
           onClick: () => onUpgrade?.(profile),
           disabled: upgrading || Boolean(busy),
@@ -876,61 +884,39 @@ function createSshLauncher(React, deps = {}) {
         h('strong', null, t('noConnections')), h('p', { className: 'wsh-ssh-muted' }, t('noConnectionsHint')));
     }
     const rows = profileRows(detail);
+    const cards = detail.discovered ?? [];
     const viewsFor = (profileId, host) => {
       const fromProps = Number(viewMap?.[`${connection.id}:${profileId}`]);
       if (Number.isSafeInteger(fromProps) && fromProps >= 0) return fromProps;
       return host?.views ?? 0;
     };
+    // Every Host on this machine is card-reported now, so one list is enough:
+    // declared profiles first, then running Hosts that have no profile row.
+    const profileNodes = rows.map(({ profile, host }) => h(ProfileRow, {
+      key: profile.id, profile, host, detail, views: viewsFor(profile.id, host), busy, operation,
+      onOpen, onStop, onUpgrade, onApprove, onRestartDiscovered, onSyncDiscovered, t,
+    }));
+    const cardNodes = cards.map((card) => h('li', {
+      key: card.instanceId, className: 'wsh-ssh-host wsh-ssh-discovered-row', 'data-discovered-instance': card.instanceId,
+    },
+      h('div', { className: 'wsh-ssh-host-main' },
+        h('strong', { className: 'wsh-ssh-host-title' }, card.profileId || card.instanceId.slice(0, 8)),
+        h('span', { className: 'wsh-ssh-muted' }, ` · ${t('discoveredMeta', card.pid ?? '—', card.port ?? '—')}`)),
+      h('div', { className: 'wsh-ssh-host-actions' },
+        h(Button, { onClick: () => onOpenDiscovered?.(card), disabled: Boolean(busy), 'data-launcher-action': 'open-discovered' }, t('discoveredOpen')),
+        h(Button, { onClick: () => onRestartDiscovered?.(card), disabled: Boolean(busy), 'data-launcher-action': 'restart-discovered' }, t('discoveredRestart')),
+        h(Button, { onClick: () => onSyncDiscovered?.(card), disabled: Boolean(busy), 'data-launcher-action': 'sync-discovered' }, t('discoveredSync')),
+        h(Button, { kind: 'danger', onClick: () => onStopDiscovered?.(card), disabled: Boolean(busy), 'data-launcher-action': 'stop-discovered' }, t('discoveredStop')))));
+    const anyRow = profileNodes.length + cardNodes.length > 0;
     return h('section', { className: 'wsh-ssh-detail', 'aria-label': `${t('hostsTitle')}: ${connection.name}` },
       h(DetailHeader, { connection, detail, busy, operation, onConnect, onCancel, onRefresh, onDismiss, t }),
       h(Notice, { notice, onDismiss: onDismissNotice, t }),
-      loading && !rows.length ? h('p', { className: 'wsh-ssh-status', role: 'status' }, t('loadingHosts')) : null,
-      rows.length
-        ? h('ul', { className: 'wsh-ssh-hosts', 'aria-label': t('hostsTitle') }, rows.map(({ profile, host }) => h(ProfileRow, {
-          key: profile.id, profile, host, detail, views: viewsFor(profile.id, host), busy, operation,
-          onOpen, onStop, onUpgrade, onApprove, t,
-        })))
+      loading && !anyRow ? h('p', { className: 'wsh-ssh-status', role: 'status' }, t('loadingHosts')) : null,
+      anyRow
+        ? h('ul', { className: 'wsh-ssh-hosts', 'aria-label': t('hostsTitle') }, profileNodes, cardNodes)
         : !loading ? h('div', { className: 'wsh-ssh-empty', role: 'status' },
           h('strong', null, t('emptyProfiles')),
-          h('p', { className: 'wsh-ssh-muted' }, t('emptyProfilesHint'))) : null,
-      rows.length && detail.connected && !detail.hosts.length
-        ? h('p', { className: 'wsh-ssh-status', role: 'status' }, t('noHosts'))
-        : null,
-      detail.connected
-        ? h('section', { className: 'wsh-ssh-discovered', 'data-discovered': '', 'aria-label': t('discoveredTitle') },
-          h('h3', null, t('discoveredTitle')),
-          h('p', { className: 'wsh-ssh-muted' }, t('discoveredHint')),
-          detail.discovered?.length
-            ? h('ul', { className: 'wsh-ssh-hosts wsh-ssh-discovered-list' }, detail.discovered.map((card) => h('li', {
-              key: card.instanceId, className: 'wsh-ssh-host wsh-ssh-discovered-row', 'data-discovered-instance': card.instanceId,
-            },
-              h('div', { className: 'wsh-ssh-host-main' },
-                h('strong', { className: 'wsh-ssh-host-title' }, card.profileId || card.instanceId.slice(0, 8)),
-                h('span', { className: 'wsh-ssh-muted' }, ` · ${t('discoveredMeta', card.pid ?? '—', card.port ?? '—')}`)),
-              h('div', { className: 'wsh-ssh-host-actions' },
-                h(Button, {
-                  onClick: () => onOpenDiscovered?.(card),
-                  disabled: Boolean(busy),
-                  'data-launcher-action': 'open-discovered',
-                }, t('discoveredOpen')),
-                h(Button, {
-                  onClick: () => onRestartDiscovered?.(card),
-                  disabled: Boolean(busy),
-                  'data-launcher-action': 'restart-discovered',
-                }, t('discoveredRestart')),
-                h(Button, {
-                  onClick: () => onSyncDiscovered?.(card),
-                  disabled: Boolean(busy),
-                  'data-launcher-action': 'sync-discovered',
-                }, t('discoveredSync')),
-                h(Button, {
-                  kind: 'danger',
-                  onClick: () => onStopDiscovered?.(card),
-                  disabled: Boolean(busy),
-                  'data-launcher-action': 'stop-discovered',
-                }, t('discoveredStop'))))))
-            : h('p', { className: 'wsh-ssh-status', role: 'status' }, t('discoveredEmpty')))
-        : null);
+          h('p', { className: 'wsh-ssh-muted' }, t('emptyProfilesHint'))) : null);
   }
 
   // ---------------------------------------------------------------------------

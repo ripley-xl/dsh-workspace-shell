@@ -5934,6 +5934,9 @@ function createLauncher(React, deps = {}) {
         finishedUpgrades.current.add(key);
         if (phase === 'done') setNotice(copy.upgradeDoneReopen);
         else setError(runtime.upgrade.error ?? 'UPGRADE_INSTALL_FAILED');
+        // The Host only clears `upgradeAvailable` on its next status read; without
+        // this the row keeps offering the upgrade that just finished.
+        Promise.resolve(workspace?.refresh?.()).catch(() => {});
       }
     }, [info]);
     const connectionList = ssh && Array.isArray(connections) ? connections : EMPTY_LIST;

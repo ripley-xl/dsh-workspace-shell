@@ -183,7 +183,10 @@ test('sync installs missing plugins, aligns configuration and restarts the Host'
   const localHome = (await import('node:fs')).mkdtempSync((await import('node:path')).join((await import('node:os')).tmpdir(), 'sync-home-'));
   const fsMod = await import('node:fs');
   fsMod.mkdirSync((await import('node:path')).join(localHome, 'profiles', 'web'), { recursive: true });
-  fsMod.writeFileSync((await import('node:path')).join(localHome, 'profiles', 'web', 'cordis.patch.yml'), '- id: local-only-entry\n  name: demo\n');
+  // The Desktop patch is the sync source; the same-name profile is not read.
+  const profilesDir = (await import('node:path')).join(localHome, 'profiles', 'desktop');
+  fsMod.mkdirSync(profilesDir, { recursive: true });
+  fsMod.writeFileSync((await import('node:path')).join(profilesDir, 'cordis.patch.yml'), '- id: local-only-entry\n  name: demo\n');
   t.after(() => fsMod.rmSync(localHome, { recursive: true, force: true }));
   const fixture = await serviceFixture({
     localBundles: async () => [{ name: 'dsh-missing', version: '1.0.0' }],

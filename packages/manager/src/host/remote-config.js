@@ -98,6 +98,20 @@ export async function readLocalProfilePatch(home, profileId, { fs: fsImpl = fs }
   }
 }
 
+/** Reads this machine's dependency map for the same-name profile. */
+export async function readLocalProfileDependencies(home, profileId, { fs: fsImpl = fs } = {}) {
+  checkProfile(profileId);
+  if (typeof home !== 'string' || !path.isAbsolute(home)) return null;
+  const file = path.join(home, 'profiles', profileId, 'package.json');
+  try {
+    const manifest = JSON.parse(await fsImpl.readFile(file, 'utf8'));
+    const dependencies = manifest?.dependencies;
+    return dependencies && typeof dependencies === 'object' && !Array.isArray(dependencies) ? dependencies : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Reads the remote profile's patch. A missing file reads as empty. */
 export async function readRemoteProfilePatch(channel, profileId, { signal } = {}) {
   checkProfile(profileId);

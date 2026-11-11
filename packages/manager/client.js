@@ -1234,6 +1234,19 @@ function createSshLauncher(React, deps = {}) {
       if (!active || !selectedId) return;
       void loadDetail(selectedId);
     }, [active, selectedId]);
+    // Auto-connect finishes after this panel mounts. Re-read while anything is
+    // still connecting, so the rows appear without a manual "connect" click.
+    useEffect(() => {
+      if (!active) return undefined;
+      const connections = status.value.connections;
+      if (!connections.length || connections.every((connection) => connection.connected === true)) return undefined;
+      const timer = setTimeout(() => {
+        if (!alive.current) return;
+        void loadStatus();
+        if (selectedId) void loadDetail(selectedId);
+      }, 1500);
+      return () => clearTimeout(timer);
+    }, [active, status, selectedId]);
     useEffect(() => () => {
       alive.current = false;
       cancelInflight();

@@ -716,6 +716,9 @@ export class SshRemoteService extends EventEmitter {
     this.store.require(hostId);
     const { runtime, card } = await this.requireDiscoveredCard(hostId, instanceId, signal);
     const remoteDependencies = await readRemoteProfileDependencies(runtime.channel, card.profileId, { signal });
+    // The Desktop's own plugin set is the baseline: it is maintained most often,
+    // and every other Host is aligned to it with this one action.
+    const home = this.localHome() ?? process.env.DSH_HOME ?? path.join(homedir(), '.dsh');
     const localBundles = await this.localBundles().catch(() => []);
     const plan = planDiscoveredSync({ localBundles, remoteDependencies });
     const items = [];
@@ -729,8 +732,9 @@ export class SshRemoteService extends EventEmitter {
     // remote lacks. Existing remote entries are never rewritten.
     let config = { appended: [], backup: null, error: null };
     try {
-      const home = this.localHome() ?? process.env.DSH_HOME ?? path.join(homedir(), '.dsh');
-      const localText = await readLocalProfilePatch(home, card.profileId).catch(() => '');
+      // The Desktop is the maintained source: every Host is aligned to its
+      // patch, not to this machine's same-name profile (which lags behind).
+      const localText = await readLocalProfilePatch(home, 'desktop').catch(() => '');
       const remoteText = await readRemoteProfilePatch(runtime.channel, card.profileId, { signal });
       const plan = planPatchSync({ localText, remoteText });
       config = { appended: [], skipped: plan.skipped, backup: null, error: null };

@@ -354,6 +354,19 @@ export function createWorkspaceClient(deps) {
     ...(item.source === 'ssh' ? { source: 'ssh' } : {}),
     ...mapVersionState(item),
   });
+  let refreshRetry = null;
+  let refreshFailures = 0;
+  const retryRefresh = () => {
+    if (disposed || refreshRetry) return;
+    refreshFailures += 1;
+    if (refreshFailures > 5) return;
+    refreshRetry = setTimeout(() => {
+      refreshRetry = null;
+      void refresh();
+    }, Math.min(5_000, 500 * 2 ** (refreshFailures - 1)));
+    refreshRetry.unref?.();
+  };
+
   async function refresh() {
     if (disposed) return false;
     const generation = ++refreshGeneration;
@@ -366,11 +379,18 @@ export function createWorkspaceClient(deps) {
       if (typeof result?.currentProfile !== 'string' || !Array.isArray(result.profiles) || !Array.isArray(result.runtimes)) throw error('WORKSPACE_INVALID_CATALOG');
       const profiles = result.profiles.slice(0, 256).filter((item) => typeof item?.id === 'string').map(mapProfile);
       const runtimes = withViews(result.runtimes.slice(0, 128).filter((item) => typeof item?.id === 'string').map(mapRuntime));
+      refreshFailures = 0;
+      if (refreshRetry) { clearTimeout(refreshRetry); refreshRetry = null; }
       publish({ phase: 'ready', currentProfile: result.currentProfile, defaultCwd: typeof result.defaultCwd === 'string' ? result.defaultCwd : '', profiles: Object.freeze(profiles), currentHost: mapCurrentHost(result.currentHost), runtimes });
       return true;
     } catch (cause) {
       // Keep the previous list and mark it possibly stale instead of pretending it is empty.
-      if (!disposed && generation === refreshGeneration) publish({ ...infoValue, phase: 'error', errorCode: codeOf(cause) });
+      if (!disposed && generation === refreshGeneration) {
+        publish({ ...infoValue, phase: 'error', errorCode: codeOf(cause) });
+        // A lost response (for example while the Host reloads a plugin) should
+        // heal itself instead of pinning an error chip until the next action.
+        retryRefresh();
+      }
       return false;
     }
   }
@@ -613,6 +633,7 @@ export function createWorkspaceClient(deps) {
       token?.mark('lease');
     }).catch(report);
     const dispose = () => {
+    if (refreshRetry) { clearTimeout(refreshRetry); refreshRetry = null; }
       if (closing) return closing;
       closed = true; abort.abort(); window.clearTimeout(readyTimer);
       sessionTabTokens.delete(spec.key); guestOpeners.delete(spec.key);

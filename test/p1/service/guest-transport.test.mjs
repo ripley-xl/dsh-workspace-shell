@@ -144,3 +144,47 @@ test('a transient transport failure retries once after reconnecting', async (t) 
   assert.equal(runs, 2);
   assert.equal(dials, 2, 'the retry dials a fresh channel');
 });
+
+test('an idle control channel disconnects and the next call redials', async (t) => {
+  const { SshRemoteService } = await import('../../../packages/manager/src/host/service.js');
+  const { ConnectionStore } = await import('../../../packages/manager/src/host/store.js');
+  const { guestChannel, memoryStorage } = await import('./helpers.mjs');
+  const store = await new ConnectionStore(memoryStorage()).open();
+  let dials = 0;
+  const service = new SshRemoteService({
+    store,
+    idleDisconnectMs: 40,
+    localVersion: async () => '1.0.0',
+    localBundles: async () => [],
+    localReturnUrl: 'http://127.0.0.1:54542',
+    openGuestChannel: async () => { dials += 1; return { channel: guestChannel(), controller: null, transportMode: 'guest' }; },
+  });
+  t.after(async () => { await service.close().catch(() => {}); await store.close().catch(() => {}); });
+  const record = await store.upsert({ hostAlias: 'p0-test' });
+  await service.connect(record.id);
+  assert.equal(service.publicConnection(record.id).connected, true);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.equal(service.publicConnection(record.id).phase, 'idle');
+  assert.equal(dials, 1);
+});
+
+test('an open tab forward keeps the channel alive', async (t) => {
+  const { SshRemoteService } = await import('../../../packages/manager/src/host/service.js');
+  const { ConnectionStore } = await import('../../../packages/manager/src/host/store.js');
+  const { guestChannel, memoryStorage } = await import('./helpers.mjs');
+  const store = await new ConnectionStore(memoryStorage()).open();
+  const service = new SshRemoteService({
+    store,
+    idleDisconnectMs: 40,
+    localVersion: async () => '1.0.0',
+    localBundles: async () => [],
+    localReturnUrl: 'http://127.0.0.1:54542',
+    openGuestChannel: async () => ({ channel: guestChannel(), controller: null, transportMode: 'guest' }),
+  });
+  t.after(async () => { await service.close().catch(() => {}); await store.close().catch(() => {}); });
+  const record = await store.upsert({ hostAlias: 'p0-test' });
+  service.runtime(record.id).portManager = { list: () => [{ state: 'active', remotePort: 3080, localPort: 40_000 }] };
+  await service.connect(record.id);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.equal(service.publicConnection(record.id).connected, true);
+});

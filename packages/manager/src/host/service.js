@@ -415,6 +415,8 @@ export class SshRemoteService extends EventEmitter {
     });
     this.interactions = options.interactions ?? new InteractionBroker();
     this.connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+    this.idleDisconnectMs = Number.isSafeInteger(options.idleDisconnectMs) && options.idleDisconnectMs > 0
+      ? options.idleDisconnectMs : 60_000;
     this.syncTimeoutMs = options.syncTimeoutMs ?? DEFAULT_SYNC_TIMEOUT_MS;
     this.stopTimeoutMs = options.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS;
     // Remote plugin upgrades resolve npm `latest` locally; tests may inject a
@@ -559,10 +561,33 @@ export class SshRemoteService extends EventEmitter {
   /** Keeps the legacy single-host view pointed at the upgraded default Host. */
 
   /** Actions connect on demand instead of making the user find the toggle first. */
+  /**
+   * Nothing keeps an idle SSH channel alive: control work reconnects on demand,
+   * and only an open tab's port forward holds the connection.
+   */
+  scheduleIdleDisconnect(hostId) {
+    const runtime = this.runtime(hostId);
+    clearTimeout(runtime.idleTimer);
+    runtime.idleTimer = null;
+    if (this.closed || runtime.operation) return;
+    if (this.listPorts(hostId).some((forward) => forward.state === 'active')) return;
+    runtime.idleTimer = setTimeout(() => {
+      runtime.idleTimer = null;
+      if (this.closed || this.runtime(hostId).operation) return;
+      if (this.listPorts(hostId).some((forward) => forward.state === 'active')) return;
+      const session = this.session(hostId);
+      if (!session.connected) return;
+      void this.disconnect(hostId).catch(() => {});
+    }, this.idleDisconnectMs);
+    runtime.idleTimer.unref?.();
+  }
+
   async ensureConnected(hostId) {
-    if (this.session(hostId).connected) return;
-    await this.connect(hostId, { background: false });
-    if (!this.session(hostId).connected) throw error('HOST_NOT_CONNECTED', 'The SSH host is not connected.');
+    if (!this.session(hostId).connected) {
+      await this.connect(hostId, { background: false });
+      if (!this.session(hostId).connected) throw error('HOST_NOT_CONNECTED', 'The SSH host is not connected.');
+    }
+    this.scheduleIdleDisconnect(hostId);
   }
 
   async ensureProfileTransport(hostId, { background = false } = {}) {
@@ -604,6 +629,8 @@ export class SshRemoteService extends EventEmitter {
     if (!forward || !Number.isInteger(forward.localPort) || forward.localPort < 1) {
       throw error('TUNNEL_FAILED', 'The port forward did not become active.');
     }
+    clearTimeout(this.runtime(hostId).idleTimer);
+    this.runtime(hostId).idleTimer = null;
     // Remember the ports, not just the live forwards: when the channel drops the
     // forward objects are gone before the close handler runs.
     const known = (this.runtime(hostId).knownForwards ?? []).filter((item) => item.remotePort !== forward.remotePort);
@@ -792,6 +819,8 @@ export class SshRemoteService extends EventEmitter {
       this.transition(this.runtime(hostId), 'reconnecting');
       await this.connect(hostId, { background: true }).catch(() => {});
       return run();
+    } finally {
+      this.scheduleIdleDisconnect(hostId);
     }
   }
 
@@ -896,6 +925,8 @@ export class SshRemoteService extends EventEmitter {
     if (!forward || !Number.isInteger(forward.localPort) || forward.localPort < 1) {
       throw error('TUNNEL_FAILED', 'The port forward did not become active.');
     }
+    clearTimeout(this.runtime(hostId).idleTimer);
+    this.runtime(hostId).idleTimer = null;
     // Remember the ports, not just the live forwards: when the channel drops the
     // forward objects are gone before the close handler runs.
     const known = (this.runtime(hostId).knownForwards ?? []).filter((item) => item.remotePort !== forward.remotePort);
@@ -1240,6 +1271,7 @@ export class SshRemoteService extends EventEmitter {
     runtime.operation = promise;
     return promise.finally(() => {
       if (runtime.operation === promise) runtime.operation = null;
+      this.scheduleIdleDisconnect(hostId);
     });
   }
 
@@ -1394,6 +1426,8 @@ export class SshRemoteService extends EventEmitter {
   async disconnect(hostId) {
     const runtime = this.runtime(hostId);
     this.store.require(hostId);
+    clearTimeout(runtime.idleTimer);
+    runtime.idleTimer = null;
     runtime.intentionalClose = true;
     this.clearReconnect(runtime);
     this.interactions.cancelHost(hostId);

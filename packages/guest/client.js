@@ -647,56 +647,36 @@ function installClipboardFallback(window, document) {
 return { installClipboardFallback };
 })();
 const { installClipboardFallback } = m2;
-// ---- module: restart-ui ----
+// ---- module: host-restart-control ----
 const m3 = (() => {
-// Restart surface for a Guest Web Host: one sidebar footer action and one
-// settings row, both driving the Host's own restart routes. Modelled on
-// dsh-restart-now's product behaviour (confirm, wait-for-idle, force, receipt)
-// with one addition that only makes sense for a Web Host: after the restart the
-// page polls its own origin and reloads itself, because a same-port restart
-// keeps the login cookie valid.
+// Restart control for a Guest Web Host. The framing Shell owns the entry: a
+// workspace tab offers "restart when idle" and "restart now", and this module
+// runs the request on the Host's own origin before waiting for the Host to come
+// back and reloading the page. A Guest opened outside a workspace tab installs
+// nothing: without a tab there is no restart entry.
 
 const STATUS_PATH = '/api/workspace-host/status';
 const RESTART_PATH = '/api/workspace-host/restart';
-const ID = 'workspace-restart';
 const POLL_MS = 2_000;
 const POLL_LIMIT_MS = 60_000;
+// The Shell and the Guest share these names; they are duplicated on the Shell
+// side because the two bundles never import each other.
+const RESTART_REQUEST = 'workspace-shell-host-restart-request';
+const RESTART_RESPONSE = 'workspace-shell-host-restart-response';
+const RESTART_VERSION = 1;
+const RESTART_GLOBAL = '__workspaceShellRestartHost';
+const RESTART_MARKER = '__workspaceShellRestartControl';
+const REQUEST_ID = /^[A-Za-z0-9_-]{16,128}$/u;
+const ORIGIN = /^[a-z][a-z0-9+.-]{1,31}:\/\/[^\s/?#@]{1,255}$/u;
+const PARENT_ORIGIN_PARAM = 'workspaceShellParentOrigin';
+const EMBEDDED_PARAM = 'workspaceShellEmbedded';
+const MODES = new Set(['now', 'wait']);
+const ERROR_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
+const MAX_SEEN = 32;
 
 const MESSAGES = {
-  zh: {
-    label: '重启此 Host',
-    title: '重启此 Host',
-    body: '重启会关闭当前 Web Host 并自动拉起。正在运行的任务会中断。',
-    restart: '重启',
-    force: '立即重启',
-    wait: '等空闲后重启',
-    cancel: '取消',
-    busy: (tasks, jobs) => `还有 ${tasks} 个任务、${jobs} 个后台作业在运行。`,
-    restarting: '正在重启，等待 Host 回来…',
-    supervised: '这个 Host 由 supervisor 管理，请在所在页签或管理页重启。',
-    disabled: '此 profile 关闭了重启。',
-    cooldown: '刚刚重启过，请稍等几秒。',
-    failed: (code) => `重启失败：${code}`,
-    stale: '端口可能已变化，新地址见终端输出或工作区页签。',
-    last: (receipt) => (receipt?.ok ? '上次重启：成功' : `上次重启：失败（${receipt?.error ?? 'unknown'}）`),
-  },
-  en: {
-    label: 'Restart this Host',
-    title: 'Restart this Host',
-    body: 'The Web Host closes and comes back on its own. Running work is interrupted.',
-    restart: 'Restart',
-    force: 'Restart now',
-    wait: 'Wait until idle',
-    cancel: 'Cancel',
-    busy: (tasks, jobs) => `${tasks} task(s) and ${jobs} job(s) are still running.`,
-    restarting: 'Restarting — waiting for the Host to come back…',
-    supervised: 'This Host is supervised; restart it from its tab or manager page.',
-    disabled: 'Restart is disabled for this profile.',
-    cooldown: 'Restarted just now — try again in a few seconds.',
-    failed: (code) => `Restart failed: ${code}`,
-    stale: 'The port may have changed; take the new URL from the terminal or the workspace tab.',
-    last: (receipt) => (receipt?.ok ? 'Last restart: succeeded' : `Last restart: failed (${receipt?.error ?? 'unknown'})`),
-  },
+  zh: { restarting: '正在重启，等待 Host 回来…' },
+  en: { restarting: 'Restarting — waiting for the Host to come back…' },
 };
 
 function dictionaryFor(document) {
@@ -704,42 +684,94 @@ function dictionaryFor(document) {
   return lang.startsWith('en') ? MESSAGES.en : MESSAGES.zh;
 }
 
-const style = {
-  panel: { position: 'fixed', inset: '0', background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2147483000 },
-  card: { width: 'min(420px, 90vw)', background: 'var(--dsh-surface, #1f2430)', color: 'var(--dsh-text, #e6e8ee)', borderRadius: '12px', padding: '18px 20px', boxShadow: '0 18px 48px rgba(0,0,0,0.45)', font: '13px/1.6 system-ui, sans-serif' },
-  title: { margin: '0 0 8px', fontSize: '15px', fontWeight: 600 },
-  text: { margin: '0 0 14px', opacity: 0.85 },
-  row: { display: 'flex', gap: '8px', justifyContent: 'flex-end', flexWrap: 'wrap' },
-  button: { border: '1px solid rgba(255,255,255,0.18)', background: 'transparent', color: 'inherit', borderRadius: '8px', padding: '6px 12px', cursor: 'pointer', font: 'inherit' },
-  primary: { border: '1px solid transparent', background: 'var(--dsh-accent, #4f7cff)', color: '#fff', borderRadius: '8px', padding: '6px 12px', cursor: 'pointer', font: 'inherit' },
-};
+function searchParams(window) {
+  const params = new URLSearchParams();
+  for (const value of [window?.location?.search, (window?.location?.hash ?? '').slice(1)]) {
+    try {
+      if (typeof value !== 'string' || value.length === 0) continue;
+      for (const [key, item] of new URLSearchParams(value)) params.set(key, item);
+    } catch {
+      // Only a parseable location counts.
+    }
+  }
+  return params;
+}
+
+function embeddedPage(window) {
+  try {
+    if (window.parent !== window) return true;
+  } catch {
+    return false;
+  }
+  return searchParams(window).get(EMBEDDED_PARAM) === '1';
+}
+
+function parentOriginOf(window) {
+  const value = searchParams(window).get(PARENT_ORIGIN_PARAM);
+  return typeof value === 'string' && ORIGIN.test(value) ? value : null;
+}
+
+function safeCode(value) {
+  return typeof value === 'string' && ERROR_CODE.test(value) ? value : null;
+}
+
+function result(ok, code) {
+  return ok ? { ok: true } : { ok: false, code: safeCode(code) ?? 'HOST_RESTART_UNAVAILABLE' };
+}
 
 /**
- * @param {object} React React runtime provided by the client bundle.
  * @param {{window: Window, document: Document}} deps
  */
-function createGuestRestart(React, deps = {}) {
+function createHostRestartControl(deps = {}) {
   const window = deps.window;
   const document = deps.document;
   const t = dictionaryFor(document);
-  const disposers = [];
   let disposed = false;
-  let reloadTimer = null;
+  let restarting = false;
+  let timer = null;
   let reloadUntil = 0;
-
-  const noop = () => {};
+  let overlay = null;
+  let listening = false;
+  let exposed = false;
+  let channel = null;
+  let expectedOrigin = parentOriginOf(window);
+  const seen = new Set();
 
   async function call(path, body) {
-    const response = await window.fetch(path, body === undefined ? { credentials: 'same-origin', cache: 'no-store' } : {
-      method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
-    });
+    const response = await window.fetch(path, body === undefined
+      ? { credentials: 'same-origin', cache: 'no-store' }
+      : { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
     let payload = null;
     try { payload = await response.json(); } catch { payload = null; }
     if (!response.ok || payload?.ok !== true) {
-      const code = payload?.code ?? `HTTP_${response.status}`;
+      const code = safeCode(payload?.code) ?? 'HOST_RESTART_UNAVAILABLE';
       throw Object.assign(new Error(code), { code });
     }
     return payload;
+  }
+
+  function showOverlay(text) {
+    if (disposed || !document?.body) return;
+    try {
+      if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.setAttribute('data-workspace-restart', '');
+        overlay.setAttribute('role', 'status');
+        overlay.setAttribute('aria-live', 'polite');
+        overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.45)';
+        const card = document.createElement('div');
+        card.setAttribute('data-workspace-restart-card', '');
+        card.style.cssText = 'max-width:min(420px,90vw);padding:18px 20px;border-radius:12px;background:var(--dsh-surface,#1f2430);color:var(--dsh-text,#e6e8ee);font:13px/1.6 system-ui,sans-serif;box-shadow:0 18px 48px rgba(0,0,0,.45)';
+        card.textContent = text;
+        overlay.appendChild(card);
+        document.body.appendChild(overlay);
+      } else {
+        const card = overlay.firstChild;
+        if (card) card.textContent = text;
+      }
+    } catch {
+      // A page that refuses the overlay still restarts.
+    }
   }
 
   function pollForRecovery() {
@@ -754,108 +786,149 @@ function createGuestRestart(React, deps = {}) {
           window.setTimeout(() => window.location.reload(), 1_200);
           return;
         }
-      } catch { /* Host is still down */ }
-      if (Date.now() < reloadUntil) reloadTimer = window.setTimeout(tick, POLL_MS);
+      } catch {
+        // The Host is still down.
+      }
+      if (Date.now() < reloadUntil) timer = window.setTimeout(tick, POLL_MS);
     };
-    reloadTimer = window.setTimeout(tick, POLL_MS);
+    timer = window.setTimeout(tick, POLL_MS);
   }
 
-  function ConfirmOverlay({ onClose }) {
-    const [state, setState] = React.useState({ phase: 'loading', status: null, message: '' });
-    React.useEffect(() => {
-      let cancelled = false;
-      call(STATUS_PATH).then((payload) => {
-        if (cancelled) return;
-        if (payload.supervised) setState({ phase: 'blocked', status: payload, message: t.supervised });
-        else if (payload.allowRestart === false) setState({ phase: 'blocked', status: payload, message: t.disabled });
-        else setState({ phase: 'ready', status: payload, message: '' });
-      }, (error) => { if (!cancelled) setState({ phase: 'blocked', status: null, message: t.failed(error.code ?? 'unavailable') }); });
-      return () => { cancelled = true; };
-    }, []);
-    const restart = (mode, force) => {
-      setState((current) => ({ ...current, phase: 'sending', message: '' }));
-      call(RESTART_PATH, { mode, force }).then(() => {
-        setState((current) => ({ ...current, phase: 'restarting', message: t.restarting }));
-        pollForRecovery();
-      }, (error) => setState((current) => ({ ...current, phase: 'ready', message: t.failed(error.code ?? 'unavailable') })));
-    };
-    const busy = (state.status?.busy?.tasks ?? 0) + (state.status?.busy?.jobs ?? 0) > 0;
-    const rows = [];
-    if (state.phase === 'ready' && busy) {
-      rows.push(React.createElement('button', { key: 'wait', style: style.button, onClick: () => restart('wait', false) }, t.wait));
-      rows.push(React.createElement('button', { key: 'force', style: style.primary, onClick: () => restart('now', true) }, t.force));
-    } else if (state.phase === 'ready') {
-      rows.push(React.createElement('button', { key: 'now', style: style.primary, onClick: () => restart('now', false) }, t.restart));
+  async function restart(mode) {
+    if (disposed) return result(false, 'HOST_RESTART_UNAVAILABLE');
+    if (!MODES.has(mode)) return result(false, 'HOST_RESTART_INVALID_MODE');
+    if (restarting) return result(false, 'HOST_RESTART_IN_PROGRESS');
+    restarting = true;
+    try {
+      const status = await call(STATUS_PATH);
+      if (status?.supervised === true) return result(false, 'HOST_RESTART_SUPERVISED');
+      if (status?.allowRestart === false) return result(false, 'HOST_RESTART_DISABLED');
+      const tasks = Number(status?.busy?.tasks) || 0;
+      const jobs = Number(status?.busy?.jobs) || 0;
+      // "Restart now" is the forced path: the menu offers it next to the
+      // wait-for-idle path, so a busy Host must not refuse it.
+      await call(RESTART_PATH, { mode, force: mode === 'now' && tasks + jobs > 0 });
+      showOverlay(t.restarting);
+      pollForRecovery();
+      return result(true);
+    } catch (error) {
+      return result(false, error?.code);
+    } finally {
+      restarting = false;
     }
-    rows.push(React.createElement('button', { key: 'cancel', style: style.button, onClick: onClose }, t.cancel));
-    const busyText = busy ? t.busy(state.status.busy.tasks, state.status.busy.jobs) : '';
-    return React.createElement('div', { style: style.panel, role: 'dialog', 'aria-modal': 'true', onClick: (event) => { if (event.target === event.currentTarget) onClose(); } },
-      React.createElement('div', { style: style.card },
-        React.createElement('h3', { style: style.title }, t.title),
-        React.createElement('p', { style: style.text }, state.message || busyText || t.body),
-        state.status?.lastRestart ? React.createElement('p', { style: { ...style.text, opacity: 0.6 } }, t.last(state.status.lastRestart)) : null,
-        React.createElement('div', { style: style.row }, ...rows)));
   }
 
-  function FooterAction() {
-    const [open, setOpen] = React.useState(false);
-    return React.createElement(React.Fragment, null,
-      React.createElement('button', {
-        type: 'button', title: t.label, 'aria-label': t.label,
-        style: { ...style.button, padding: '4px 8px', lineHeight: 1 },
-        onClick: () => setOpen(true),
-      }, '\u27f3'),
-      open ? React.createElement(ConfirmOverlay, { onClose: () => setOpen(false) }) : null);
-  }
-
-  function SettingsRow() {
-    const [open, setOpen] = React.useState(false);
-    const [note, setNote] = React.useState('');
-    React.useEffect(() => {
-      call(STATUS_PATH).then((payload) => {
-        if (payload.supervised) setNote(t.supervised);
-        else if (payload.allowRestart === false) setNote(t.disabled);
-        else if (payload.lastRestart) setNote(t.last(payload.lastRestart));
-      }, () => noop());
-    }, []);
-    return React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', padding: '8px 0' } },
-      React.createElement('div', null,
-        React.createElement('div', null, t.label),
-        note ? React.createElement('div', { style: { opacity: 0.6, fontSize: '12px' } }, note) : null),
-      React.createElement('button', { type: 'button', style: style.button, onClick: () => setOpen(true) }, t.restart),
-      open ? React.createElement(ConfirmOverlay, { onClose: () => setOpen(false) }) : null);
-  }
-
-  function register(slots) {
-    const inject = (name, register) => {
+  function installFrameChannel() {
+    channel = (event) => {
+      if (disposed || !listening) return;
       try {
-        disposers.push(slots.inject(name, () => register()));
-      } catch { /* an older Host without this slot simply gets no entry */ }
+        if (event.source !== window.parent) return;
+        if (expectedOrigin) {
+          if (event.origin !== expectedOrigin) return;
+        } else {
+          if (typeof event.origin !== 'string' || !ORIGIN.test(event.origin)) return;
+          expectedOrigin = event.origin;
+        }
+        const data = event.data;
+        if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+        if (data.type !== RESTART_REQUEST || data.version !== RESTART_VERSION) return;
+        if (typeof data.requestId !== 'string' || !REQUEST_ID.test(data.requestId)) return;
+        if (typeof data.mode !== 'string' || !MODES.has(data.mode)) return;
+        if (seen.has(data.requestId)) return;
+        seen.add(data.requestId);
+        if (seen.size > MAX_SEEN) seen.delete(seen.values().next().value);
+        const requestId = data.requestId;
+        void restart(data.mode).then((value) => {
+          if (disposed || !listening || !expectedOrigin) return;
+          window.parent.postMessage({
+            type: RESTART_RESPONSE,
+            version: RESTART_VERSION,
+            requestId,
+            ok: value.ok === true,
+            ...(value.ok === true ? {} : { code: value.code }),
+          }, expectedOrigin);
+        }, () => {
+          if (disposed || !listening || !expectedOrigin) return;
+          window.parent.postMessage({
+            type: RESTART_RESPONSE, version: RESTART_VERSION, requestId, ok: false, code: 'HOST_RESTART_UNAVAILABLE',
+          }, expectedOrigin);
+        });
+      } catch {
+        // Malformed frames and navigation races leave the page usable.
+      }
     };
-    inject('sidebar.footer.action', () => slots.register({ name: 'sidebar.footer.action', id: ID, order: 120, label: t.label }, FooterAction));
-    inject('settings.general.item', () => slots.register({ name: 'settings.general.item', id: ID, order: 92 }, SettingsRow));
+    try {
+      window.addEventListener('message', channel);
+      listening = true;
+    } catch {
+      listening = false;
+    }
+  }
+
+  function installGlobal() {
+    const entry = (mode) => restart(mode);
+    try {
+      Object.defineProperty(window, RESTART_GLOBAL, { value: entry, writable: false, configurable: true, enumerable: false });
+      exposed = window[RESTART_GLOBAL] === entry;
+    } catch {
+      exposed = false;
+    }
+  }
+
+  function install() {
+    if (disposed || !embeddedPage(window)) return;
+    try {
+      if (window[RESTART_MARKER] === true) return;
+      window[RESTART_MARKER] = true;
+    } catch {
+      // A window that refuses the marker still gets a working channel.
+    }
+    let framed = false;
+    try { framed = window.parent !== window; } catch { framed = false; }
+    if (framed) installFrameChannel();
+    else installGlobal();
+  }
+
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
+    if (timer !== null) {
+      try { window.clearTimeout(timer); } catch { /* The page is going away. */ }
+      timer = null;
+    }
+    if (listening) {
+      listening = false;
+      try { window.removeEventListener('message', channel); } catch { /* Detaching is best effort. */ }
+    }
+    if (exposed) {
+      exposed = false;
+      try { Reflect.deleteProperty(window, RESTART_GLOBAL); } catch { /* A foreign replacement is not removed. */ }
+    }
+    try { if (window[RESTART_MARKER] === true) Reflect.deleteProperty(window, RESTART_MARKER); } catch { /* Cleanup is best effort. */ }
+    if (overlay) {
+      try { overlay.remove(); } catch { /* The overlay may already be detached. */ }
+      overlay = null;
+    }
+    seen.clear();
   }
 
   return Object.freeze({
     apply(ctx) {
       if (disposed) return;
-      let slots = null;
-      try { slots = typeof ctx?.get === 'function' ? ctx.get('slots') : undefined; } catch { slots = null; }
-      if (slots) { register(slots); return; }
-      try { ctx?.inject?.(['slots'], (scope) => register((scope && scope.slots) || (scope && scope.get && scope.get('slots')))); } catch { /* no slots, no entry */ }
+      install();
+      try {
+        ctx?.effect?.(() => () => dispose(), 'workspace guest host restart');
+      } catch {
+        // A Host without effects keeps the channel until the page unloads.
+      }
     },
-    dispose() {
-      disposed = true;
-      if (reloadTimer !== null) { try { window.clearTimeout(reloadTimer); } catch { /* already gone */ } reloadTimer = null; }
-      const list = disposers.splice(0, disposers.length);
-      for (const dispose of list) { try { if (typeof dispose === 'function') dispose(); } catch { /* keep disposing */ } }
-    },
+    dispose,
   });
 }
 
-return { createGuestRestart };
+return { createHostRestartControl };
 })();
-const { createGuestRestart } = m3;
+const { createHostRestartControl } = m3;
 // ---- module: ../session-host/submissions ----
 const m4 = (() => {
 // Observe the public Session prompt boundary without changing admission or draft restoration.
@@ -1238,13 +1311,14 @@ function createGuestPlugin(React, deps) {
       sessions?.apply(ctx);
       installGuestCwd(ctx, deps.window);
       installClipboardFallback(deps.window, deps.document);
-      const restart = createGuestRestart(React, { window: deps.window, document: deps.document });
+      // The framing Shell owns the restart entry (a workspace tab menu item);
+      // this page only answers its command and reloads once the Host is back.
+      const restart = createHostRestartControl({ window: deps.window, document: deps.document });
       try {
-        ctx.effect(() => () => restart.dispose(), 'workspace guest restart');
+        restart.apply(ctx);
       } catch {
         restart.dispose();
       }
-      restart.apply(ctx);
       const bridge = createGuestNotificationBridge({ window: deps.window, ctx });
       try {
         ctx.effect(() => () => bridge.dispose(), 'workspace guest notifications');

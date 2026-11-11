@@ -945,3 +945,73 @@ test('console output from the leased Guest page carries notification events', as
   element.emit('console-message', { message: '__workspace-shell-notification__' + JSON.stringify(data) });
   assert.equal(events.length, 1, 'a disposed Guest delivers nothing');
 });
+
+test('restartHost is unavailable before ready or after dispose and rejects unknown modes', async () => {
+  const mock = harness();
+  const guest = createDesktopGuest(options(mock));
+  assert.deepEqual(await guest.restartHost('now'), { ok: false, code: 'HOST_RESTART_UNAVAILABLE' });
+  assert.deepEqual(await guest.restartHost('later'), { ok: false, code: 'HOST_RESTART_UNAVAILABLE' }, 'readiness is checked before the mode');
+  await guest.start();
+  const element = mock.elements[0];
+  assert.deepEqual(await guest.restartHost('now'), { ok: false, code: 'HOST_RESTART_UNAVAILABLE' });
+  element.emit('dom-ready');
+  await flush();
+  for (const mode of ['later', 'NOW', '', undefined, null, 42, { mode: 'now' }]) {
+    assert.deepEqual(await guest.restartHost(mode), { ok: false, code: 'HOST_RESTART_INVALID_MODE' }, String(mode));
+  }
+  assert.deepEqual(mock.calls.release, []);
+  await guest.dispose();
+  assert.deepEqual(await guest.restartHost('now'), { ok: false, code: 'HOST_RESTART_UNAVAILABLE' });
+  assert.deepEqual(element.scripts ?? [], []);
+});
+
+test('restartHost reaches the Guest entry point with an encoded mode and passes its outcome through', async () => {
+  const mock = harness();
+  const guest = createDesktopGuest(options(mock));
+  await guest.start();
+  const element = mock.elements[0];
+  element.emit('dom-ready');
+  await flush();
+  const calls = [];
+  const outcomes = [{ ok: true }, { ok: false, code: 'HOST_RESTART_BUSY' }];
+  element.executeJavaScript = (code, userGesture) => {
+    calls.push({ code, userGesture });
+    return Promise.resolve(outcomes.shift());
+  };
+  assert.deepEqual(await guest.restartHost('now'), { ok: true });
+  assert.deepEqual(await guest.restartHost('wait'), { ok: false, code: 'HOST_RESTART_BUSY' });
+  assert.deepEqual(calls, [
+    { code: '__workspaceShellRestartHost("now")', userGesture: false },
+    { code: '__workspaceShellRestartHost("wait")', userGesture: false },
+  ]);
+  await guest.dispose();
+});
+
+test('restartHost normalizes unusable Guest replies and script failures to HOST_RESTART_UNAVAILABLE', async () => {
+  const mock = harness();
+  const guest = createDesktopGuest(options(mock));
+  await guest.start();
+  const element = mock.elements[0];
+  element.emit('dom-ready');
+  await flush();
+  const replies = [null, undefined, 'ok', 42, ['array'], { ok: false }, { ok: false, code: 'not a code' }, { ok: 'true' }];
+  for (const reply of replies) {
+    element.executeJavaScript = () => Promise.resolve(reply);
+    assert.deepEqual(await guest.restartHost('now'), { ok: false, code: 'HOST_RESTART_UNAVAILABLE' }, JSON.stringify(reply));
+  }
+  for (const failure of [
+    () => { throw new Error('private sync failure'); },
+    () => Promise.reject(new Error('private async failure')),
+  ]) {
+    element.executeJavaScript = failure;
+    assert.deepEqual(await guest.restartHost('now'), { ok: false, code: 'HOST_RESTART_UNAVAILABLE' });
+  }
+  element.currentURL = 'https://other.example/private';
+  assert.deepEqual(await guest.restartHost('now'), { ok: false, code: 'HOST_RESTART_UNAVAILABLE' }, 'a foreign origin is not restarted');
+  element.currentURL = 'https://example.com/guest?q=1';
+  element.isConnected = false;
+  assert.deepEqual(await guest.restartHost('now'), { ok: false, code: 'HOST_RESTART_UNAVAILABLE' }, 'a disconnected webview is not scripted');
+  element.isConnected = true;
+  await guest.dispose();
+  assert.deepEqual(await guest.restartHost('now'), { ok: false, code: 'HOST_RESTART_UNAVAILABLE' });
+});

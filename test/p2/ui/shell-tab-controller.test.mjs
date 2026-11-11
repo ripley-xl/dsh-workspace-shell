@@ -75,7 +75,7 @@ test('snapshot/subscription forward state and private specs never appear in publ
   assert.equal(controller.getSnapshot, state.getSnapshot);
   assert.equal(controller.subscribe, state.subscribe);
   assert.equal(Object.isFrozen(controller), true);
-  assert.deepEqual(Object.keys(controller).sort(), ['getSnapshot', 'subscribe', 'registerProvider', 'open', 'mount', 'activate', 'close', 'suspend', 'retry', 'replace', 'move', 'resize', 'dispose'].sort());
+  assert.deepEqual(Object.keys(controller).sort(), ['getSnapshot', 'subscribe', 'registerProvider', 'open', 'mount', 'activate', 'close', 'suspend', 'retry', 'replace', 'move', 'resize', 'invoke', 'dispose'].sort());
   const observed = [];
   const off = controller.subscribe(() => observed.push(controller.getSnapshot()));
   const input = spec({ connection: { token: 'nested-secret' } });
@@ -1294,4 +1294,67 @@ test('move is a safe no-op for Local, unknown IDs, and invalid indices', async (
   assert.deepEqual(live.getSnapshot().tabs.map((item) => item.id), [second, first, 'local']);
   assert.ok(snapshot);
   await live.dispose();
+});
+
+test('invoke rejects a tab without a run, a mount, or an acquired handle with TAB_NOT_READY', async (t) => {
+  const { controller, native } = fixture();
+  t.after(() => controller.dispose());
+  await assert.rejects(controller.invoke('missing', 'restartHost'), { code: 'TAB_NOT_READY' });
+  const id = controller.open(spec());
+  await assert.rejects(controller.invoke(id, 'restartHost'), { code: 'TAB_NOT_READY' }, 'an unmounted tab has no run');
+  controller.mount(id, {});
+  await assert.rejects(controller.invoke(id, 'restartHost'), { code: 'TAB_NOT_READY' }, 'the provider has not acquired a handle yet');
+  native.calls[0].resolve(handle());
+  await tick();
+  assert.equal(await controller.invoke(id, 'resize'), undefined);
+  await controller.dispose();
+  await assert.rejects(controller.invoke(id, 'resize'), { code: 'TAB_NOT_READY' }, 'a disposed controller cannot reach its Guest');
+});
+
+test('invoke calls the handle member as its receiver and returns the awaited result', async (t) => {
+  const calls = [];
+  const resource = handle({
+    restartHost(mode, ...rest) { calls.push({ self: this, mode, rest }); return { ok: true, mode }; },
+  });
+  const { controller } = fixture(() => resource);
+  t.after(() => controller.dispose());
+  const id = controller.open(spec());
+  controller.mount(id, {});
+  const outcome = await controller.invoke(id, 'restartHost', 'wait', 'extra');
+  assert.deepEqual(outcome, { ok: true, mode: 'wait' });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].self, resource);
+  assert.equal(calls[0].mode, 'wait');
+  assert.deepEqual(calls[0].rest, ['extra']);
+  assert.equal(await controller.invoke(id, 'resize'), undefined);
+  assert.equal(resource.resized, 1);
+});
+
+test('invoke rejects non-callable members and throwing getters with TAB_UNSUPPORTED', async (t) => {
+  const resource = handle({ restartHost: 'not-a-function', restartCount: 0 });
+  Object.defineProperty(resource, 'explode', { get() { throw new Error('private getter'); } });
+  const { controller } = fixture(() => resource);
+  t.after(() => controller.dispose());
+  const id = controller.open(spec());
+  controller.mount(id, {});
+  for (const method of ['restartHost', 'visible', 'explode', undefined, 42, null]) {
+    await assert.rejects(controller.invoke(id, method), { code: 'TAB_UNSUPPORTED' }, String(method));
+  }
+  assert.equal(resource.disposed, 0);
+  assert.equal(resource.restartCount, 0);
+});
+
+test('invoke reports TAB_NOT_READY when the run is replaced before the command settles', async (t) => {
+  const gate = deferred();
+  const resource = handle({ restartHost() { return gate.promise; } });
+  const { controller } = fixture(() => resource);
+  t.after(() => controller.dispose());
+  const id = controller.open(spec());
+  controller.mount(id, {});
+  const invoking = controller.invoke(id, 'restartHost', 'now');
+  await controller.close(id);
+  gate.resolve({ ok: true });
+  await assert.rejects(invoking, { code: 'TAB_NOT_READY' });
+  assert.equal(tab(controller, id), undefined);
+  assert.equal(resource.disposed, 1);
 });

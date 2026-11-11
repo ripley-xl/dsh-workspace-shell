@@ -30,6 +30,11 @@ export function createFrameViews(React, deps) {
   };
   const activeLocale = ctx.locale?.getSnapshot?.().active || document.documentElement.lang || 'zh';
   const english = !String(activeLocale).toLowerCase().startsWith('zh');
+  const tabMenuCopy = english ? {
+    restartWait: 'Restart when idle', restartNow: 'Restart now', label: 'Tab menu',
+  } : {
+    restartWait: '等空闲后重启', restartNow: '立即重启', label: '页签菜单',
+  };
   const tabEditorCopy = english ? {
     title: 'Customize tab', original: 'Original name', name: 'Display name',
     hint: 'Leave the name empty and choose no marker to restore the default.', separator: ': ',
@@ -54,6 +59,17 @@ export function createFrameViews(React, deps) {
       TAB_APPEARANCE_UNAVAILABLE: 'This tab has no stable identity, so its display cannot be customized.',
       TAB_APPEARANCE_INVALID: 'The tab name or color is invalid.',
       TAB_APPEARANCE_UNSAVED: 'The customization could not be saved.',
+      TAB_NOT_READY: 'The tab is not ready yet.',
+      TAB_UNSUPPORTED: 'The Guest in this tab does not support this action.',
+      TAB_RESTART_UNSUPPORTED: 'This tab has no restartable Web Host.',
+      TAB_RESTART_INVALID_MODE: 'The restart mode is not recognized.',
+      HOST_RESTART_UNAVAILABLE: 'This tab cannot restart its Host: the Guest is missing or the Host is unreachable.',
+      HOST_RESTART_SUPERVISED: 'This Host is managed by a supervisor; restart it from the manager page.',
+      HOST_RESTART_DISABLED: 'Restart is disabled for this profile.',
+      HOST_RESTART_BUSY: 'The Host has running work; choose "Restart when idle".',
+      HOST_RESTART_COOLDOWN: 'The Host restarted just now; try again in a few seconds.',
+      HOST_RESTART_INSTALLING: 'The Host is installing plugins; try again when it finishes.',
+      HOST_RESTART_IN_PROGRESS: 'A restart is already running in this tab.',
     } : {
       TUI_PROFILE_CONFLICT: '该 profile 同时声明了 DSH TUI 和 Pi TUI，请只保留一种终端实现。',
       PROFILE_HOST_CONFLICT: '该 profile 已有其它运行中的 Host，请先关闭或复用现有实例。',
@@ -65,6 +81,17 @@ export function createFrameViews(React, deps) {
       TAB_APPEARANCE_UNAVAILABLE: '该页签没有可保存的稳定身份，无法自定义显示。',
       TAB_APPEARANCE_INVALID: '页签名称或颜色无效。',
       TAB_APPEARANCE_UNSAVED: '自定义显示未能保存。',
+      TAB_NOT_READY: '该页签还没有就绪。',
+      TAB_UNSUPPORTED: '该页签的 Guest 不支持这个操作。',
+      TAB_RESTART_UNSUPPORTED: '该页签背后没有可重启的 Web Host。',
+      TAB_RESTART_INVALID_MODE: '重启方式无效。',
+      HOST_RESTART_UNAVAILABLE: '该页签无法重启 Host：Guest 未加载或 Host 不可达。',
+      HOST_RESTART_SUPERVISED: '该 Host 由 supervisor 管理，请在管理页重启。',
+      HOST_RESTART_DISABLED: '此 profile 关闭了重启。',
+      HOST_RESTART_BUSY: 'Host 还有运行中的任务，请选择「等空闲后重启」。',
+      HOST_RESTART_COOLDOWN: '刚重启过，请稍等几秒。',
+      HOST_RESTART_INSTALLING: 'Host 正在安装插件，请等安装结束后再试。',
+      HOST_RESTART_IN_PROGRESS: '该页签已经在重启。',
     };
     return messages[safe] ? `${messages[safe]} [${safe}]` : safe;
   }
@@ -501,12 +528,28 @@ export function createFrameViews(React, deps) {
     const statusOf = React.useCallback((tab) => {
       try { return workspace?.getTabStatus?.(tab) ?? null; } catch { return null; }
     }, [workspace]);
+    // The Guest owns the restart itself; the tab menu only supplies the entry.
+    // Selecting the tab first keeps the Guest's "restarting" overlay visible.
+    const restartTab = React.useCallback((tabId, mode) => {
+      if (!workspace) return;
+      void (async () => {
+        try { await workspace.activate(tabId); } catch { /* The command still runs. */ }
+        await run(`restart:${tabId}`, () => workspace.restartTab(tabId, mode));
+      })();
+    }, [workspace, run]);
+    const tabMenu = workspace ? {
+      items: (tab) => (tab.kind === 'profile-ui' && tab.id !== 'local' ? [
+        { id: 'wait', label: tabMenuCopy.restartWait, disabled: tab.phase !== 'ready' },
+        { id: 'now', label: tabMenuCopy.restartNow, disabled: tab.phase !== 'ready' },
+      ] : []),
+      onSelect: (tabId, itemId) => restartTab(tabId, itemId === 'wait' ? 'wait' : 'now'),
+    } : undefined;
     const stripProps = {
       tabs, activeId, getStatus: statusOf, getAppearance: appearanceOf,
-      labels: { edit: english ? 'Edit tab name and color' : '编辑页签名称与彩色标记' },
+      labels: { edit: english ? 'Edit tab name and color' : '编辑页签名称与彩色标记', tabMenu: tabMenuCopy.label },
       onSelect: (id) => void selectTab(id),
       onClose: (id) => { const tab = tabs.find((item) => item.id === id); if (tab) void closeTab(tab); },
-      ...(workspace ? { onAdd: () => void addLauncher(), onMove: moveTab, onEdit: editTab, canEdit: canEditTab } : {}),
+      ...(workspace ? { onAdd: () => void addLauncher(), onMove: moveTab, onEdit: editTab, canEdit: canEditTab, menu: tabMenu } : {}),
     };
     const tabsView = ChromeTabStrip
       ? h(ChromeTabStrip, stripProps)

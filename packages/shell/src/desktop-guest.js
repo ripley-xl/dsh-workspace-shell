@@ -12,7 +12,10 @@ const WORKSPACE_SHELL_NOTIFICATION_VERSION = 1;
 // console output; the embedder pulls navigation commands in with executeJavaScript.
 const WORKSPACE_SHELL_NOTIFICATION_MARKER = '__workspace-shell-notification__';
 const WORKSPACE_SHELL_OPEN_SESSION_GLOBAL = '__workspaceShellOpenSession';
+const WORKSPACE_SHELL_RESTART_GLOBAL = '__workspaceShellRestartHost';
+const WORKSPACE_SHELL_RESTART_MODES = new Set(['now', 'wait']);
 const WORKSPACE_SHELL_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const WORKSPACE_SHELL_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
 // A serialized origin: scheme://host[:port] with no credentials, path, query or fragment.
 const WORKSPACE_SHELL_ORIGIN = /^[a-z][a-z0-9+.-]{1,31}:\/\/[^\s/?#@]{1,255}$/;
 
@@ -88,6 +91,15 @@ function newRequestId(window) {
 function validCwd(value) {
   if (typeof value !== 'string' || value.length > 4096 || value.includes('\u0000')) return null;
   return value.trim() ? value : null;
+}
+
+// The Guest answers with its own outcome. Anything else (an older Guest without
+// the entry point, a torn-down document) reads as "unavailable".
+function restartOutcome(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: false, code: 'HOST_RESTART_UNAVAILABLE' };
+  if (value.ok === true) return { ok: true };
+  const code = typeof value.code === 'string' && WORKSPACE_SHELL_CODE.test(value.code) ? value.code : 'HOST_RESTART_UNAVAILABLE';
+  return { ok: false, code };
 }
 
 function validLease(value) {
@@ -535,5 +547,31 @@ export function createDesktopGuest({
     return true;
   };
 
-  return { start, setVisible, focus, resize, getWorkingDirectory, openSession, dispose };
+  // Restart runs inside the Guest: only that document can call the Host's own
+  // restart route, and it reloads itself once the Host is back. The Guest's
+  // return value is the outcome; an older Guest without the entry point rejects
+  // the call, which reads as "unavailable" here.
+  const restartHost = async (mode) => {
+    const current = webview;
+    const lease = knownLease;
+    if (closed || invalidated || !ready || !lease || !current?.isConnected) return { ok: false, code: 'HOST_RESTART_UNAVAILABLE' };
+    if (!WORKSPACE_SHELL_RESTART_MODES.has(mode)) return { ok: false, code: 'HOST_RESTART_INVALID_MODE' };
+    if (!channelOrigin || guestOriginNow() !== channelOrigin) return { ok: false, code: 'HOST_RESTART_UNAVAILABLE' };
+    let executing;
+    try {
+      executing = current.executeJavaScript(WORKSPACE_SHELL_RESTART_GLOBAL + '(' + JSON.stringify(mode) + ')', false);
+    } catch {
+      return { ok: false, code: 'HOST_RESTART_UNAVAILABLE' };
+    }
+    let value;
+    try {
+      value = await executing;
+    } catch {
+      return { ok: false, code: 'HOST_RESTART_UNAVAILABLE' };
+    }
+    if (closed || invalidated || webview !== current || knownLease !== lease) return { ok: false, code: 'HOST_RESTART_UNAVAILABLE' };
+    return restartOutcome(value);
+  };
+
+  return { start, setVisible, focus, resize, getWorkingDirectory, openSession, restartHost, dispose };
 }

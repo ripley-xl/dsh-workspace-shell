@@ -886,6 +886,19 @@ function createTabController(state, lifecycle = {}) {
       const run = entries.get(id)?.current;
       return !!run && current(run) && !!run.handle && call(run.handle, 'resize');
     },
+    // One Host-scoped command on the mounted view. The provider handle owns the
+    // transport; this only proves the same run is still installed, so a caller
+    // that outlived a retry or a close cannot reach the replacement Guest.
+    async invoke(id, method, ...args) {
+      const run = entries.get(id)?.current;
+      if (disposed || !run || !current(run) || !run.handle) throw error('TAB_NOT_READY');
+      let target;
+      try { target = typeof method === 'string' ? run.handle[method] : undefined; } catch { target = undefined; }
+      if (typeof target !== 'function') throw error('TAB_UNSUPPORTED');
+      const value = await target.call(run.handle, ...args);
+      if (!current(run)) throw error('TAB_NOT_READY');
+      return value;
+    },
     dispose() {
       if (disposal) return disposal;
       let done;
@@ -1562,7 +1575,10 @@ const WORKSPACE_SHELL_NOTIFICATION_VERSION = 1;
 // console output; the embedder pulls navigation commands in with executeJavaScript.
 const WORKSPACE_SHELL_NOTIFICATION_MARKER = '__workspace-shell-notification__';
 const WORKSPACE_SHELL_OPEN_SESSION_GLOBAL = '__workspaceShellOpenSession';
+const WORKSPACE_SHELL_RESTART_GLOBAL = '__workspaceShellRestartHost';
+const WORKSPACE_SHELL_RESTART_MODES = new Set(['now', 'wait']);
 const WORKSPACE_SHELL_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const WORKSPACE_SHELL_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
 // A serialized origin: scheme://host[:port] with no credentials, path, query or fragment.
 const WORKSPACE_SHELL_ORIGIN = /^[a-z][a-z0-9+.-]{1,31}:\/\/[^\s/?#@]{1,255}$/;
 
@@ -1638,6 +1654,15 @@ function newRequestId(window) {
 function validCwd(value) {
   if (typeof value !== 'string' || value.length > 4096 || value.includes('\u0000')) return null;
   return value.trim() ? value : null;
+}
+
+// The Guest answers with its own outcome. Anything else (an older Guest without
+// the entry point, a torn-down document) reads as "unavailable".
+function restartOutcome(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: false, code: 'HOST_RESTART_UNAVAILABLE' };
+  if (value.ok === true) return { ok: true };
+  const code = typeof value.code === 'string' && WORKSPACE_SHELL_CODE.test(value.code) ? value.code : 'HOST_RESTART_UNAVAILABLE';
+  return { ok: false, code };
 }
 
 function validLease(value) {
@@ -2085,7 +2110,33 @@ function createDesktopGuest({
     return true;
   };
 
-  return { start, setVisible, focus, resize, getWorkingDirectory, openSession, dispose };
+  // Restart runs inside the Guest: only that document can call the Host's own
+  // restart route, and it reloads itself once the Host is back. The Guest's
+  // return value is the outcome; an older Guest without the entry point rejects
+  // the call, which reads as "unavailable" here.
+  const restartHost = async (mode) => {
+    const current = webview;
+    const lease = knownLease;
+    if (closed || invalidated || !ready || !lease || !current?.isConnected) return { ok: false, code: 'HOST_RESTART_UNAVAILABLE' };
+    if (!WORKSPACE_SHELL_RESTART_MODES.has(mode)) return { ok: false, code: 'HOST_RESTART_INVALID_MODE' };
+    if (!channelOrigin || guestOriginNow() !== channelOrigin) return { ok: false, code: 'HOST_RESTART_UNAVAILABLE' };
+    let executing;
+    try {
+      executing = current.executeJavaScript(WORKSPACE_SHELL_RESTART_GLOBAL + '(' + JSON.stringify(mode) + ')', false);
+    } catch {
+      return { ok: false, code: 'HOST_RESTART_UNAVAILABLE' };
+    }
+    let value;
+    try {
+      value = await executing;
+    } catch {
+      return { ok: false, code: 'HOST_RESTART_UNAVAILABLE' };
+    }
+    if (closed || invalidated || webview !== current || knownLease !== lease) return { ok: false, code: 'HOST_RESTART_UNAVAILABLE' };
+    return restartOutcome(value);
+  };
+
+  return { start, setVisible, focus, resize, getWorkingDirectory, openSession, restartHost, dispose };
 }
 
 return { createDesktopGuest };
@@ -2110,6 +2161,12 @@ const CWD_PARENT_ORIGIN = 'workspaceShellParentOrigin';
 const CWD_REQUEST_ID = /^[A-Za-z0-9_-]{16,128}$/;
 const NOTIFY_EVENT = 'workspace-shell-notification';
 const OPEN_SESSION_EVENT = 'workspace-shell-open-session';
+const RESTART_REQUEST = 'workspace-shell-host-restart-request';
+const RESTART_RESPONSE = 'workspace-shell-host-restart-response';
+const RESTART_VERSION = 1;
+const RESTART_TIMEOUT = 4000;
+const RESTART_MODES = new Set(['now', 'wait']);
+const CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
 const NOTIFY_VERSION = 1;
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const ORIGIN_PATTERN = /^[a-z][a-z0-9+.-]{1,31}:\/\/[^\s/?#@]{1,255}$/;
@@ -2134,6 +2191,15 @@ function validOrigin(value) {
 function validCwd(value) {
   if (typeof value !== 'string' || value.length > MAX_CWD_LENGTH || value.includes('\u0000')) return null;
   return value.trim() ? value : null;
+}
+
+// The Guest answers with its own outcome. Anything else (an older Guest without
+// the entry point, a torn-down document) reads as "unavailable".
+function restartOutcome(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: false, code: 'HOST_RESTART_UNAVAILABLE' };
+  if (value.ok === true) return { ok: true };
+  const code = typeof value.code === 'string' && CODE_PATTERN.test(value.code) ? value.code : 'HOST_RESTART_UNAVAILABLE';
+  return { ok: false, code };
 }
 
 function requestId(window) {
@@ -2178,6 +2244,7 @@ function createBrowserGuest({
   let errorListener = null;
   let messageAttached = false;
   let pending = null;
+  let pendingRestart = null;
 
   const callSafely = (callback) => {
     if (typeof callback !== 'function') return;
@@ -2201,6 +2268,18 @@ function createBrowserGuest({
     const current = pending;
     if (!current) return;
     pending = null;
+    try {
+      timers.clearTimeout(current.timer);
+    } catch {
+      // A dead timer must still settle the pending request.
+    }
+    current.resolve(value);
+  };
+
+  const settleRestart = (value) => {
+    const current = pendingRestart;
+    if (!current) return;
+    pendingRestart = null;
     try {
       timers.clearTimeout(current.timer);
     } catch {
@@ -2240,6 +2319,13 @@ function createBrowserGuest({
         callSafely(() => onGuestEvent?.(data));
         return;
       }
+      const restart = pendingRestart;
+      if (restart) {
+        if (data.type !== RESTART_RESPONSE || data.version !== RESTART_VERSION) return;
+        if (data.requestId !== restart.requestId) return;
+        settleRestart(restartOutcome(data));
+        return;
+      }
       const current = pending;
       if (!current) return;
       if (data.type !== CWD_RESPONSE || data.version !== CWD_VERSION) return;
@@ -2262,6 +2348,7 @@ function createBrowserGuest({
 
   const detachChannel = () => {
     settle(null);
+    settleRestart({ ok: false, code: 'HOST_RESTART_UNAVAILABLE' });
     if (!messageAttached) return;
     messageAttached = false;
     try {
@@ -2476,7 +2563,44 @@ function createBrowserGuest({
     }
   };
 
-  return { start, setVisible, focus, resize, getWorkingDirectory, openSession, dispose };
+  // Restart runs inside the framed Guest: only that document can call the
+  // Host's own restart route, and it reloads itself once the Host is back.
+  const restartHost = (mode) => {
+    if (!sameOrigin() || !target) return Promise.resolve({ ok: false, code: 'HOST_RESTART_UNAVAILABLE' });
+    if (!RESTART_MODES.has(mode)) return Promise.resolve({ ok: false, code: 'HOST_RESTART_INVALID_MODE' });
+    if (pendingRestart) return Promise.resolve({ ok: false, code: 'HOST_RESTART_IN_PROGRESS' });
+    const id = requestId(window);
+    if (!id) return Promise.resolve({ ok: false, code: 'HOST_RESTART_UNAVAILABLE' });
+    let source;
+    try {
+      source = frame.contentWindow;
+    } catch {
+      return Promise.resolve({ ok: false, code: 'HOST_RESTART_UNAVAILABLE' });
+    }
+    if (!source || typeof source.postMessage !== 'function') return Promise.resolve({ ok: false, code: 'HOST_RESTART_UNAVAILABLE' });
+    return new Promise((resolve) => {
+      pendingRestart = { requestId: id, resolve, timer: undefined };
+      try {
+        pendingRestart.timer = timers.setTimeout(() => settleRestart({ ok: false, code: 'HOST_RESTART_UNAVAILABLE' }), RESTART_TIMEOUT);
+      } catch {
+        settleRestart({ ok: false, code: 'HOST_RESTART_UNAVAILABLE' });
+        return;
+      }
+      attachChannel();
+      try {
+        source.postMessage({
+          type: RESTART_REQUEST,
+          version: RESTART_VERSION,
+          requestId: id,
+          mode,
+        }, target.origin);
+      } catch {
+        settleRestart({ ok: false, code: 'HOST_RESTART_UNAVAILABLE' });
+      }
+    });
+  };
+
+  return { start, setVisible, focus, resize, getWorkingDirectory, openSession, restartHost, dispose };
 }
 
 return { createBrowserGuest };
@@ -2754,6 +2878,7 @@ const DEFAULT_LABELS = Object.freeze({
   newTab: '新建工作区',
   close: '关闭页签',
   edit: '编辑页签名称与彩色标记',
+  tabMenu: '页签菜单',
   connected: '已连接',
   disconnected: '未连接',
   moved: '已移动：',
@@ -2893,7 +3018,7 @@ function createChromeTabs(React, deps = {}) {
     const options = props ?? {};
     const {
       tabs, activeId, onSelect, onClose, onAdd, onMove, getStatus, getAppearance, canEdit, onEdit, ids,
-      idPrefix = 'chrome-tab', labels, dragRegion = true, className,
+      idPrefix = 'chrome-tab', labels, dragRegion = true, className, menu: menuConfig,
     } = options;
     const copy = normalizedLabels(labels);
     const list = Array.isArray(tabs) ? tabs : [];
@@ -2903,6 +3028,7 @@ function createChromeTabs(React, deps = {}) {
 
     const [draggingId, setDraggingId] = useState(null);
     const [announcement, setAnnouncement] = useState('');
+    const [menu, setMenu] = useState(null);
     const mounted = useRef(false);
     const scrollerRef = useRef(null);
     const shells = useRef(new Map());
@@ -2915,7 +3041,10 @@ function createChromeTabs(React, deps = {}) {
     const positions = useRef(new Map());
     const order = useRef('');
     const animations = useRef(new Map());
-    latest.current = { tabs: list, activeId, copy, onSelect, onClose, onAdd, onMove, getStatus, getAppearance, canEdit, onEdit, ids };
+    const menuRef = useRef(null);
+    const menuItems = useRef(new Map());
+    const menuFocus = useRef(null);
+    latest.current = { tabs: list, activeId, copy, onSelect, onClose, onAdd, onMove, getStatus, getAppearance, canEdit, onEdit, ids, menu: menuConfig };
 
     // A reorder is the only layout change that should animate. Comparing the id
     // sequence filters out selection, status refreshes and window resizes, which
@@ -3416,6 +3545,149 @@ function createChromeTabs(React, deps = {}) {
       ];
     }
 
+    // A tab menu is supplied by the host: this component owns placement,
+    // keyboard movement and dismissal, never the meaning of an item.
+    function menuItemsFor(tab) {
+      const source = latest.current.menu;
+      if (!source || typeof source.items !== 'function') return [];
+      let value;
+      try { value = source.items(tab); } catch { return []; }
+      if (!Array.isArray(value)) return [];
+      const items = [];
+      for (const item of value) {
+        if (!item || typeof item.id !== 'string' || !item.id) continue;
+        if (typeof item.label !== 'string' || !item.label) continue;
+        items.push({ id: item.id, label: item.label, disabled: item.disabled === true });
+      }
+      return items;
+    }
+
+    function openTabMenu(tab, event) {
+      const items = menuItemsFor(tab);
+      if (!items.length) return;
+      event?.preventDefault?.();
+      event?.stopPropagation?.();
+      const rect = measureRect(shells.current.get(tab.id));
+      const x = coordinate(event?.clientX) || (rect ? rect.left + 12 : 0);
+      const y = coordinate(event?.clientY) || (rect ? rect.bottom : 0);
+      menuFocus.current = bodies.current.get(tab.id) ?? shells.current.get(tab.id) ?? null;
+      if (!mounted.current) return;
+      const index = items.findIndex((item) => !item.disabled);
+      setMenu({ tabId: tab.id, x, y, items, index: index < 0 ? 0 : index });
+    }
+
+    function closeTabMenu(restoreFocus) {
+      if (mounted.current) setMenu(null);
+      if (!restoreFocus) return;
+      const target = menuFocus.current;
+      try { target?.focus?.({ preventScroll: true }); } catch { /* Focus restoration is best effort. */ }
+    }
+
+    function chooseMenuItem(item) {
+      const current = menu;
+      if (!current || !item || item.disabled) return;
+      const tabId = current.tabId;
+      closeTabMenu(false);
+      try { latest.current.menu?.onSelect?.(tabId, item.id); } catch { /* The host reports its own failures. */ }
+    }
+
+    function moveMenuIndex(step) {
+      if (!menu) return;
+      const count = menu.items.length;
+      let index = menu.index;
+      for (let attempt = 0; attempt < count; attempt += 1) {
+        index = (index + step + count) % count;
+        if (!menu.items[index].disabled) {
+          setMenu({ ...menu, index });
+          return;
+        }
+      }
+    }
+
+    function onMenuKeyDown(event) {
+      if (!menu) return;
+      const key = event?.key;
+      if (key === 'Escape') {
+        event?.preventDefault?.();
+        event?.stopPropagation?.();
+        closeTabMenu(true);
+        return;
+      }
+      if (key === 'ArrowDown' || key === 'ArrowUp') {
+        event?.preventDefault?.();
+        event?.stopPropagation?.();
+        moveMenuIndex(key === 'ArrowDown' ? 1 : -1);
+        return;
+      }
+      if (key === 'Home' || key === 'End') {
+        event?.preventDefault?.();
+        event?.stopPropagation?.();
+        const enabled = menu.items.map((item, index) => (item.disabled ? -1 : index)).filter((index) => index >= 0);
+        const next = key === 'Home' ? enabled[0] : enabled[enabled.length - 1];
+        if (next !== undefined) setMenu({ ...menu, index: next });
+        return;
+      }
+      if (key === 'Enter' || key === ' ') {
+        event?.preventDefault?.();
+        event?.stopPropagation?.();
+        chooseMenuItem(menu.items[menu.index]);
+        return;
+      }
+      if (key === 'Tab') {
+        event?.preventDefault?.();
+        closeTabMenu(true);
+      }
+    }
+
+    // The menu is placed once, then clamped to the window and focused on the
+    // active item. Later index changes only move focus.
+    useLayout(() => {
+      if (!menu) return;
+      const node = menuRef.current;
+      const rect = measureRect(node);
+      const winW = coordinate(win?.innerWidth);
+      const winH = coordinate(win?.innerHeight);
+      let left = menu.x;
+      let top = menu.y;
+      if (rect) {
+        if (winW > 0 && left + rect.width > winW - 4) left = Math.max(4, winW - rect.width - 4);
+        if (winH > 0 && top + rect.height > winH - 4) top = Math.max(4, winH - rect.height - 4);
+        if (node?.style) {
+          node.style.left = left + 'px';
+          node.style.top = top + 'px';
+        }
+      }
+      const target = menuItems.current.get(menu.index);
+      try { target?.focus?.({ preventScroll: true }); } catch { /* Keyboard users can still tab in. */ }
+    }, [menu]);
+
+    useEffect(() => {
+      if (!menu) return undefined;
+      const onPointer = (event) => {
+        const node = menuRef.current;
+        const target = event?.target;
+        if (node && target && typeof node.contains === 'function' && node.contains(target)) return;
+        closeTabMenu(false);
+      };
+      const dismiss = () => closeTabMenu(false);
+      try { doc?.addEventListener?.('pointerdown', onPointer, true); } catch { /* Without a document the menu closes on selection only. */ }
+      try { win?.addEventListener?.('resize', dismiss); } catch { /* Best effort. */ }
+      try { win?.addEventListener?.('blur', dismiss); } catch { /* Best effort. */ }
+      try { doc?.addEventListener?.('scroll', dismiss, true); } catch { /* Best effort. */ }
+      return () => {
+        try { doc?.removeEventListener?.('pointerdown', onPointer, true); } catch { /* Best effort. */ }
+        try { win?.removeEventListener?.('resize', dismiss); } catch { /* Best effort. */ }
+        try { win?.removeEventListener?.('blur', dismiss); } catch { /* Best effort. */ }
+        try { doc?.removeEventListener?.('scroll', dismiss, true); } catch { /* Best effort. */ }
+      };
+    }, [menu]);
+
+    // A menu for a tab that has just been closed is stale.
+    useEffect(() => {
+      if (!menu) return;
+      if (!list.some((tab) => tab.id === menu.tabId)) setMenu(null);
+    }, [menu, list]);
+
     function renderTab(tab) {
       const selected = tab.id === activeId;
       const tabbable = tab.id === tabbableId;
@@ -3450,6 +3722,7 @@ function createChromeTabs(React, deps = {}) {
         onPointerDown: (event) => onPointerDown(tab, event),
         onLostPointerCapture: (event) => onLostPointerCapture(event),
         onClick: (event) => onTabClick(tab, event),
+        onContextMenu: (event) => openTabMenu(tab, event),
         onDoubleClick: (event) => {
           if (!editable || suppressClick.current) return;
           if (isControlNode(event?.target)) return;
@@ -3539,6 +3812,43 @@ function createChromeTabs(React, deps = {}) {
     }
 
     const ghost = renderGhost();
+    const menuView = menu ? h('div', {
+      key: 'menu',
+      className: 'ct-menu',
+      role: 'menu',
+      'aria-label': copy.tabMenu,
+      'data-chrome-tab-menu': '',
+      'data-menu-tab': String(menu.tabId),
+      ref: menuRef,
+      style: { left: `${menu.x}px`, top: `${menu.y}px`, WebkitAppRegion: 'no-drag' },
+      onKeyDown: onMenuKeyDown,
+      onPointerDown: (event) => event?.stopPropagation?.(),
+      onContextMenu: (event) => event?.preventDefault?.(),
+    }, menu.items.map((item, index) => h('button', {
+      key: item.id,
+      type: 'button',
+      role: 'menuitem',
+      className: 'ct-menu-item',
+      'data-menu-item': item.id,
+      'data-menu-index': String(index),
+      'aria-disabled': item.disabled ? 'true' : undefined,
+      disabled: item.disabled === true,
+      tabIndex: index === menu.index ? 0 : -1,
+      ref: (node) => {
+        if (node) menuItems.current.set(index, node);
+        else menuItems.current.delete(index);
+      },
+      onMouseEnter: () => {
+        if (item.disabled || !menu) return;
+        if (menu.index === index) return;
+        setMenu((value) => (value ? { ...value, index } : value));
+      },
+      onClick: (event) => {
+        event?.stopPropagation?.();
+        event?.preventDefault?.();
+        chooseMenuItem(item);
+      },
+    }, item.label))) : null;
     return h('div', {
       className: typeof className === 'string' && className.trim() ? `ct-root ${className.trim()}` : 'ct-root',
       'data-chrome-tabs': '',
@@ -3560,6 +3870,7 @@ function createChromeTabs(React, deps = {}) {
       onLostPointerCapture,
     }, list.map(renderTab)),
     ghost,
+    menuView,
     typeof onAdd === 'function' ? h('button', {
       type: 'button',
       className: 'ct-add',
@@ -3616,6 +3927,7 @@ const css = [
   '--ct-veil:color-mix(in srgb, var(--ct-fg) 14%, transparent);',
   '--ct-ghost-bg:var(--ct-tab-active-bg);',
   '--ct-ghost-shadow:var(--dsw-shadow-lv2, 0 12px 28px color-mix(in srgb, var(--ct-fg) 18%, transparent));',
+  '--ct-menu-bg:var(--dsw-alias-bg-elevated, var(--ct-tab-active-bg));',
   'box-sizing:border-box;display:flex;align-items:stretch;gap:2px;height:var(--ct-height);min-width:0;max-width:100%;padding:0 var(--ct-inline-padding);background:var(--ct-bar-bg);color:var(--ct-fg-muted);font-family:inherit;font-size:var(--ct-font-size);line-height:1;user-select:none;-webkit-user-select:none;position:relative;',
   '}',
   '.ct-tabs{display:flex;align-items:flex-end;gap:var(--ct-gap);flex:0 1 auto;min-width:0;height:100%;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;overscroll-behavior-x:contain;touch-action:pan-x;-webkit-app-region:no-drag}',
@@ -3654,6 +3966,11 @@ const css = [
   '.ct-add:hover{background:var(--ct-hover-bg);color:var(--ct-fg)}',
   '.ct-add:active{background:var(--ct-press-bg)}',
   '.ct-add:focus-visible{outline:var(--ct-focus-width) solid var(--ct-focus-ring);outline-offset:0}',
+  '.ct-menu{position:fixed;z-index:60;display:flex;flex-direction:column;min-width:168px;max-width:280px;padding:4px;box-sizing:border-box;border-radius:var(--ct-radius);background:var(--ct-menu-bg);color:var(--ct-fg);box-shadow:var(--ct-ghost-shadow),0 0 0 1px var(--ct-veil);font-family:inherit;font-size:var(--ct-font-size);line-height:1.4;-webkit-app-region:no-drag}',
+  '.ct-menu-item{display:block;width:100%;box-sizing:border-box;padding:6px 10px;border:0;border-radius:var(--ct-radius-sm);background:transparent;color:inherit;font:inherit;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}',
+  '.ct-menu-item:hover:not(:disabled),.ct-menu-item:focus:not(:disabled){background:var(--ct-hover-bg);color:var(--ct-fg);outline:none}',
+  '.ct-menu-item:active:not(:disabled){background:var(--ct-press-bg)}',
+  '.ct-menu-item:disabled{opacity:.45;cursor:default}',
   '.ct-blank{flex:1 1 auto;min-width:8px;align-self:stretch;-webkit-app-region:drag}',
   '.ct-sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}',
   '@keyframes ct-ghost-in{from{opacity:0}to{opacity:1}}',
@@ -4106,6 +4423,20 @@ function createWorkspaceClient(deps) {
     if (!await activate('local')) throw error('WORKSPACE_INPUT_GATE_FAILED');
     await Promise.all(tabs.getSnapshot().tabs.filter((tab) => tab.closable).map((tab) => close(tab.id)));
   }
+  // The Guest performs the restart on the Host's own origin: it keeps the port,
+  // reports busy work, and reloads the page once the Host is back. The Shell
+  // only owns the entry (the tab menu) and the transport to that Guest.
+  async function restartTab(tabId, mode) {
+    if (disposed) throw error('WORKSPACE_DISPOSED');
+    const tab = tabs.getSnapshot().tabs.find((item) => item.id === tabId);
+    if (!tab) throw error('TAB_NOT_FOUND');
+    if (tab.kind !== 'profile-ui' || tab.id === 'local') throw error('TAB_RESTART_UNSUPPORTED');
+    if (mode !== 'now' && mode !== 'wait') throw error('TAB_RESTART_INVALID_MODE');
+    const value = await tabs.invoke(tabId, 'restartHost', mode);
+    if (value?.ok === true) return true;
+    const code = typeof value?.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(value.code) ? value.code : 'HOST_RESTART_UNAVAILABLE';
+    throw Object.assign(new Error(code), { code });
+  }
   const offTabs = tabs.subscribe(() => {
     const snapshot = tabs.getSnapshot();
     let orderRemoved = false;
@@ -4316,7 +4647,22 @@ function createWorkspaceClient(deps) {
     };
     options.signal?.addEventListener('abort', dispose, { once: true });
     if (options.signal?.aborted) void dispose();
-    return { dispose, setVisible(value) { shown = value === true; guest?.setVisible(shown); }, focus() { if (!closed && shown) guest?.focus(); }, resize() { guest?.resize(); } };
+    return {
+      dispose,
+      setVisible(value) { shown = value === true; guest?.setVisible(shown); },
+      focus() { if (!closed && shown) guest?.focus(); },
+      resize() { guest?.resize(); },
+      // The Guest owns the restart; the view only forwards the mode and
+      // normalizes a missing Guest or a torn-down transport to a safe code.
+      restartHost(mode) {
+        if (closed || !guest || typeof guest.restartHost !== 'function') return Promise.resolve({ ok: false, code: 'HOST_RESTART_UNAVAILABLE' });
+        try {
+          return Promise.resolve(guest.restartHost(mode)).catch(() => ({ ok: false, code: 'HOST_RESTART_UNAVAILABLE' }));
+        } catch {
+          return Promise.resolve({ ok: false, code: 'HOST_RESTART_UNAVAILABLE' });
+        }
+      },
+    };
   }
   if (canWeb) {
     registerProvider('local-web', { kind: 'profile-ui', open: webView });
@@ -4704,7 +5050,7 @@ function createWorkspaceClient(deps) {
     const open = guestOpeners.get(key);
     return typeof open === 'function' ? open(sessionId) === true : false;
   }
-  return Object.freeze({ tabs, info, connections, sshExtension, registerSshExtension, sessionNavigationExtension, registerSessionNavigation, sessionTabs, openSessionHost, openSessionInTab, timing, canWeb, canTui, refresh, registerProvider, open, activate, setOverlay, close, closeViews, readDefaultCwd,
+  return Object.freeze({ tabs, info, connections, sshExtension, registerSshExtension, sessionNavigationExtension, registerSessionNavigation, sessionTabs, openSessionHost, openSessionInTab, timing, canWeb, canTui, refresh, registerProvider, open, activate, setOverlay, close, closeViews, readDefaultCwd, restartTab,
     appearance, appearanceColors, getTabAppearance, canCustomizeTab, setTabAppearance,
     openLauncher, launcherSource, readLauncherCwd, openLauncherWeb, openLauncherTui, moveTab,
     openWeb, openTui, getTabStatus, sshRequest, reportSsh, openSshWeb, closeSshViews, sshViewCounts,
@@ -6238,6 +6584,11 @@ function createFrameViews(React, deps) {
   };
   const activeLocale = ctx.locale?.getSnapshot?.().active || document.documentElement.lang || 'zh';
   const english = !String(activeLocale).toLowerCase().startsWith('zh');
+  const tabMenuCopy = english ? {
+    restartWait: 'Restart when idle', restartNow: 'Restart now', label: 'Tab menu',
+  } : {
+    restartWait: '等空闲后重启', restartNow: '立即重启', label: '页签菜单',
+  };
   const tabEditorCopy = english ? {
     title: 'Customize tab', original: 'Original name', name: 'Display name',
     hint: 'Leave the name empty and choose no marker to restore the default.', separator: ': ',
@@ -6262,6 +6613,17 @@ function createFrameViews(React, deps) {
       TAB_APPEARANCE_UNAVAILABLE: 'This tab has no stable identity, so its display cannot be customized.',
       TAB_APPEARANCE_INVALID: 'The tab name or color is invalid.',
       TAB_APPEARANCE_UNSAVED: 'The customization could not be saved.',
+      TAB_NOT_READY: 'The tab is not ready yet.',
+      TAB_UNSUPPORTED: 'The Guest in this tab does not support this action.',
+      TAB_RESTART_UNSUPPORTED: 'This tab has no restartable Web Host.',
+      TAB_RESTART_INVALID_MODE: 'The restart mode is not recognized.',
+      HOST_RESTART_UNAVAILABLE: 'This tab cannot restart its Host: the Guest is missing or the Host is unreachable.',
+      HOST_RESTART_SUPERVISED: 'This Host is managed by a supervisor; restart it from the manager page.',
+      HOST_RESTART_DISABLED: 'Restart is disabled for this profile.',
+      HOST_RESTART_BUSY: 'The Host has running work; choose "Restart when idle".',
+      HOST_RESTART_COOLDOWN: 'The Host restarted just now; try again in a few seconds.',
+      HOST_RESTART_INSTALLING: 'The Host is installing plugins; try again when it finishes.',
+      HOST_RESTART_IN_PROGRESS: 'A restart is already running in this tab.',
     } : {
       TUI_PROFILE_CONFLICT: '该 profile 同时声明了 DSH TUI 和 Pi TUI，请只保留一种终端实现。',
       PROFILE_HOST_CONFLICT: '该 profile 已有其它运行中的 Host，请先关闭或复用现有实例。',
@@ -6273,6 +6635,17 @@ function createFrameViews(React, deps) {
       TAB_APPEARANCE_UNAVAILABLE: '该页签没有可保存的稳定身份，无法自定义显示。',
       TAB_APPEARANCE_INVALID: '页签名称或颜色无效。',
       TAB_APPEARANCE_UNSAVED: '自定义显示未能保存。',
+      TAB_NOT_READY: '该页签还没有就绪。',
+      TAB_UNSUPPORTED: '该页签的 Guest 不支持这个操作。',
+      TAB_RESTART_UNSUPPORTED: '该页签背后没有可重启的 Web Host。',
+      TAB_RESTART_INVALID_MODE: '重启方式无效。',
+      HOST_RESTART_UNAVAILABLE: '该页签无法重启 Host：Guest 未加载或 Host 不可达。',
+      HOST_RESTART_SUPERVISED: '该 Host 由 supervisor 管理，请在管理页重启。',
+      HOST_RESTART_DISABLED: '此 profile 关闭了重启。',
+      HOST_RESTART_BUSY: 'Host 还有运行中的任务，请选择「等空闲后重启」。',
+      HOST_RESTART_COOLDOWN: '刚重启过，请稍等几秒。',
+      HOST_RESTART_INSTALLING: 'Host 正在安装插件，请等安装结束后再试。',
+      HOST_RESTART_IN_PROGRESS: '该页签已经在重启。',
     };
     return messages[safe] ? `${messages[safe]} [${safe}]` : safe;
   }
@@ -6709,12 +7082,28 @@ function createFrameViews(React, deps) {
     const statusOf = React.useCallback((tab) => {
       try { return workspace?.getTabStatus?.(tab) ?? null; } catch { return null; }
     }, [workspace]);
+    // The Guest owns the restart itself; the tab menu only supplies the entry.
+    // Selecting the tab first keeps the Guest's "restarting" overlay visible.
+    const restartTab = React.useCallback((tabId, mode) => {
+      if (!workspace) return;
+      void (async () => {
+        try { await workspace.activate(tabId); } catch { /* The command still runs. */ }
+        await run(`restart:${tabId}`, () => workspace.restartTab(tabId, mode));
+      })();
+    }, [workspace, run]);
+    const tabMenu = workspace ? {
+      items: (tab) => (tab.kind === 'profile-ui' && tab.id !== 'local' ? [
+        { id: 'wait', label: tabMenuCopy.restartWait, disabled: tab.phase !== 'ready' },
+        { id: 'now', label: tabMenuCopy.restartNow, disabled: tab.phase !== 'ready' },
+      ] : []),
+      onSelect: (tabId, itemId) => restartTab(tabId, itemId === 'wait' ? 'wait' : 'now'),
+    } : undefined;
     const stripProps = {
       tabs, activeId, getStatus: statusOf, getAppearance: appearanceOf,
-      labels: { edit: english ? 'Edit tab name and color' : '编辑页签名称与彩色标记' },
+      labels: { edit: english ? 'Edit tab name and color' : '编辑页签名称与彩色标记', tabMenu: tabMenuCopy.label },
       onSelect: (id) => void selectTab(id),
       onClose: (id) => { const tab = tabs.find((item) => item.id === id); if (tab) void closeTab(tab); },
-      ...(workspace ? { onAdd: () => void addLauncher(), onMove: moveTab, onEdit: editTab, canEdit: canEditTab } : {}),
+      ...(workspace ? { onAdd: () => void addLauncher(), onMove: moveTab, onEdit: editTab, canEdit: canEditTab, menu: tabMenu } : {}),
     };
     const tabsView = ChromeTabStrip
       ? h(ChromeTabStrip, stripProps)
@@ -6986,6 +7375,7 @@ return {
       registerSessionNavigation: workspace.registerSessionNavigation,
       sessionTabs: workspace.sessionTabs, openSessionHost: workspace.openSessionHost,
       close: workspace.close, retry: workspace.retry, move: workspace.moveTab, openLauncher: workspace.openLauncher,
+      restartTab: workspace.restartTab,
     }));
     const views = createFrameViews(React, {
       solveFrame, createPointerResize, css: shellCss, classes, ctx, document, window, workspace, workspaceSelection,

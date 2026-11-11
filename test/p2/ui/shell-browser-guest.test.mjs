@@ -82,6 +82,7 @@ function framingWindow() {
     listenerCount(name = 'message') { return listeners.get(name)?.size ?? 0; },
     fireTimers() { for (const [id, timer] of [...timers]) { timers.delete(id); timer.fn(); } },
     get timerCount() { return timers.size; },
+    get timerDelays() { return [...timers.values()].map((timer) => timer.delay); },
     get uuids() { return uuids; },
   };
   return window;
@@ -580,4 +581,102 @@ test('openSession posts one origin-targeted request and rejects unusable Session
   assert.equal(guest.openSession(''), false);
   await guest.dispose();
   assert.equal(guest.openSession(sessionId), false);
+});
+
+test('restartHost is unavailable before ready, after navigation, and after dispose, and rejects unknown modes', async () => {
+  const mock = harness();
+  const guest = createBrowserGuest(options(mock));
+  assert.deepEqual(await guest.restartHost('now'), { ok: false, code: 'HOST_RESTART_UNAVAILABLE' });
+  await guest.start();
+  const element = mock.elements[0];
+  assert.deepEqual(await guest.restartHost('later'), { ok: false, code: 'HOST_RESTART_UNAVAILABLE' }, 'readiness precedes the mode check');
+  element.emit('load');
+  for (const mode of ['later', 'NOW', '', undefined, null, 42]) {
+    assert.deepEqual(await guest.restartHost(mode), { ok: false, code: 'HOST_RESTART_INVALID_MODE' }, String(mode));
+  }
+  assert.deepEqual(element.posts, undefined, 'a rejected call never posts');
+  element.src = 'http://127.0.0.1:4567/elsewhere';
+  assert.deepEqual(await guest.restartHost('now'), { ok: false, code: 'HOST_RESTART_UNAVAILABLE' });
+  await guest.dispose();
+  assert.deepEqual(await guest.restartHost('now'), { ok: false, code: 'HOST_RESTART_UNAVAILABLE' });
+});
+
+test('restartHost posts one origin-targeted request and resolves with the matching reply', async () => {
+  const mock = harness();
+  const guest = createBrowserGuest(options(mock));
+  await guest.start();
+  const element = mock.elements[0];
+  element.emit('load');
+  const restarting = guest.restartHost('wait');
+  const posted = element.posts.at(-1);
+  assert.deepEqual(Object.keys(posted.message).sort(), ['mode', 'requestId', 'type', 'version']);
+  assert.equal(posted.message.type, 'workspace-shell-host-restart-request');
+  assert.equal(posted.message.version, 1);
+  assert.equal(posted.message.mode, 'wait');
+  assert.match(posted.message.requestId, /^[A-Za-z0-9_-]{16,128}$/);
+  assert.equal(posted.targetOrigin, 'http://127.0.0.1:4567');
+  assert.deepEqual(await guest.restartHost('now'), { ok: false, code: 'HOST_RESTART_IN_PROGRESS' });
+
+  const reply = (data) => mock.window.deliver({
+    data,
+    origin: 'http://127.0.0.1:4567',
+    source: element.contentWindow,
+  });
+  const base = { type: 'workspace-shell-host-restart-response', version: 1 };
+  reply({ ...base, requestId: 'stale-request-id-0000', ok: true });
+  reply({ ...base, version: 2, requestId: posted.message.requestId, ok: true });
+  reply({ type: 'workspace-shell-cwd-response', version: 1, requestId: posted.message.requestId, ok: true });
+  reply({ ...base, requestId: posted.message.requestId, ok: false, code: 'HOST_RESTART_BUSY' });
+  assert.deepEqual(await restarting, { ok: false, code: 'HOST_RESTART_BUSY' });
+  assert.equal(mock.window.timerCount, 0);
+  await guest.dispose();
+});
+
+test('restartHost maps unusable replies to HOST_RESTART_UNAVAILABLE and clears the pending slot', async () => {
+  const mock = harness();
+  const guest = createBrowserGuest(options(mock));
+  await guest.start();
+  const element = mock.elements[0];
+  element.emit('load');
+  const replies = [null, 'ok', 42, { ok: false }, { ok: false, code: 'not a code' }, { ok: 'true' }];
+  for (const data of replies) {
+    const restarting = guest.restartHost('now');
+    const request = element.posts.at(-1).message;
+    mock.window.deliver({
+      data: { type: 'workspace-shell-host-restart-response', version: 1, requestId: request.requestId, ...data },
+      origin: 'http://127.0.0.1:4567',
+      source: element.contentWindow,
+    });
+    assert.deepEqual(await restarting, { ok: false, code: 'HOST_RESTART_UNAVAILABLE' }, JSON.stringify(data));
+    assert.equal(mock.window.timerCount, 0);
+  }
+  const accepted = guest.restartHost('now');
+  const request = element.posts.at(-1).message;
+  mock.window.deliver({
+    data: { type: 'workspace-shell-host-restart-response', version: 1, requestId: request.requestId, ok: true },
+    origin: 'http://127.0.0.1:4567',
+    source: element.contentWindow,
+  });
+  assert.deepEqual(await accepted, { ok: true });
+  await guest.dispose();
+});
+
+test('the restart request times out after four seconds, and dispose settles it early', async () => {
+  const mock = harness();
+  const guest = createBrowserGuest(options(mock));
+  await guest.start();
+  const element = mock.elements[0];
+  element.emit('load');
+  const restarting = guest.restartHost('now');
+  assert.equal(mock.window.timerCount, 1);
+  assert.deepEqual(mock.window.timerDelays, [4000]);
+  mock.window.fireTimers();
+  assert.deepEqual(await restarting, { ok: false, code: 'HOST_RESTART_UNAVAILABLE' });
+  assert.equal(mock.window.timerCount, 0);
+
+  const late = guest.restartHost('wait');
+  await guest.dispose();
+  assert.deepEqual(await late, { ok: false, code: 'HOST_RESTART_UNAVAILABLE' });
+  assert.equal(mock.window.timerCount, 0);
+  assert.equal(mock.window.listenerCount(), 0);
 });

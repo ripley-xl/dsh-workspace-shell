@@ -15,6 +15,12 @@ const CWD_PARENT_ORIGIN = 'workspaceShellParentOrigin';
 const CWD_REQUEST_ID = /^[A-Za-z0-9_-]{16,128}$/;
 const NOTIFY_EVENT = 'workspace-shell-notification';
 const OPEN_SESSION_EVENT = 'workspace-shell-open-session';
+const RESTART_REQUEST = 'workspace-shell-host-restart-request';
+const RESTART_RESPONSE = 'workspace-shell-host-restart-response';
+const RESTART_VERSION = 1;
+const RESTART_TIMEOUT = 4000;
+const RESTART_MODES = new Set(['now', 'wait']);
+const CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
 const NOTIFY_VERSION = 1;
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const ORIGIN_PATTERN = /^[a-z][a-z0-9+.-]{1,31}:\/\/[^\s/?#@]{1,255}$/;
@@ -39,6 +45,15 @@ function validOrigin(value) {
 function validCwd(value) {
   if (typeof value !== 'string' || value.length > MAX_CWD_LENGTH || value.includes('\u0000')) return null;
   return value.trim() ? value : null;
+}
+
+// The Guest answers with its own outcome. Anything else (an older Guest without
+// the entry point, a torn-down document) reads as "unavailable".
+function restartOutcome(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: false, code: 'HOST_RESTART_UNAVAILABLE' };
+  if (value.ok === true) return { ok: true };
+  const code = typeof value.code === 'string' && CODE_PATTERN.test(value.code) ? value.code : 'HOST_RESTART_UNAVAILABLE';
+  return { ok: false, code };
 }
 
 function requestId(window) {
@@ -83,6 +98,7 @@ export function createBrowserGuest({
   let errorListener = null;
   let messageAttached = false;
   let pending = null;
+  let pendingRestart = null;
 
   const callSafely = (callback) => {
     if (typeof callback !== 'function') return;
@@ -106,6 +122,18 @@ export function createBrowserGuest({
     const current = pending;
     if (!current) return;
     pending = null;
+    try {
+      timers.clearTimeout(current.timer);
+    } catch {
+      // A dead timer must still settle the pending request.
+    }
+    current.resolve(value);
+  };
+
+  const settleRestart = (value) => {
+    const current = pendingRestart;
+    if (!current) return;
+    pendingRestart = null;
     try {
       timers.clearTimeout(current.timer);
     } catch {
@@ -145,6 +173,13 @@ export function createBrowserGuest({
         callSafely(() => onGuestEvent?.(data));
         return;
       }
+      const restart = pendingRestart;
+      if (restart) {
+        if (data.type !== RESTART_RESPONSE || data.version !== RESTART_VERSION) return;
+        if (data.requestId !== restart.requestId) return;
+        settleRestart(restartOutcome(data));
+        return;
+      }
       const current = pending;
       if (!current) return;
       if (data.type !== CWD_RESPONSE || data.version !== CWD_VERSION) return;
@@ -167,6 +202,7 @@ export function createBrowserGuest({
 
   const detachChannel = () => {
     settle(null);
+    settleRestart({ ok: false, code: 'HOST_RESTART_UNAVAILABLE' });
     if (!messageAttached) return;
     messageAttached = false;
     try {
@@ -381,5 +417,42 @@ export function createBrowserGuest({
     }
   };
 
-  return { start, setVisible, focus, resize, getWorkingDirectory, openSession, dispose };
+  // Restart runs inside the framed Guest: only that document can call the
+  // Host's own restart route, and it reloads itself once the Host is back.
+  const restartHost = (mode) => {
+    if (!sameOrigin() || !target) return Promise.resolve({ ok: false, code: 'HOST_RESTART_UNAVAILABLE' });
+    if (!RESTART_MODES.has(mode)) return Promise.resolve({ ok: false, code: 'HOST_RESTART_INVALID_MODE' });
+    if (pendingRestart) return Promise.resolve({ ok: false, code: 'HOST_RESTART_IN_PROGRESS' });
+    const id = requestId(window);
+    if (!id) return Promise.resolve({ ok: false, code: 'HOST_RESTART_UNAVAILABLE' });
+    let source;
+    try {
+      source = frame.contentWindow;
+    } catch {
+      return Promise.resolve({ ok: false, code: 'HOST_RESTART_UNAVAILABLE' });
+    }
+    if (!source || typeof source.postMessage !== 'function') return Promise.resolve({ ok: false, code: 'HOST_RESTART_UNAVAILABLE' });
+    return new Promise((resolve) => {
+      pendingRestart = { requestId: id, resolve, timer: undefined };
+      try {
+        pendingRestart.timer = timers.setTimeout(() => settleRestart({ ok: false, code: 'HOST_RESTART_UNAVAILABLE' }), RESTART_TIMEOUT);
+      } catch {
+        settleRestart({ ok: false, code: 'HOST_RESTART_UNAVAILABLE' });
+        return;
+      }
+      attachChannel();
+      try {
+        source.postMessage({
+          type: RESTART_REQUEST,
+          version: RESTART_VERSION,
+          requestId: id,
+          mode,
+        }, target.origin);
+      } catch {
+        settleRestart({ ok: false, code: 'HOST_RESTART_UNAVAILABLE' });
+      }
+    });
+  };
+
+  return { start, setVisible, focus, resize, getWorkingDirectory, openSession, restartHost, dispose };
 }

@@ -9,7 +9,7 @@ const outputRoot = outputFlag < 0 ? root : pathToFileURL(resolve(process.argv[ou
 // Same concatenated, import-free build as the host Client: the guest bundle
 // shares the session-host Client sources with the host package.
 const names = [
-  'notification', 'cwd', 'clipboard', 'restart-ui', '../session-host/submissions', '../session-host/controller', '../session-host/ui', 'entry',
+  'notification', 'cwd', 'clipboard', 'host-restart-control', '../session-host/submissions', '../session-host/controller', '../session-host/ui', 'entry',
 ];
 const modules = [];
 for (const name of names) modules.push(await readFile(new URL('src/' + name + '.js', root), 'utf8'));

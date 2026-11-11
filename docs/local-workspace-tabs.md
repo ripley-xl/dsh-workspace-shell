@@ -23,6 +23,7 @@
 - 页签可设置自定义显示名和五色标记（蓝、绿、橙、红、灰，或无）。悬停页签上的铅笔按钮、双击页签或按 F2 打开编辑器；名称留空并选择“无”保存即恢复默认。
 - 自定义信息按与顺序相同的页签身份保存，同一身份的多个视图共享；Local 可编辑，launcher 和没有稳定身份的扩展页签不可编辑。自定义名称只替换页签文字、悬浮提示、无障碍名称和窗口标题，不修改原始 tab 标题，也不写 SSH 主机记录或连接别名。
 - 自定义信息落在 `<DSH_HOME>/storages/workspace_shell/tab_appearance/default.json`，最多 64 条，只含身份、名称和颜色。
+- 页签右键菜单：Web Host 页签（`profile-ui`，排除 Local）提供「等空闲后重启」「立即重启」，页签未 ready 时两项置灰。选中后先激活该页签，再由该页签的 Guest 调用 Host 自己的重启路由；Guest 页面不再有侧栏底部按钮或设置页入口（Shell `0.5.77` / Guest `0.6.2`，协议见[页签右键重启](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/docs/tab-restart-menu-design.md)）。
 - 页签文字宽度：页签最小宽度 88px、最大宽度 360px（窄窗口 72/240px）；SSH 连接名在页签文字中的份额上限由 40% 提高到 60%（窄窗口 50%），`anydev` 这类短名不再被截断；超长自定义名仍以省略号收尾。
 - 右侧栏恢复：右栏 Slot 的 occupant 一次渲染异常会被 DSH 槽位核心永久移出（abdication），而右侧栏 store 仍报告 expanded，页头只在 collapsed 时渲染的展开按钮随之消失，面板不可达。Shell `0.5.17` 观察 `rightbar` 与 `rightbar.session`，发现「有注册项但全部被移出」时把条目从 abdication 集合恢复并 markDirty，让新的错误边界按当前状态重渲染；最多重试 3 次（120/400/1200ms），健康保持 2s 后重置额度，超过额度则收起右栏让页头按钮重新可用。
 初次读取不可用时本次会话不显示编辑入口；保存失败时保留原显示并报安全错误码；损坏记录按无自定义处理，下一次保存覆盖。
@@ -109,6 +110,8 @@ node controller/scripts/build-runtime.mjs --platform linux --arch x64 --libc gli
 - [SSH Remote manager 0.2.0](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/artifacts/workspace-tabs/release-cwd/local-dsh-ssh-remote-0.2.0.tgz)
 
 ## 验证结果
+
+2026-11-11 页签右键重启：Shell `0.5.77` / Guest `0.6.2` 把 Web Host 重启入口从 Guest 页面（侧栏底部 ⟳ 与设置页那一行）移到页签右键菜单；菜单提供「等空闲后重启」「立即重启」，页签未 ready 时置灰，选中后先激活页签，再由该页签的 Guest 调用 Host 自己的重启路由。Guest 页面只保留执行、状态覆盖层和重启后自动 reload。新增 48 项用例：`shell-chrome-tabs` 菜单 6 项、`shell-frame` 2 项、`shell-tab-controller` 4 项、`shell-workspace-client` 5 项、`shell-desktop-guest` 3 项、`shell-browser-guest` 4 项、`shell-guest-restart-control` 24 项；全量 **1080 项，1077 通过，0 失败，3 跳过**（`--test-concurrency=4`）。本机 Desktop 未重启，未在真实窗口验收；安装包见 [release-tab-restart-0.5.77](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/artifacts/workspace-tabs/release-tab-restart-0.5.77)。
 
 2026-11-08 页签文字宽度与右栏恢复：Shell `0.5.17` 把页签最小/最大宽度从 64/240px 提升到 88/360px（窄窗口 56/160 → 72/240），SSH 连接名份额从 40% 提升到 60%（窄窗口 32% → 50%），`anydev` 这类短名可完整显示。右栏按钮消失的根因是 `rightbar` Slot occupant 在一次渲染异常后被槽位核心 abdicate；历史渲染器崩溃记录里对应报错为 `Sidebar Session view reference is no longer owned`（右侧栏 SessionView 在 commit 阶段 mount 晚于视图 retire）。`0.5.17` 增加有界恢复：检测到右栏条目全部被移出时恢复并重渲染，最多 3 次；失败则收起右栏让页头展开按钮恢复。安装前 live Client Inspect 显示 `rightbar` occupant `active:false`、`browserFrames:0`；热重载到 `0.5.17` 后同一页面恢复为 `active:true`、`browserFrames:1`，右栏面板无需刷新重新出现，截图见 [恢复后的右栏](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/artifacts/workspace-tabs/release-tab-label-sidebar-0.5.17/rightbar-restored.png)。新增 `test/p2/ui/shell-slot-recovery.test.mjs` 6 项，`shell-chrome-tabs` 用例更新为 27 项；全量 **1040 项，1034 通过，0 失败，6 跳过**（`--test-concurrency=4`）。
 2026-11-08 修复热重载后外观丢失：Desktop 加载 `0.5.15` 后，插件重载时旧 Shell 实例没有关闭 `workspace_shell` 存储域；新实例打开同一域失败，外观读取降级为不可用，页签编辑按钮和色条消失。`0.5.16` 在插件卸载时关闭自建域，并在域已被旧实例占用时通过 `storage.get()` 复用同一句柄；安装后无需重启 Desktop，Local 的蓝色标记和编辑按钮即恢复。截图见 [恢复后的 Desktop 页签条](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/artifacts/workspace-tabs/release-tab-appearance-reload-0.5.16-bundle/desktop-restored.png)。新增 3 个 store 用例覆盖关闭、热重载复用和 in-flight open。全量 **1034 项，1028 通过，0 失败，6 跳过**（`--test-concurrency=4`）。

@@ -125,7 +125,11 @@
 
 ## 8. 客户端（Guest 页）
 
-参考 `dsh-restart-now`：侧栏底部按钮 + 设置页一行 + 斜杠命令 `/restart-host`（`/restart` 已被占用时不抢），确认弹窗提供「等空闲 / 立即重启 / 取消」。`supervised` 或 `allowRestart: false` 时隐藏入口。重启后页面每 2s 探测 `GET /`，端口没变（cookie 仍在）就自动 reload；端口变了则提示「已在 <新端口> 重启，打开 <url>」。
+0.6.2 起重启入口只在工作区页签：Web Host 页签右键给「等空闲后重启」「立即重启」两项，Guest 页面没有任何重启按钮。入口细节见 [页签右键重启](/Users/okarinhuang/dsh-workspace/dsh-workspace-shell/docs/tab-restart-menu-design.md)。
+
+Guest 页面保留的是执行与状态：收到页签命令后查 `/api/workspace-host/status`，`supervised` 或 `allowRestart: false` 时直接返回错误码；否则 `POST /api/workspace-host/restart`，成功后显示「正在重启」覆盖层并每 2s 探测 `GET /`，端口没变（cookie 仍在）就自动 reload。
+
+0.6.1 及更早版本用侧栏底部按钮和设置页一行作为入口，并弹确认层；那两处入口在 0.6.2 删除。
 
 ## 9. 安全
 
@@ -155,7 +159,7 @@
 | `packages/guest/src/host/host-restart.js` | 端口改写、回执、助手脚本、派发与等待编排 |
 | `packages/guest/src/host/host-activity.js` | 活跃任务与安装锁探测 |
 | `packages/guest/session-host/index.js` | `/api/workspace-host/status`、`/api/workspace-host/restart` 两条路由 |
-| `packages/guest/src/restart-ui.js` | 侧栏底部按钮、设置行、确认层、重启后自动 reload |
+| `packages/guest/src/host-restart-control.js` | 页签命令通道、状态校验、「正在重启」覆盖层、重启后轮询与 reload |
 | `packages/shell/src/host/host-discovery.js` | 卡片校验、存活判定、同身份去重 |
 | `packages/shell/src/host/local-runtimes.js` | 注入 `DSH_WORKSPACE_HOST_KEY`、退出后等待新卡接管、发现行、`attachDiscovered` |
 | `packages/shell/src/host/routes.js` | `/web/attach-discovered` |

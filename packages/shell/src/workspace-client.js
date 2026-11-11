@@ -437,6 +437,20 @@ export function createWorkspaceClient(deps) {
     if (!await activate('local')) throw error('WORKSPACE_INPUT_GATE_FAILED');
     await Promise.all(tabs.getSnapshot().tabs.filter((tab) => tab.closable).map((tab) => close(tab.id)));
   }
+  // The Guest performs the restart on the Host's own origin: it keeps the port,
+  // reports busy work, and reloads the page once the Host is back. The Shell
+  // only owns the entry (the tab menu) and the transport to that Guest.
+  async function restartTab(tabId, mode) {
+    if (disposed) throw error('WORKSPACE_DISPOSED');
+    const tab = tabs.getSnapshot().tabs.find((item) => item.id === tabId);
+    if (!tab) throw error('TAB_NOT_FOUND');
+    if (tab.kind !== 'profile-ui' || tab.id === 'local') throw error('TAB_RESTART_UNSUPPORTED');
+    if (mode !== 'now' && mode !== 'wait') throw error('TAB_RESTART_INVALID_MODE');
+    const value = await tabs.invoke(tabId, 'restartHost', mode);
+    if (value?.ok === true) return true;
+    const code = typeof value?.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(value.code) ? value.code : 'HOST_RESTART_UNAVAILABLE';
+    throw Object.assign(new Error(code), { code });
+  }
   const offTabs = tabs.subscribe(() => {
     const snapshot = tabs.getSnapshot();
     let orderRemoved = false;
@@ -647,7 +661,22 @@ export function createWorkspaceClient(deps) {
     };
     options.signal?.addEventListener('abort', dispose, { once: true });
     if (options.signal?.aborted) void dispose();
-    return { dispose, setVisible(value) { shown = value === true; guest?.setVisible(shown); }, focus() { if (!closed && shown) guest?.focus(); }, resize() { guest?.resize(); } };
+    return {
+      dispose,
+      setVisible(value) { shown = value === true; guest?.setVisible(shown); },
+      focus() { if (!closed && shown) guest?.focus(); },
+      resize() { guest?.resize(); },
+      // The Guest owns the restart; the view only forwards the mode and
+      // normalizes a missing Guest or a torn-down transport to a safe code.
+      restartHost(mode) {
+        if (closed || !guest || typeof guest.restartHost !== 'function') return Promise.resolve({ ok: false, code: 'HOST_RESTART_UNAVAILABLE' });
+        try {
+          return Promise.resolve(guest.restartHost(mode)).catch(() => ({ ok: false, code: 'HOST_RESTART_UNAVAILABLE' }));
+        } catch {
+          return Promise.resolve({ ok: false, code: 'HOST_RESTART_UNAVAILABLE' });
+        }
+      },
+    };
   }
   if (canWeb) {
     registerProvider('local-web', { kind: 'profile-ui', open: webView });
@@ -1035,7 +1064,7 @@ export function createWorkspaceClient(deps) {
     const open = guestOpeners.get(key);
     return typeof open === 'function' ? open(sessionId) === true : false;
   }
-  return Object.freeze({ tabs, info, connections, sshExtension, registerSshExtension, sessionNavigationExtension, registerSessionNavigation, sessionTabs, openSessionHost, openSessionInTab, timing, canWeb, canTui, refresh, registerProvider, open, activate, setOverlay, close, closeViews, readDefaultCwd,
+  return Object.freeze({ tabs, info, connections, sshExtension, registerSshExtension, sessionNavigationExtension, registerSessionNavigation, sessionTabs, openSessionHost, openSessionInTab, timing, canWeb, canTui, refresh, registerProvider, open, activate, setOverlay, close, closeViews, readDefaultCwd, restartTab,
     appearance, appearanceColors, getTabAppearance, canCustomizeTab, setTabAppearance,
     openLauncher, launcherSource, readLauncherCwd, openLauncherWeb, openLauncherTui, moveTab,
     openWeb, openTui, getTabStatus, sshRequest, reportSsh, openSshWeb, closeSshViews, sshViewCounts,

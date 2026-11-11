@@ -100,6 +100,11 @@ function makeWorkspace(calls, options = {}) {
       return { started: true, upgrade: { phase: 'running', step: 'backup' } };
     },
     async refresh() { calls.push(['refresh']); },
+    async restartTab(id, mode) {
+      calls.push(['restartTab', id, mode]);
+      if (options.restartError) throw Object.assign(new Error('secret restart message'), { code: options.restartError });
+      return true;
+    },
     async setOverlay(value) { calls.push(['overlay', value]); if (options.overlayError) throw Object.assign(new Error('secret overlay message'), { code: options.overlayError }); return true; },
     getTabStatus(tab) { calls.push(['status', tab.id]); return options.statuses?.[tab.id] ?? null; },
     moveTab(id, index) { return tabs.move(id, index); },
@@ -990,12 +995,58 @@ test('launcher surfaces a Web-unavailable message when the Guest cannot be hoste
   assert.equal(app.root.findAllByProps({ 'data-launcher-action': 'open-web' }).length, 0);
 });
 
+test('only Web Host tabs expose the restart menu, and an item activates the tab before restarting', async (t) => {
+  const f = fixture({ workspace: true, workspaceOptions: { tabs: [remoteTab('web:alpha'), launcherTab] } });
+  const app = await mount(t, f.views.Frame, f.props, f.desktop);
+  const menu = () => app.root.findAll((node) => node.props?.['data-chrome-tab-menu'] !== undefined);
+  const context = (id) => ({ clientX: 12, clientY: 8, preventDefault() {}, stopPropagation() {} });
+  assert.equal(menu().length, 0);
+
+  await flushEffects(() => { findTab(app.root, 'web:alpha').props.onContextMenu(context('web:alpha')); });
+  assert.equal(menu().length, 1);
+  const labels = menu()[0].findAll((node) => node.props?.['data-menu-item'] !== undefined).map((node) => textOf(node.props.children));
+  assert.deepEqual(labels, ['等空闲后重启', '立即重启']);
+
+  const now = app.root.findAll((node) => node.props?.['data-menu-item'] === 'now')[0];
+  await flushEffects(() => { now.props.onClick({ stopPropagation() {}, preventDefault() {} }); });
+  assert.equal(menu().length, 0);
+  assert.ok(f.calls.some((call) => call[0] === 'activate' && call[1] === 'web:alpha'), 'the tab is selected before the command');
+  assert.ok(f.calls.some((call) => call[0] === 'restartTab' && call[1] === 'web:alpha' && call[2] === 'now'));
+
+  // Local is the Desktop itself and a launcher has no Host behind it.
+  await flushEffects(() => { findTab(app.root, 'local').props.onContextMenu(context('local')); });
+  assert.equal(menu().length, 0);
+  await flushEffects(() => { findTab(app.root, 'tab-launcher').props.onContextMenu(context('tab-launcher')); });
+  assert.equal(menu().length, 0);
+});
+
+test('restart menu items stay disabled until the tab is ready, and a refusal surfaces a friendly error', async (t) => {
+  const opening = Object.freeze({ ...remoteTab('web:beta'), phase: 'opening', identity: identity() });
+  const f = fixture({ workspace: true, workspaceOptions: { tabs: [opening], restartError: 'HOST_RESTART_BUSY' } });
+  const app = await mount(t, f.views.Frame, f.props, f.desktop);
+  await flushEffects(() => { findTab(app.root, 'web:beta').props.onContextMenu({ clientX: 12, clientY: 8, preventDefault() {}, stopPropagation() {} }); });
+  const items = app.root.findAll((node) => node.props?.['data-menu-item'] !== undefined);
+  assert.equal(items.length, 2);
+  assert.ok(items.every((node) => node.props.disabled === true));
+
+  // A ready tab reports the Host's refusal through the frame error slot.
+  await flushEffects(() => { f.workspace.tabStore.set({ activeId: 'web:beta', tabs: [localTab, Object.freeze({ ...opening, phase: 'ready', identity: identity() })] }); });
+  await flushEffects(() => { findTab(app.root, 'web:beta').props.onContextMenu({ clientX: 12, clientY: 8, preventDefault() {}, stopPropagation() {} }); });
+  const wait = app.root.findAll((node) => node.props?.['data-menu-item'] === 'wait')[0];
+  await flushEffects(() => { wait.props.onClick({ stopPropagation() {}, preventDefault() {} }); });
+  await flushEffects(() => {});
+  const rendered = jsonText(app.toJSON());
+  assert.ok(rendered.includes('HOST_RESTART_BUSY'), rendered);
+  assert.ok(rendered.includes('等空闲后重启'), rendered);
+});
+
 test('launcher busy state disables conflicting actions but keeps the source list usable', async (t) => {
   const pending = deferred();
   const f = fixture({ workspace: true, workspaceOptions: { tabs: [launcherTab], activeId: 'tab-launcher' } });
   const app = await mount(t, f.views.Frame, f.props, f.desktop);
   f.workspace.openLauncherWeb = (id) => { f.calls.push(['open-pending', id]); return pending.promise; };
-  const busy = flushEffects(() => app.root.findAllByProps({ 'data-launcher-action': 'open-web' })[0].props.onClick());
+  // Do not return the pending open from act(): the later assertions run before it settles.
+  const busy = flushEffects(() => { app.root.findAllByProps({ 'data-launcher-action': 'open-web' })[0].props.onClick(); });
   assert.equal(f.calls.some((call) => call[0] === 'open-pending'), true);
   await flushEffects(() => {});
   assert.equal(app.root.findAllByProps({ 'data-launcher-action': 'open-web' })[0].props.disabled, true);
@@ -1003,4 +1054,7 @@ test('launcher busy state disables conflicting actions but keeps the source list
   assert.equal(sources.every((node) => node.props.disabled !== true), true, 'viewing other sources stays possible');
   pending.resolve('tab-launcher');
   await busy;
+  // Settle the state update the resolved launcher schedules; a later mount
+  // otherwise overlaps this act() scope.
+  await flushEffects(() => {});
 });

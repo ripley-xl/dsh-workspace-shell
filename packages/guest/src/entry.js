@@ -12,13 +12,14 @@ export function createGuestPlugin(React, deps) {
       sessions?.apply(ctx);
       installGuestCwd(ctx, deps.window);
       installClipboardFallback(deps.window, deps.document);
-      const restart = createGuestRestart(React, { window: deps.window, document: deps.document });
+      // The framing Shell owns the restart entry (a workspace tab menu item);
+      // this page only answers its command and reloads once the Host is back.
+      const restart = createHostRestartControl({ window: deps.window, document: deps.document });
       try {
-        ctx.effect(() => () => restart.dispose(), 'workspace guest restart');
+        restart.apply(ctx);
       } catch {
         restart.dispose();
       }
-      restart.apply(ctx);
       const bridge = createGuestNotificationBridge({ window: deps.window, ctx });
       try {
         ctx.effect(() => () => bridge.dispose(), 'workspace guest notifications');

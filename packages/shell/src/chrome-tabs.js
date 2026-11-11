@@ -9,6 +9,7 @@ const DEFAULT_LABELS = Object.freeze({
   newTab: '新建工作区',
   close: '关闭页签',
   edit: '编辑页签名称与彩色标记',
+  tabMenu: '页签菜单',
   connected: '已连接',
   disconnected: '未连接',
   moved: '已移动：',
@@ -148,7 +149,7 @@ export function createChromeTabs(React, deps = {}) {
     const options = props ?? {};
     const {
       tabs, activeId, onSelect, onClose, onAdd, onMove, getStatus, getAppearance, canEdit, onEdit, ids,
-      idPrefix = 'chrome-tab', labels, dragRegion = true, className,
+      idPrefix = 'chrome-tab', labels, dragRegion = true, className, menu: menuConfig,
     } = options;
     const copy = normalizedLabels(labels);
     const list = Array.isArray(tabs) ? tabs : [];
@@ -158,6 +159,7 @@ export function createChromeTabs(React, deps = {}) {
 
     const [draggingId, setDraggingId] = useState(null);
     const [announcement, setAnnouncement] = useState('');
+    const [menu, setMenu] = useState(null);
     const mounted = useRef(false);
     const scrollerRef = useRef(null);
     const shells = useRef(new Map());
@@ -170,7 +172,10 @@ export function createChromeTabs(React, deps = {}) {
     const positions = useRef(new Map());
     const order = useRef('');
     const animations = useRef(new Map());
-    latest.current = { tabs: list, activeId, copy, onSelect, onClose, onAdd, onMove, getStatus, getAppearance, canEdit, onEdit, ids };
+    const menuRef = useRef(null);
+    const menuItems = useRef(new Map());
+    const menuFocus = useRef(null);
+    latest.current = { tabs: list, activeId, copy, onSelect, onClose, onAdd, onMove, getStatus, getAppearance, canEdit, onEdit, ids, menu: menuConfig };
 
     // A reorder is the only layout change that should animate. Comparing the id
     // sequence filters out selection, status refreshes and window resizes, which
@@ -671,6 +676,149 @@ export function createChromeTabs(React, deps = {}) {
       ];
     }
 
+    // A tab menu is supplied by the host: this component owns placement,
+    // keyboard movement and dismissal, never the meaning of an item.
+    function menuItemsFor(tab) {
+      const source = latest.current.menu;
+      if (!source || typeof source.items !== 'function') return [];
+      let value;
+      try { value = source.items(tab); } catch { return []; }
+      if (!Array.isArray(value)) return [];
+      const items = [];
+      for (const item of value) {
+        if (!item || typeof item.id !== 'string' || !item.id) continue;
+        if (typeof item.label !== 'string' || !item.label) continue;
+        items.push({ id: item.id, label: item.label, disabled: item.disabled === true });
+      }
+      return items;
+    }
+
+    function openTabMenu(tab, event) {
+      const items = menuItemsFor(tab);
+      if (!items.length) return;
+      event?.preventDefault?.();
+      event?.stopPropagation?.();
+      const rect = measureRect(shells.current.get(tab.id));
+      const x = coordinate(event?.clientX) || (rect ? rect.left + 12 : 0);
+      const y = coordinate(event?.clientY) || (rect ? rect.bottom : 0);
+      menuFocus.current = bodies.current.get(tab.id) ?? shells.current.get(tab.id) ?? null;
+      if (!mounted.current) return;
+      const index = items.findIndex((item) => !item.disabled);
+      setMenu({ tabId: tab.id, x, y, items, index: index < 0 ? 0 : index });
+    }
+
+    function closeTabMenu(restoreFocus) {
+      if (mounted.current) setMenu(null);
+      if (!restoreFocus) return;
+      const target = menuFocus.current;
+      try { target?.focus?.({ preventScroll: true }); } catch { /* Focus restoration is best effort. */ }
+    }
+
+    function chooseMenuItem(item) {
+      const current = menu;
+      if (!current || !item || item.disabled) return;
+      const tabId = current.tabId;
+      closeTabMenu(false);
+      try { latest.current.menu?.onSelect?.(tabId, item.id); } catch { /* The host reports its own failures. */ }
+    }
+
+    function moveMenuIndex(step) {
+      if (!menu) return;
+      const count = menu.items.length;
+      let index = menu.index;
+      for (let attempt = 0; attempt < count; attempt += 1) {
+        index = (index + step + count) % count;
+        if (!menu.items[index].disabled) {
+          setMenu({ ...menu, index });
+          return;
+        }
+      }
+    }
+
+    function onMenuKeyDown(event) {
+      if (!menu) return;
+      const key = event?.key;
+      if (key === 'Escape') {
+        event?.preventDefault?.();
+        event?.stopPropagation?.();
+        closeTabMenu(true);
+        return;
+      }
+      if (key === 'ArrowDown' || key === 'ArrowUp') {
+        event?.preventDefault?.();
+        event?.stopPropagation?.();
+        moveMenuIndex(key === 'ArrowDown' ? 1 : -1);
+        return;
+      }
+      if (key === 'Home' || key === 'End') {
+        event?.preventDefault?.();
+        event?.stopPropagation?.();
+        const enabled = menu.items.map((item, index) => (item.disabled ? -1 : index)).filter((index) => index >= 0);
+        const next = key === 'Home' ? enabled[0] : enabled[enabled.length - 1];
+        if (next !== undefined) setMenu({ ...menu, index: next });
+        return;
+      }
+      if (key === 'Enter' || key === ' ') {
+        event?.preventDefault?.();
+        event?.stopPropagation?.();
+        chooseMenuItem(menu.items[menu.index]);
+        return;
+      }
+      if (key === 'Tab') {
+        event?.preventDefault?.();
+        closeTabMenu(true);
+      }
+    }
+
+    // The menu is placed once, then clamped to the window and focused on the
+    // active item. Later index changes only move focus.
+    useLayout(() => {
+      if (!menu) return;
+      const node = menuRef.current;
+      const rect = measureRect(node);
+      const winW = coordinate(win?.innerWidth);
+      const winH = coordinate(win?.innerHeight);
+      let left = menu.x;
+      let top = menu.y;
+      if (rect) {
+        if (winW > 0 && left + rect.width > winW - 4) left = Math.max(4, winW - rect.width - 4);
+        if (winH > 0 && top + rect.height > winH - 4) top = Math.max(4, winH - rect.height - 4);
+        if (node?.style) {
+          node.style.left = left + 'px';
+          node.style.top = top + 'px';
+        }
+      }
+      const target = menuItems.current.get(menu.index);
+      try { target?.focus?.({ preventScroll: true }); } catch { /* Keyboard users can still tab in. */ }
+    }, [menu]);
+
+    useEffect(() => {
+      if (!menu) return undefined;
+      const onPointer = (event) => {
+        const node = menuRef.current;
+        const target = event?.target;
+        if (node && target && typeof node.contains === 'function' && node.contains(target)) return;
+        closeTabMenu(false);
+      };
+      const dismiss = () => closeTabMenu(false);
+      try { doc?.addEventListener?.('pointerdown', onPointer, true); } catch { /* Without a document the menu closes on selection only. */ }
+      try { win?.addEventListener?.('resize', dismiss); } catch { /* Best effort. */ }
+      try { win?.addEventListener?.('blur', dismiss); } catch { /* Best effort. */ }
+      try { doc?.addEventListener?.('scroll', dismiss, true); } catch { /* Best effort. */ }
+      return () => {
+        try { doc?.removeEventListener?.('pointerdown', onPointer, true); } catch { /* Best effort. */ }
+        try { win?.removeEventListener?.('resize', dismiss); } catch { /* Best effort. */ }
+        try { win?.removeEventListener?.('blur', dismiss); } catch { /* Best effort. */ }
+        try { doc?.removeEventListener?.('scroll', dismiss, true); } catch { /* Best effort. */ }
+      };
+    }, [menu]);
+
+    // A menu for a tab that has just been closed is stale.
+    useEffect(() => {
+      if (!menu) return;
+      if (!list.some((tab) => tab.id === menu.tabId)) setMenu(null);
+    }, [menu, list]);
+
     function renderTab(tab) {
       const selected = tab.id === activeId;
       const tabbable = tab.id === tabbableId;
@@ -705,6 +853,7 @@ export function createChromeTabs(React, deps = {}) {
         onPointerDown: (event) => onPointerDown(tab, event),
         onLostPointerCapture: (event) => onLostPointerCapture(event),
         onClick: (event) => onTabClick(tab, event),
+        onContextMenu: (event) => openTabMenu(tab, event),
         onDoubleClick: (event) => {
           if (!editable || suppressClick.current) return;
           if (isControlNode(event?.target)) return;
@@ -794,6 +943,43 @@ export function createChromeTabs(React, deps = {}) {
     }
 
     const ghost = renderGhost();
+    const menuView = menu ? h('div', {
+      key: 'menu',
+      className: 'ct-menu',
+      role: 'menu',
+      'aria-label': copy.tabMenu,
+      'data-chrome-tab-menu': '',
+      'data-menu-tab': String(menu.tabId),
+      ref: menuRef,
+      style: { left: `${menu.x}px`, top: `${menu.y}px`, WebkitAppRegion: 'no-drag' },
+      onKeyDown: onMenuKeyDown,
+      onPointerDown: (event) => event?.stopPropagation?.(),
+      onContextMenu: (event) => event?.preventDefault?.(),
+    }, menu.items.map((item, index) => h('button', {
+      key: item.id,
+      type: 'button',
+      role: 'menuitem',
+      className: 'ct-menu-item',
+      'data-menu-item': item.id,
+      'data-menu-index': String(index),
+      'aria-disabled': item.disabled ? 'true' : undefined,
+      disabled: item.disabled === true,
+      tabIndex: index === menu.index ? 0 : -1,
+      ref: (node) => {
+        if (node) menuItems.current.set(index, node);
+        else menuItems.current.delete(index);
+      },
+      onMouseEnter: () => {
+        if (item.disabled || !menu) return;
+        if (menu.index === index) return;
+        setMenu((value) => (value ? { ...value, index } : value));
+      },
+      onClick: (event) => {
+        event?.stopPropagation?.();
+        event?.preventDefault?.();
+        chooseMenuItem(item);
+      },
+    }, item.label))) : null;
     return h('div', {
       className: typeof className === 'string' && className.trim() ? `ct-root ${className.trim()}` : 'ct-root',
       'data-chrome-tabs': '',
@@ -815,6 +1001,7 @@ export function createChromeTabs(React, deps = {}) {
       onLostPointerCapture,
     }, list.map(renderTab)),
     ghost,
+    menuView,
     typeof onAdd === 'function' ? h('button', {
       type: 'button',
       className: 'ct-add',
@@ -871,6 +1058,7 @@ export const css = [
   '--ct-veil:color-mix(in srgb, var(--ct-fg) 14%, transparent);',
   '--ct-ghost-bg:var(--ct-tab-active-bg);',
   '--ct-ghost-shadow:var(--dsw-shadow-lv2, 0 12px 28px color-mix(in srgb, var(--ct-fg) 18%, transparent));',
+  '--ct-menu-bg:var(--dsw-alias-bg-elevated, var(--ct-tab-active-bg));',
   'box-sizing:border-box;display:flex;align-items:stretch;gap:2px;height:var(--ct-height);min-width:0;max-width:100%;padding:0 var(--ct-inline-padding);background:var(--ct-bar-bg);color:var(--ct-fg-muted);font-family:inherit;font-size:var(--ct-font-size);line-height:1;user-select:none;-webkit-user-select:none;position:relative;',
   '}',
   '.ct-tabs{display:flex;align-items:flex-end;gap:var(--ct-gap);flex:0 1 auto;min-width:0;height:100%;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;overscroll-behavior-x:contain;touch-action:pan-x;-webkit-app-region:no-drag}',
@@ -909,6 +1097,11 @@ export const css = [
   '.ct-add:hover{background:var(--ct-hover-bg);color:var(--ct-fg)}',
   '.ct-add:active{background:var(--ct-press-bg)}',
   '.ct-add:focus-visible{outline:var(--ct-focus-width) solid var(--ct-focus-ring);outline-offset:0}',
+  '.ct-menu{position:fixed;z-index:60;display:flex;flex-direction:column;min-width:168px;max-width:280px;padding:4px;box-sizing:border-box;border-radius:var(--ct-radius);background:var(--ct-menu-bg);color:var(--ct-fg);box-shadow:var(--ct-ghost-shadow),0 0 0 1px var(--ct-veil);font-family:inherit;font-size:var(--ct-font-size);line-height:1.4;-webkit-app-region:no-drag}',
+  '.ct-menu-item{display:block;width:100%;box-sizing:border-box;padding:6px 10px;border:0;border-radius:var(--ct-radius-sm);background:transparent;color:inherit;font:inherit;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}',
+  '.ct-menu-item:hover:not(:disabled),.ct-menu-item:focus:not(:disabled){background:var(--ct-hover-bg);color:var(--ct-fg);outline:none}',
+  '.ct-menu-item:active:not(:disabled){background:var(--ct-press-bg)}',
+  '.ct-menu-item:disabled{opacity:.45;cursor:default}',
   '.ct-blank{flex:1 1 auto;min-width:8px;align-self:stretch;-webkit-app-region:drag}',
   '.ct-sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}',
   '@keyframes ct-ghost-in{from{opacity:0}to{opacity:1}}',

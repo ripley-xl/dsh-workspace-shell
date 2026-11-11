@@ -196,6 +196,7 @@ return {
       registerSessionNavigation: workspace.registerSessionNavigation,
       sessionTabs: workspace.sessionTabs, openSessionHost: workspace.openSessionHost,
       close: workspace.close, retry: workspace.retry, move: workspace.moveTab, openLauncher: workspace.openLauncher,
+      restartTab: workspace.restartTab,
     }));
     const views = createFrameViews(React, {
       solveFrame, createPointerResize, css: shellCss, classes, ctx, document, window, workspace, workspaceSelection,

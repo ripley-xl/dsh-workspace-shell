@@ -99,8 +99,9 @@ const harness = (t, options = {}) => {
     let startPromise;
     let disposal;
     let lease;
-    const guest = resource({ input, closed: false, starts: 0, opened: [],
+    const guest = resource({ input, closed: false, starts: 0, opened: [], restarts: [],
       openSession(sessionId) { this.opened.push(sessionId); return !this.closed; },
+      restartHost(mode) { this.restarts.push(mode); return Promise.resolve({ ok: true }); },
       ...(options.readWebCwd ? { cwdReads: 0, getWorkingDirectory() { this.cwdReads++; return options.readWebCwd(guest); } } : {}),
       start() {
         if (!startPromise) {
@@ -1988,4 +1989,94 @@ test('stopping one SSH Host closes only views attached to that instance', async 
   assert.ok(tab(h.client, second));
   assert.ok(tab(h.client, other));
   assert.deepEqual(h.client.sshViewCounts(), { 'c1:work': 1, 'c2:web': 1 });
+});
+
+test('restartTab rejects unknown tabs, Local, non-Web tabs, and invalid modes before invoking a Guest', async (t) => {
+  const h = await loaded(t);
+  h.autoSurfaces();
+  const extension = generic(h, 'custom');
+  const browser = await extension.open('a');
+  const launcher = await h.client.openLauncher();
+  await assert.rejects(h.client.restartTab('missing', 'now'), { code: 'TAB_NOT_FOUND' });
+  await assert.rejects(h.client.restartTab('local', 'now'), { code: 'TAB_RESTART_UNSUPPORTED' });
+  await assert.rejects(h.client.restartTab(browser, 'now'), { code: 'TAB_RESTART_UNSUPPORTED' });
+  await assert.rejects(h.client.restartTab(launcher, 'now'), { code: 'TAB_RESTART_UNSUPPORTED' });
+  const web = await openWeb(h, 'alpha');
+  for (const mode of [undefined, null, 'later', 'NOW', '', 42]) {
+    await assert.rejects(h.client.restartTab(web, mode), { code: 'TAB_RESTART_INVALID_MODE' }, String(mode));
+  }
+});
+
+test('restartTab forwards the mode to the mounted Web Guest and resolves true on its ok outcome', async (t) => {
+  const h = await loaded(t);
+  h.autoSurfaces();
+  const extension = generic(h, 'restart-web', 'profile-ui', () => resource({
+    restarts: [],
+    restartHost(mode) { this.restarts.push({ self: this, mode }); return Promise.resolve({ ok: true }); },
+  }));
+  const id = await extension.open('a');
+  const record = tab(h.client, id);
+  const handle = extension.calls[0].value;
+  assert.equal(await h.client.restartTab(id, 'now'), true);
+  assert.equal(await h.client.restartTab(id, 'wait'), true);
+  assert.deepEqual(handle.restarts.map((call) => call.mode), ['now', 'wait']);
+  assert.ok(handle.restarts.every((call) => call.self === handle), 'the Guest handle is the receiver');
+  assert.equal(record.kind, 'profile-ui');
+});
+
+test('restartTab surfaces the Guest safe code, and an absent or unsafe code as HOST_RESTART_UNAVAILABLE', async (t) => {
+  const h = await loaded(t);
+  h.autoSurfaces();
+  const extension = generic(h, 'restart-web', 'profile-ui');
+  const id = await extension.open('a');
+  const handle = extension.calls[0].value;
+  handle.restartHost = () => Promise.resolve({ ok: false, code: 'HOST_RESTART_SUPERVISED' });
+  await assert.rejects(h.client.restartTab(id, 'now'), { code: 'HOST_RESTART_SUPERVISED' });
+  for (const outcome of [{ ok: false, code: 'HOST_RESTART_BUSY' }, { ok: false, code: 'HOST_RESTART_IN_PROGRESS' }]) {
+    handle.restartHost = () => Promise.resolve(outcome);
+    await assert.rejects(h.client.restartTab(id, 'wait'), { code: outcome.code });
+  }
+  handle.restartHost = () => Promise.resolve({ ok: false });
+  await assert.rejects(h.client.restartTab(id, 'now'), { code: 'HOST_RESTART_UNAVAILABLE' });
+  for (const code of ['not a code', 'lowercase', 'CODE-WITH-DASH', 'x'.repeat(70), 42]) {
+    handle.restartHost = () => Promise.resolve({ ok: false, code });
+    await assert.rejects(h.client.restartTab(id, 'now'), { code: 'HOST_RESTART_UNAVAILABLE' }, JSON.stringify(code));
+  }
+  handle.restartHost = () => Promise.resolve(null);
+  await assert.rejects(h.client.restartTab(id, 'now'), { code: 'HOST_RESTART_UNAVAILABLE' });
+  handle.restartHost = () => Promise.resolve({ ok: 'yes' });
+  await assert.rejects(h.client.restartTab(id, 'now'), { code: 'HOST_RESTART_UNAVAILABLE' });
+});
+
+test('restartTab propagates an unready Guest and a transport rejection instead of guessing success', async (t) => {
+  const h = await loaded(t);
+  const extension = generic(h, 'restart-web', 'profile-ui');
+  const id = await extension.open('a');
+  // Without a mounted surface the controller has no run handle.
+  await assert.rejects(h.client.restartTab(id, 'now'), { code: 'TAB_NOT_READY' });
+  h.autoSurfaces();
+  const handle = extension.calls[0].value;
+  handle.restartHost = () => Promise.reject(Object.assign(new Error('private transport failure'), { code: 'TAB_FAILED' }));
+  await assert.rejects(h.client.restartTab(id, 'now'), (error) => {
+    assert.equal(error.code, 'TAB_FAILED');
+    assert.equal(error.message, 'private transport failure', 'the transport error is propagated unchanged');
+    return true;
+  });
+});
+
+test('the real Web view forwards a tab restart to its Guest and normalizes a missing or failing Guest', async (t) => {
+  const h = await loaded(t);
+  h.autoSurfaces();
+  const id = await openWeb(h, 'alpha');
+  const guest = h.guests.at(-1);
+  assert.equal(await h.client.restartTab(id, 'now'), true);
+  assert.equal(await h.client.restartTab(id, 'wait'), true);
+  assert.deepEqual(guest.restarts, ['now', 'wait']);
+
+  // An older Guest without the entry point, or a transport that rejects, must
+  // read as "unavailable" rather than a silent success.
+  delete guest.restartHost;
+  await assert.rejects(h.client.restartTab(id, 'now'), { code: 'HOST_RESTART_UNAVAILABLE' });
+  guest.restartHost = () => Promise.reject(new Error('transport gone'));
+  await assert.rejects(h.client.restartTab(id, 'now'), { code: 'HOST_RESTART_UNAVAILABLE' });
 });

@@ -46,6 +46,8 @@ function createEnvironment(options = {}) {
   };
 
   const window = {
+    innerWidth: options.innerWidth ?? 1024,
+    innerHeight: options.innerHeight ?? 768,
     requestAnimationFrame(callback) {
       const id = ++frameId;
       frames.push({ id, callback });
@@ -150,10 +152,45 @@ function createEnvironment(options = {}) {
     return node;
   }
 
+  // The tab menu is a host element: its node supplies placement bounds,
+  // outside-click containment and item focus.
+  const menuFocusCalls = [];
+  const itemNodes = new Map();
+  const menuNode = {
+    tagName: 'DIV',
+    style: {},
+    contains(target) {
+      return target?.insideMenu === true;
+    },
+    getBoundingClientRect() {
+      return options.menuRect ?? { left: 0, top: 0, width: 180, height: 80 };
+    },
+  };
+
+  function itemNode(index) {
+    const key = String(index);
+    if (itemNodes.has(key)) return itemNodes.get(key);
+    const node = {
+      tagName: 'BUTTON',
+      style: {},
+      attributes: new Map(),
+      focus(options_) {
+        menuFocusCalls.push([index, options_]);
+      },
+      getAttribute(name) {
+        return this.attributes.get(name) ?? null;
+      },
+    };
+    itemNodes.set(key, node);
+    return node;
+  }
+
   function createNodeMock(element) {
     const props = element?.props ?? {};
     if (props['data-chrome-tabs'] !== undefined) return root;
     if (props['data-chrome-tablist'] !== undefined) return scroller;
+    if (props['data-chrome-tab-menu'] !== undefined) return menuNode;
+    if (props['data-menu-item'] !== undefined) return itemNode(Number(props['data-menu-index']));
     const ghostId = props['data-chrome-tab-ghost'];
     if (ghostId !== undefined) return ghostNode(String(ghostId));
     const bodyId = props['data-chrome-tab-body'];
@@ -173,6 +210,7 @@ function createEnvironment(options = {}) {
   return {
     document, window, mirror, scroller, root, createNodeMock, captureCalls, releaseCalls, focusCalls,
     frames, cancelledFrames, animations, ghosts, runFrames, shellNode, ghostNode, bodyNode,
+    menuNode, itemNode, menuFocusCalls,
     pendingFrames: () => frames.length,
   };
 }
@@ -1106,4 +1144,148 @@ test('a renderer without Element.animate still mounts the copy and reorders', as
   assert.deepEqual(fixture.env.mirror.tabs.map((tab) => tab.id), ['a', 'c', 'b']);
   assert.equal(fixture.env.animations.length, 0);
   await fixture.pointerUp(pointerEvent({ clientX: 210, pointerId: 7 }));
+});
+
+// ---------------------------------------------------------------------------
+// Tab context menu
+// ---------------------------------------------------------------------------
+
+function menuFixtureOptions(overrides = {}) {
+  const calls = [];
+  const items = overrides.items ?? ((tab) => (tab.id === 'a' ? [
+    { id: 'wait', label: '等空闲后重启' },
+    { id: 'now', label: '立即重启' },
+  ] : []));
+  return {
+    calls,
+    stripProps: {
+      menu: {
+        items,
+        onSelect: (tabId, itemId) => calls.push([tabId, itemId]),
+      },
+    },
+  };
+}
+
+test('right-clicking a tab with menu items opens the supplied menu and keeps the native one closed', async (t) => {
+  const a = { id: 'a', identity: {}, kind: 'profile-ui', title: 'A', closable: true };
+  const b = { id: 'b', identity: {}, kind: 'profile-ui', title: 'B', closable: true };
+  const options = menuFixtureOptions();
+  const fixture = await setup(t, [a, b], { activeId: 'a', ...options });
+  const menu = () => fixture.root.findAll((node) => node.props['data-chrome-tab-menu'] !== undefined);
+  assert.equal(menu().length, 0);
+
+  const event = pointerEvent({ clientX: 120, clientY: 8 });
+  await fixture.fire(fixture.shell('a').props.onContextMenu, event);
+  assert.equal(event.prevented, 1);
+  assert.equal(event.stopped, 1);
+  assert.equal(menu().length, 1);
+  assert.equal(menu()[0].props['data-menu-tab'], 'a');
+  assert.equal(menu()[0].props.role, 'menu');
+  assert.deepEqual(
+    menu()[0].findAll((node) => node.props['data-menu-item'] !== undefined).map((node) => renderedText(node)),
+    ['等空闲后重启', '立即重启'],
+  );
+
+  // A tab without items keeps the native context menu and the open menu.
+  const native = pointerEvent({ clientX: 320, clientY: 8 });
+  await fixture.fire(fixture.shell('b').props.onContextMenu, native);
+  assert.equal(native.prevented, 0);
+  assert.equal(menu()[0].props['data-menu-tab'], 'a');
+  await fixture.app.unmount();
+});
+
+test('choosing a menu item closes the menu and reports the tab and item id', async (t) => {
+  const a = { id: 'a', identity: {}, kind: 'profile-ui', title: 'A', closable: true };
+  const options = menuFixtureOptions();
+  const fixture = await setup(t, [a], { activeId: 'a', ...options });
+  await fixture.fire(fixture.shell('a').props.onContextMenu, pointerEvent({ clientX: 20, clientY: 8 }));
+  const menu = () => fixture.root.findAll((node) => node.props['data-chrome-tab-menu'] !== undefined);
+  assert.equal(menu().length, 1);
+  const item = fixture.root.findAll((node) => node.props['data-menu-item'] === 'now')[0];
+  await fixture.fire(item.props.onClick, pointerEvent({}));
+  assert.deepEqual(options.calls, [['a', 'now']]);
+  assert.equal(menu().length, 0);
+  await fixture.app.unmount();
+});
+
+test('disabled menu items are skipped by focus and cannot be chosen', async (t) => {
+  const a = { id: 'a', identity: {}, kind: 'profile-ui', title: 'A', closable: true };
+  const options = menuFixtureOptions({
+    items: () => [
+      { id: 'wait', label: '等空闲后重启', disabled: true },
+      { id: 'now', label: '立即重启' },
+    ],
+  });
+  const fixture = await setup(t, [a], { activeId: 'a', ...options });
+  await fixture.fire(fixture.shell('a').props.onContextMenu, pointerEvent({ clientX: 20, clientY: 8 }));
+  const wait = fixture.root.findAll((node) => node.props['data-menu-item'] === 'wait')[0];
+  const now = fixture.root.findAll((node) => node.props['data-menu-item'] === 'now')[0];
+  assert.equal(wait.props.disabled, true);
+  assert.equal(wait.props['aria-disabled'], 'true');
+  assert.equal(wait.props.tabIndex, -1);
+  assert.equal(now.props.tabIndex, 0);
+  assert.deepEqual(fixture.env.menuFocusCalls[0], [1, { preventScroll: true }]);
+  await fixture.fire(wait.props.onClick, pointerEvent({}));
+  assert.deepEqual(options.calls, []);
+  assert.equal(fixture.root.findAll((node) => node.props['data-chrome-tab-menu'] !== undefined).length, 1);
+  await fixture.app.unmount();
+});
+
+test('arrow keys move between enabled items and Escape restores tab focus', async (t) => {
+  const a = { id: 'a', identity: {}, kind: 'profile-ui', title: 'A', closable: true };
+  const options = menuFixtureOptions();
+  const fixture = await setup(t, [a], { activeId: 'a', ...options });
+  const menuNode = () => fixture.root.findAll((node) => node.props['data-chrome-tab-menu'] !== undefined)[0];
+  await fixture.fire(fixture.shell('a').props.onContextMenu, pointerEvent({ clientX: 20, clientY: 8 }));
+  const item = (id) => fixture.root.findAll((node) => node.props['data-menu-item'] === id)[0];
+  assert.equal(item('wait').props.tabIndex, 0);
+
+  await fixture.fire(menuNode().props.onKeyDown, keyEvent({ key: 'ArrowDown' }));
+  assert.equal(item('wait').props.tabIndex, -1);
+  assert.equal(item('now').props.tabIndex, 0);
+  await fixture.fire(menuNode().props.onKeyDown, keyEvent({ key: 'ArrowUp' }));
+  assert.equal(item('wait').props.tabIndex, 0);
+
+  await fixture.fire(menuNode().props.onKeyDown, keyEvent({ key: 'Enter' }));
+  assert.deepEqual(options.calls, [['a', 'wait']]);
+  assert.equal(fixture.root.findAll((node) => node.props['data-chrome-tab-menu'] !== undefined).length, 0);
+
+  await fixture.fire(fixture.shell('a').props.onContextMenu, pointerEvent({ clientX: 20, clientY: 8 }));
+  const escape = keyEvent({ key: 'Escape' });
+  await fixture.fire(menuNode().props.onKeyDown, escape);
+  assert.equal(escape.prevented, 1);
+  assert.equal(fixture.root.findAll((node) => node.props['data-chrome-tab-menu'] !== undefined).length, 0);
+  assert.deepEqual(fixture.env.focusCalls.at(-1), ['a', { preventScroll: true }]);
+  await fixture.app.unmount();
+});
+
+test('a pointer outside the menu closes it without selecting; an inside pointer keeps it', async (t) => {
+  const a = { id: 'a', identity: {}, kind: 'profile-ui', title: 'A', closable: true };
+  const options = menuFixtureOptions();
+  const fixture = await setup(t, [a], { activeId: 'a', ...options });
+  const menu = () => fixture.root.findAll((node) => node.props['data-chrome-tab-menu'] !== undefined);
+  await fixture.fire(fixture.shell('a').props.onContextMenu, pointerEvent({ clientX: 20, clientY: 8 }));
+  await act(async () => { fixture.env.document.emit('pointerdown', { target: { insideMenu: true } }); });
+  assert.equal(menu().length, 1);
+  await act(async () => { fixture.env.document.emit('pointerdown', { target: {} }); });
+  assert.equal(menu().length, 0);
+  assert.deepEqual(options.calls, []);
+  await fixture.app.unmount();
+});
+
+test('the menu is clamped inside the window and closes when its tab is removed', async (t) => {
+  const a = { id: 'a', identity: {}, kind: 'profile-ui', title: 'A', closable: true };
+  const b = { id: 'b', identity: {}, kind: 'profile-ui', title: 'B', closable: true };
+  const options = menuFixtureOptions();
+  const fixture = await setup(t, [a, b], {
+    activeId: 'a', innerWidth: 800, innerHeight: 600,
+    menuRect: { left: 0, top: 0, width: 180, height: 80 }, ...options,
+  });
+  await fixture.fire(fixture.shell('a').props.onContextMenu, pointerEvent({ clientX: 760, clientY: 560 }));
+  assert.equal(fixture.env.menuNode.style.left, '616px');
+  assert.equal(fixture.env.menuNode.style.top, '516px');
+  await fixture.removeTab('a');
+  assert.equal(fixture.root.findAll((node) => node.props['data-chrome-tab-menu'] !== undefined).length, 0);
+  await fixture.app.unmount();
 });

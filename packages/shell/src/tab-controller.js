@@ -340,6 +340,19 @@ export function createTabController(state, lifecycle = {}) {
       const run = entries.get(id)?.current;
       return !!run && current(run) && !!run.handle && call(run.handle, 'resize');
     },
+    // One Host-scoped command on the mounted view. The provider handle owns the
+    // transport; this only proves the same run is still installed, so a caller
+    // that outlived a retry or a close cannot reach the replacement Guest.
+    async invoke(id, method, ...args) {
+      const run = entries.get(id)?.current;
+      if (disposed || !run || !current(run) || !run.handle) throw error('TAB_NOT_READY');
+      let target;
+      try { target = typeof method === 'string' ? run.handle[method] : undefined; } catch { target = undefined; }
+      if (typeof target !== 'function') throw error('TAB_UNSUPPORTED');
+      const value = await target.call(run.handle, ...args);
+      if (!current(run)) throw error('TAB_NOT_READY');
+      return value;
+    },
     dispose() {
       if (disposal) return disposal;
       let done;

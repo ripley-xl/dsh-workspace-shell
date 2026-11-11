@@ -185,6 +185,8 @@ Desktop 的 Shell 会直接 `import 'dsh-workspace-guest/session-host'`（为了
 | `index.js` → `applyHostLifecycle` | 只有 guest Web Host |
 | `client.js`（客户端入口 UI） | 只有 guest Web Host 的页面 |
 
+Desktop profile **不要**把 `dsh-workspace-guest` 列为直接依赖。Shell 的 `package.json` 已经声明它，profile 的 `nodeLinker: hoisted` 会把它放到 `node_modules` 根，Shell 的 `require.resolve('dsh-workspace-guest/package.json')` 照样解析得到；profile 里再声明一次只会多一个版本来源，还可能被 `pnpm-workspace.yaml` 的 `overrides` 钉在旧版本上。2026-11-11 已从 `desktop` profile 移除这条直接依赖和对应 override。
+
 把 guest 作为 **bundle** 启用到 `desktop` profile 会造成 `workspaceSessionHosts` 重复 `provide`，宿主直接崩（实测过一次）。guest 包可以以依赖形式存在于 desktop（Shell 用它解析 `cordis.patch.yml` 路径，给 Shell 启动的本机 Web Host 兜底注入），但**绝不能进 `dsh.profile.bundles`**。
 
 `applyHostLifecycle` 里的 `profileContext.name === 'desktop'` 判断是兜底，不是设计：正确拓扑下 Desktop 根本不会加载这段代码。
